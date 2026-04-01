@@ -66,8 +66,8 @@ def reindex(space_id: str | None = None) -> dict:
             current_ids.add(oid)
             stats["objects_checked"] += 1
 
-            last_mod = _get_last_modified(obj_summary)
-            if last_mod and space_state.get(oid) == last_mod:
+            last_mod = _get_last_modified(obj_summary) or "unknown"
+            if space_state.get(oid) == last_mod:
                 continue  # unchanged
 
             # Fetch full object with markdown
