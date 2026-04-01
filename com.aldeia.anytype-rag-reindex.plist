@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aldeia.anytype-rag-reindex</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jan/.local/share/uv/tools/anytype-rag/bin/python3</string>
+        <string>-c</string>
+        <string>from anytype_rag.indexer import reindex; reindex()</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ANYTYPE_API_KEY</key>
+        <string>Z+1U9np/9XVhJGih+UeDOX1kDdmXP6MjLmWodsjK/JY=</string>
+        <key>QDRANT_API_KEY</key>
+        <string>F0YhATOh9ECk5Sg1XGAYldLOxIExCAamhyLLMu8sSwM=</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/jan/Library/Logs/anytype-rag/reindex.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jan/Library/Logs/anytype-rag/reindex.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
