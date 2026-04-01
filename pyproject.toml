@@ -1,0 +1,23 @@
+[project]
+name = "anytype-rag"
+version = "0.1.0"
+description = "Semantic search MCP server for Anytype (Qdrant + Ollama/bge-m3)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Jan Hendrik Scheufen", email = "j.h.scheufen@gmail.com" }]
+dependencies = [
+    "fastmcp>=2.0.0",
+    "httpx>=0.27.0",
+    "qdrant-client>=1.12.0",
+]
+
+[project.scripts]
+anytype-rag = "anytype_rag.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anytype_rag"]
