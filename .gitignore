@@ -4,3 +4,8 @@ __pycache__/
 dist/
 build/
 .env
+
+# SDLC agent signal files (abs-phase-complete, abs-pr-ready, abs-escalation).
+# Written by pipeline leads to their work folder; consumed by the watcher.
+# Content is a runtime signal, never a durable artefact.
+abs-*
