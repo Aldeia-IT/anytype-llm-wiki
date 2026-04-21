@@ -31,10 +31,10 @@ Anytype REST API (port 31012)
 ## Project Structure
 
 ```
-anytype-rag/
+anytype-llm-wiki/
 ├── pyproject.toml
 ├── src/
-│   └── anytype_rag/
+│   └── anytype_llm_wiki/
 │       ├── __init__.py
 │       ├── server.py           # MCP server entry point + tools
 │       ├── anytype_client.py   # Anytype REST API client
@@ -58,7 +58,7 @@ QDRANT_COLLECTION      — Collection name (default: anytype_semantic)
 OLLAMA_URL             — Ollama API endpoint (default: http://127.0.0.1:11434)
 EMBED_MODEL            — Embedding model name (default: bge-m3)
 EMBED_DIMS             — Vector dimensions (default: 1024)
-INDEX_STATE_FILE       — Path to index state JSON (default: ~/.local/share/anytype-rag/state.json)
+INDEX_STATE_FILE       — Path to index state JSON (default: ~/.local/share/anytype-llm-wiki/state.json)
 ```
 
 ## Infrastructure (Aldeia IT)
@@ -78,6 +78,6 @@ INDEX_STATE_FILE       — Path to index state JSON (default: ~/.local/share/any
 
 ## Deployment
 
-- Install: `uv tool install .` → `~/.local/bin/anytype-rag`
+- Install: `uv tool install .` → `~/.local/bin/anytype-llm-wiki`
 - MCP registration: add to `~/.claude.json` mcpServers
 - Auto-reindex: launchd plist on schedule (e.g., every 30 min)

@@ -1,4 +1,4 @@
-# Contributing to anytype-rag
+# Contributing to anytype-llm-wiki
 
 Thanks for your interest in contributing! This project is in early stages and we welcome help in many areas.
 
@@ -8,7 +8,7 @@ Thanks for your interest in contributing! This project is in early stages and we
 2. Install prerequisites: Anytype (desktop or CLI), Ollama (`ollama pull bge-m3`), Qdrant (`docker run -p 6333:6333 qdrant/qdrant`)
 3. Set up dev environment:
    ```bash
-   cd anytype-rag
+   cd anytype-llm-wiki
    uv sync --extra dev
    cp .env.example .env  # fill in your API keys
    ```
@@ -17,7 +17,7 @@ Thanks for your interest in contributing! This project is in early stages and we
 ## Project structure
 
 ```
-src/anytype_rag/
+src/anytype_llm_wiki/
 ├── server.py           # MCP server + tool definitions
 ├── config.py           # Environment variable config
 ├── anytype_client.py   # Anytype REST API client

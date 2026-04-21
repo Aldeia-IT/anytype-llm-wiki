@@ -2,7 +2,7 @@
 
 ## Identity
 
-- **Project:** anytype-rag
+- **Project:** anytype-llm-wiki
 - **Owner:** Jan Scheufen (Aldeia IT Consulting)
 - **Type:** Open-source tool / internal infrastructure
 - **Stage:** Greenfield

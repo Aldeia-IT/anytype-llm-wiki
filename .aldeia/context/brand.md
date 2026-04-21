@@ -2,7 +2,7 @@
 
 ## Name
 
-**anytype-rag** — Retrieval-Augmented Generation infrastructure for Anytype.
+**anytype-llm-wiki** — Retrieval-Augmented Generation infrastructure for Anytype.
 
 ## Tone
 

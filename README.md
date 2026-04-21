@@ -1,21 +1,23 @@
-# anytype-rag
+# anytype-llm-wiki
 
-**Retrieval-Augmented Generation for [Anytype](https://anytype.io) — give your AI assistant memory of everything in your vault.**
+**The first open-source LLM wiki that uses a typed knowledge-graph store — [Anytype](https://anytype.io)'s native Objects, Types, and Relations — instead of a filesystem of markdown files.**
+
+> **Status — April 2026.** This repo was previously named `anytype-rag` (semantic-search MCP server for Anytype). It is being extended into a full LLM wiki: typed ingest, entity/concept synthesis, bidirectional Relations, lint suite. See [Aldeia-IT/aldeia-box#140](https://github.com/Aldeia-IT/aldeia-box/issues/140) for the roadmap. The current v0.1.0 (semantic search only) is the foundation; the wiki pipeline lands in v0.2.0+.
 
 Anytype's built-in search only matches object titles and snippets. It doesn't search body content at all. This means your AI tools can't find information by *what it says* — only by what it's called.
 
-**anytype-rag** fixes this. It indexes your Anytype objects into a local vector database and exposes semantic search as an [MCP](https://modelcontextprotocol.io) tool. Your AI assistant can now search your notes, docs, and knowledge base by meaning.
+**anytype-llm-wiki** fixes this. It indexes your Anytype objects into a local vector database and exposes semantic search as an [MCP](https://modelcontextprotocol.io) tool. Your AI assistant can now search your notes, docs, and knowledge base by meaning.
 
 ```
 You: "What did we decide about the council delegation system?"
 
-anytype-rag: DAO Governance → The Council (score: 0.57)
+anytype-llm-wiki: DAO Governance → The Council (score: 0.57)
   "Research of past DAOs shows that you simply cannot expect all members
    to be engaged constantly in the decision making process. It's better
    to allow a core group of people to step up as delegates..."
 ```
 
-## How it works
+## How it works (v0.1 — semantic search foundation)
 
 ```
 Anytype vault (local API)
@@ -45,10 +47,10 @@ Everything runs locally. No data leaves your machine.
 
 ```bash
 # With uv (recommended)
-uv tool install anytype-rag
+uv tool install anytype-llm-wiki
 
 # With pip
-pip install anytype-rag
+pip install anytype-llm-wiki
 ```
 
 ### Configure
@@ -73,14 +75,14 @@ QDRANT_COLLECTION=anytype_semantic
 
 **Claude Code:**
 ```bash
-claude mcp add anytype-rag -e ANYTYPE_API_KEY=your-key -- anytype-rag
+claude mcp add anytype-llm-wiki -e ANYTYPE_API_KEY=your-key -- anytype-llm-wiki
 ```
 
 **Claude Desktop / Cursor / other MCP clients** — add to your MCP config:
 ```json
 {
-  "anytype-rag": {
-    "command": "anytype-rag",
+  "anytype-llm-wiki": {
+    "command": "anytype-llm-wiki",
     "env": {
       "ANYTYPE_API_KEY": "your-key"
     }
@@ -95,7 +97,7 @@ claude mcp add anytype-rag -e ANYTYPE_API_KEY=your-key -- anytype-rag
 # (subsequent runs are incremental — only changed objects are re-indexed)
 ```
 
-Once registered, your AI assistant has two new tools:
+Once registered, your AI assistant has two new tools (v0.1):
 
 | Tool | Description |
 |------|-------------|
@@ -110,14 +112,14 @@ For continuous indexing, set up a cron job or launchd service:
 
 **macOS (launchd) — every 30 minutes:**
 ```bash
-cp com.aldeia.anytype-rag-reindex.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.aldeia.anytype-rag-reindex.plist
+cp com.aldeia.anytype-llm-wiki-reindex.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.aldeia.anytype-llm-wiki-reindex.plist
 ```
 
 **Linux/macOS (cron):**
 ```bash
 # Edit with: crontab -e
-*/30 * * * * ANYTYPE_API_KEY=your-key anytype-rag-reindex
+*/30 * * * * ANYTYPE_API_KEY=your-key anytype-llm-wiki-reindex
 ```
 
 ## Performance
@@ -145,7 +147,7 @@ Search is fast enough for interactive use. Indexing is fast enough to run freque
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `EMBED_MODEL` | `bge-m3` | Ollama embedding model |
 | `EMBED_DIMS` | `1024` | Vector dimensions (must match model) |
-| `INDEX_STATE_DIR` | `~/.local/share/anytype-rag` | Where index state is stored |
+| `INDEX_STATE_DIR` | `~/.local/share/anytype-llm-wiki` | Where index state is stored |
 
 ## Architecture
 
@@ -161,22 +163,30 @@ Search is fast enough for interactive use. Indexing is fast enough to run freque
 
 ## Roadmap
 
-This is v0.1 — semantic search over Anytype content. The vision is a full RAG layer:
+v0.1 ships semantic search over Anytype content. v0.2+ extends into a full LLM wiki (see [#140](https://github.com/Aldeia-IT/aldeia-box/issues/140)):
 
+**v0.1 (foundation, shipped)**
 - [x] Semantic search via MCP
 - [x] Incremental indexing with change detection
 - [x] Auto-reindex (launchd/cron)
-- [ ] **Hybrid search** — combine semantic similarity with keyword matching and metadata filters
-- [ ] **RAG context builder** — automatically assemble relevant context from search results for LLM prompts
-- [ ] **Cross-space search** — unified search across multiple Anytype spaces with access control
-- [ ] **Relationship-aware retrieval** — follow Anytype object relations to pull in connected context
-- [ ] **Configurable chunking strategies** — support for different content types (notes vs. tables vs. tasks)
-- [ ] **npm/PyPI publishing** — one-command install from package registries
-- [ ] **Webhook-based indexing** — real-time updates when Anytype adds webhook support
+
+**v0.2+ (LLM wiki pipeline, in design)**
+- [ ] `wiki.bootstrap` — create typed schema (Entity / Concept / Comparison / Query / Source / WikiLog) in an Anytype space
+- [ ] `wiki.ingest` — LLM-driven extraction of entities + concepts from source URLs/files, upserted as typed Anytype Objects with bidirectional Relations
+- [ ] `wiki.query` — synthesized answer with object citations; optional file-back as a Query object
+- [ ] `wiki.lint` — orphans, stale, contradiction drift, oversized objects, tag-taxonomy violations
+
+Longer-term (beyond v0.2):
+- [ ] Hybrid search — semantic similarity + keyword matching + metadata filters
+- [ ] Cross-space federation with access control
+- [ ] Relationship-aware retrieval — follow Anytype Relations to pull connected context
+- [ ] Configurable chunking strategies per object type
+- [ ] npm / PyPI publishing
+- [ ] Webhook-based indexing when Anytype adds webhook support
 
 ## Comparison with alternatives
 
-| | anytype-rag | [wethegreenpeople/anytype-mcp](https://github.com/wethegreenpeople/anytype-mcp) |
+| | anytype-llm-wiki | [wethegreenpeople/anytype-mcp](https://github.com/wethegreenpeople/anytype-mcp) |
 |---|---|---|
 | Vector DB | Qdrant (production-grade) | ChromaDB |
 | Embedding | Any Ollama model (default: bge-m3, multilingual) | mxbai-embed-large |
@@ -185,6 +195,7 @@ This is v0.1 — semantic search over Anytype content. The vision is a full RAG 
 | Python version | 3.11+ | 3.13+ |
 | Package manager | uv / pip | uv |
 | Body content search | Yes | Yes |
+| **Typed wiki pipeline (v0.2+)** | **Planned** | — |
 
 ## Contributing
 
@@ -192,8 +203,8 @@ Contributions welcome! This project is maintained by [Aldeia IT](https://github.
 
 ```bash
 # Clone and set up dev environment
-git clone https://github.com/Aldeia-IT/anytype-rag.git
-cd anytype-rag
+git clone https://github.com/Aldeia-IT/anytype-llm-wiki.git
+cd anytype-llm-wiki
 uv sync --extra dev
 
 # Create .env with your API keys (see .env.example)
@@ -204,11 +215,11 @@ uv run --extra dev pytest tests/ -v
 ```
 
 Areas where help is most welcome:
+- **Typed wiki pipeline** (v0.2+) — contributors who have followed Karpathy's LLM-wiki pattern on filesystem will find the design familiar
 - **Chunking strategies** for different Anytype object types
 - **Hybrid search** implementation (semantic + BM25/keyword)
 - **Testing** with large vaults (1000+ objects)
 - **Documentation** and examples for different MCP clients
-- **Package publishing** to PyPI and npm wrapper
 
 ## License
 

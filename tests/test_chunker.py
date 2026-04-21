@@ -1,6 +1,6 @@
 """Tests for markdown chunker."""
 
-from anytype_rag.chunker import chunk_object, _split_by_headings, _split_large, MAX_CHUNK_CHARS
+from anytype_llm_wiki.chunker import chunk_object, _split_by_headings, _split_large, MAX_CHUNK_CHARS
 
 
 def _make_obj(markdown: str, name: str = "Test", type_key: str = "page") -> dict:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from anytype_rag import config
+from anytype_llm_wiki import config
 
 
 def _services_available() -> bool:
@@ -26,14 +26,14 @@ def check_services():
 
 class TestSemanticSearch:
     def test_returns_results(self):
-        from anytype_rag.server import semantic_search
+        from anytype_llm_wiki.server import semantic_search
 
         results = semantic_search("capoeira governance council")
         assert isinstance(results, list)
         assert len(results) > 0
 
     def test_result_shape(self):
-        from anytype_rag.server import semantic_search
+        from anytype_llm_wiki.server import semantic_search
 
         results = semantic_search("token design")
         if results:
@@ -47,20 +47,20 @@ class TestSemanticSearch:
             assert isinstance(r["score"], float)
 
     def test_limit(self):
-        from anytype_rag.server import semantic_search
+        from anytype_llm_wiki.server import semantic_search
 
         results = semantic_search("capoeira", limit=3)
         assert len(results) <= 3
 
     def test_type_filter(self):
-        from anytype_rag.server import semantic_search
+        from anytype_llm_wiki.server import semantic_search
 
         results = semantic_search("capoeira", types=["page"])
         for r in results:
             assert r["type"] == "page"
 
     def test_irrelevant_query_lower_scores(self):
-        from anytype_rag.server import semantic_search
+        from anytype_llm_wiki.server import semantic_search
 
         relevant = semantic_search("capoeira DAO governance")
         irrelevant = semantic_search("quantum computing black holes")
@@ -70,7 +70,7 @@ class TestSemanticSearch:
 
 class TestReindexTool:
     def test_reindex_returns_stats(self):
-        from anytype_rag.server import reindex_anytype
+        from anytype_llm_wiki.server import reindex_anytype
 
         stats = reindex_anytype()
         assert isinstance(stats, dict)

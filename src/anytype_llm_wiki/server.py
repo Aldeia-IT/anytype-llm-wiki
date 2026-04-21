@@ -6,7 +6,7 @@ from . import config
 from .embedder import embed_query
 from .indexer import reindex
 
-mcp = FastMCP("anytype-rag")
+mcp = FastMCP("anytype-llm-wiki")
 
 
 @mcp.tool()

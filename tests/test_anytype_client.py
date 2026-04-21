@@ -2,8 +2,8 @@
 
 import pytest
 
-from anytype_rag.anytype_client import list_spaces, list_objects, get_object
-from anytype_rag import config
+from anytype_llm_wiki.anytype_client import list_spaces, list_objects, get_object
+from anytype_llm_wiki import config
 
 
 @pytest.fixture(autouse=True)
