@@ -3,4 +3,18 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Environment-based secrets
 .env
+.env.local
+.env.*.local
+
+# Per-user Claude Code settings (never commit)
+.claude/settings.local.json
+
+# Watcher worktree lock files
+.worktree.lock.d/
+
+# SDLC agent signal files (abs-phase-complete, abs-pr-ready, abs-escalation).
+# Written by pipeline leads to their work folder; consumed by the watcher.
+abs-*
