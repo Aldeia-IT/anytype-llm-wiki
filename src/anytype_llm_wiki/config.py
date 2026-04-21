@@ -27,6 +27,6 @@ EMBED_DIMS = int(os.environ.get("EMBED_DIMS", "1024"))
 
 INDEX_STATE_DIR = Path(os.environ.get(
     "INDEX_STATE_DIR",
-    os.path.expanduser("~/.local/share/anytype-rag"),
+    os.path.expanduser("~/.local/share/anytype-llm-wiki"),
 ))
 INDEX_STATE_FILE = INDEX_STATE_DIR / "state.json"

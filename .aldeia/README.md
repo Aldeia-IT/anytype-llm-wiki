@@ -1,6 +1,6 @@
 # .aldeia/
 
-Aldeia IT project integration directory for anytype-rag.
+Aldeia IT project integration directory for anytype-llm-wiki.
 
 ## Contents
 
@@ -8,5 +8,5 @@ Aldeia IT project integration directory for anytype-rag.
 
 ## Notes
 
-- This project is registered in the aldeia-box pipeline via `config/projects.yaml` with label `repo:anytype-rag`.
+- This project is registered in the aldeia-box pipeline via `config/projects.yaml` with label `repo:anytype-llm-wiki`.
 - Public repo — code quality and documentation standards apply.

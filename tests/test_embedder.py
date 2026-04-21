@@ -2,8 +2,8 @@
 
 import pytest
 
-from anytype_rag.embedder import embed, embed_query
-from anytype_rag import config
+from anytype_llm_wiki.embedder import embed, embed_query
+from anytype_llm_wiki import config
 
 
 @pytest.fixture(autouse=True)

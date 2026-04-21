@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example launchd job for periodic anytype-llm-wiki reindex on macOS.
+
+  Community users: copy this file to ~/Library/LaunchAgents/, replace the
+  placeholder API keys below with your own, and load with:
+    launchctl load ~/Library/LaunchAgents/com.aldeia.anytype-llm-wiki-reindex.plist
+
+  For production deployments, do NOT commit real keys in this file. Load
+  secrets from a secure source (e.g., SOPS, macOS keychain, or a wrapper
+  script). See scripts/anytype-llm-wiki-reindex-sops.sh in the aldeia-box
+  reference deployment for one SOPS-based wrapper pattern.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aldeia.anytype-llm-wiki-reindex</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR_USER/.local/share/uv/tools/anytype-llm-wiki/bin/python3</string>
+        <string>-c</string>
+        <string>from anytype_llm_wiki.indexer import reindex; reindex()</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ANYTYPE_API_KEY</key>
+        <string>YOUR_ANYTYPE_API_KEY_HERE</string>
+        <key>QDRANT_API_KEY</key>
+        <string>YOUR_QDRANT_API_KEY_HERE</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USER/Library/Logs/anytype-llm-wiki/reindex.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USER/Library/Logs/anytype-llm-wiki/reindex.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

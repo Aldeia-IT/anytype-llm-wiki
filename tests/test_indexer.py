@@ -2,8 +2,8 @@
 
 import pytest
 
-from anytype_rag.indexer import reindex, _load_state, _save_state, _ensure_collection, _qdrant
-from anytype_rag import config
+from anytype_llm_wiki.indexer import reindex, _load_state, _save_state, _ensure_collection, _qdrant
+from anytype_llm_wiki import config
 
 
 def _services_available() -> bool:
@@ -73,7 +73,7 @@ class TestReindex:
         assert stats2["objects_indexed"] == 0
 
     def test_reindex_specific_space(self):
-        from anytype_rag.anytype_client import list_spaces
+        from anytype_llm_wiki.anytype_client import list_spaces
 
         spaces = list_spaces()
         if not spaces:
