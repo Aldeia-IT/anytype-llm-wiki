@@ -360,14 +360,14 @@ flowchart TD
     F --> G{For each entity/concept}
     G --> H[Resolve entity<br/>normalized-title exact match]
     H -->|no match| I[Embedding similarity vs.<br/>existing wiki objects of same type]
-    I -->|>= upsert threshold| J[Update existing object]
-    I -->|0.70-upsert threshold| K[Skip with duplicate_proposed]
-    I -->|< 0.70| L{Page threshold<br/>2+ sources or central?}
+    I -->|at-or-above upsert threshold| J[Update existing object]
+    I -->|between 0.70 and upsert threshold| K[Skip with duplicate_proposed]
+    I -->|below 0.70| L{Page threshold<br/>2+ sources or central?}
     L -->|yes| M[Create new object]
     L -->|no| N[Skip below_threshold]
     J --> O[Write bidirectional relations<br/>target side reciprocal]
     M --> O
-    O --> P[Enforce cross-link min<br/>>= 2 outbound relations]
+    O --> P[Enforce cross-link min<br/>at-least 2 outbound relations]
     P --> Q[Create WikiLog entry]
     Q --> R{WIKI_AUTO_REINDEX?}
     R -->|yes| S[Call reindex_anytype]
@@ -455,7 +455,7 @@ flowchart TD
     A[User invokes wiki.query<br/>question, space_id] --> B[Verify schema exists<br/>list wiki types]
     B -->|missing| B_ERR[[CONFIG ERROR<br/>run wiki.bootstrap]]
     B --> C[Count wiki objects<br/>Entity + Concept + Comparison + Query]
-    C --> D{count >= WIKI_INDEX_THRESHOLD?}
+    C --> D{count at-or-above WIKI_INDEX_THRESHOLD?}
     D -->|no| E[Tier 1 — index-navigation<br/>list objects by type_key]
     D -->|yes| F[Tier 2 — vector-augmented<br/>semantic_search wiki types]
     F -->|Qdrant down + count below threshold| E
@@ -1951,7 +1951,7 @@ Each question carries a **Must resolve by** version. A version cannot tag if its
 
 4. **File-back threshold** — **Must resolve by v0.4.0 pre-release.** Default: 3+ sources AND 100+ words. Re-evaluated at v0.4.0+1 based on Query-object noise/utility ratio in Jan's wiki.
 
-5. **Community branding** — **RESOLVED 2026-04-22 (addresses CPO Advisory #22).** Module name is "Anytype LLM Wiki" in documentation; repo name is `anytype-llm-wiki`; PyPI package is `anytype-llm-wiki`. Legal's Trademarks footer advisory (R1 Advisory #4, adopted at v0.2.0 pre-release) is part of the resolution — the README ships a nominative-use disclaimer footer (text in §README additions → Trademarks).
+5. **Community branding** — **Resolved 2026-04-22 (addresses CPO Advisory #22).** Module name is "Anytype LLM Wiki" in documentation; repo name is `anytype-llm-wiki`; PyPI package is `anytype-llm-wiki`. Legal's Trademarks footer advisory (R1 Advisory #4, adopted at v0.2.0 pre-release) is part of the resolution — the README ships a nominative-use disclaimer footer (text in §README additions → Trademarks).
 
 6. **Write token permissions** — **Must resolve by v0.2.0 (verification script).** Verification script exercises a create-type call; if auth fails, README documents the regeneration step.
 
