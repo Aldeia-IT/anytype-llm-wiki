@@ -36,28 +36,28 @@ class TestNormalizeTitleDashFold:
     """
 
     @pytest.mark.parametrize("raw,should_match_baseline", [
-        # Row 1: ASCII HYPHEN-MINUS (baseline)
+        # Row 1: ASCII HYPHEN-MINUS (baseline) — U+002D, visible in all editors
         ("BGE-M3", True),
         # Row 2: SOFT HYPHEN U+00AD — invisible conditional hyphen, classic PDF-copy-paste vector
-        ("BGE­M3", True),
+        ("BGE\u00adM3", True),
         # Row 3: HYPHEN U+2010
-        ("BGE‐M3", True),
+        ("BGE\u2010M3", True),
         # Row 4: NON-BREAKING HYPHEN U+2011
-        ("BGE‑M3", True),
+        ("BGE\u2011M3", True),
         # Row 5: FIGURE DASH U+2012
-        ("BGE‒M3", True),
+        ("BGE\u2012M3", True),
         # Row 6: EN DASH U+2013
-        ("BGE–M3", True),
+        ("BGE\u2013M3", True),
         # Row 7: EM DASH U+2014
-        ("BGE—M3", True),
+        ("BGE\u2014M3", True),
         # Row 8: HORIZONTAL BAR U+2015 — em-dash cousin, Korean/Japanese typography
-        ("BGE―M3", True),
+        ("BGE\u2015M3", True),
         # Row 9: MINUS SIGN U+2212
-        ("BGE−M3", True),
+        ("BGE\u2212M3", True),
         # Row 10: SMALL HYPHEN-MINUS U+FE63
-        ("BGE﹣M3", True),
+        ("BGE\ufe63M3", True),
         # Row 11: FULLWIDTH HYPHEN-MINUS U+FF0D
-        ("BGE－M3", True),
+        ("BGE\uff0dM3", True),
         # Row 12: casefold — lower-case should match baseline
         ("bge-m3", True),
         # Row 13: whitespace trim — leading/trailing spaces collapse
@@ -298,6 +298,103 @@ class TestSpaceIngestLockConcurrency:
         # First acquisition
         with space_ingest_lock("space-reacquire"):
             pass
-        # Second acquisition — must succeed because first was released
+        # Second acquisition -- must succeed because first was released
         with space_ingest_lock("space-reacquire"):
             pass
+
+
+# ---------------------------------------------------------------------------
+# scrub_credentials tests — AC #15
+# ---------------------------------------------------------------------------
+
+class TestCredentialScrubbing:
+    """AC #15: scrub_credentials must remove secrets from URLs before logging.
+
+    Tests call anytype_llm_wiki.wiki.util.scrub_credentials directly — no
+    bootstrap call path needed. This avoids the tautology of relying on
+    wiki_bootstrap to read a credential that it never touches at runtime.
+
+    Spec line 745: A forced [API ERROR] where QDRANT_URL=...?api_key=SEKRET123
+    must return an error string containing neither SEKRET123 nor the raw
+    ?api_key=... query string. Same assertion for WIKI_EXTRACT_ENDPOINT userinfo.
+    """
+
+    def test_scrub_credentials_importable(self):
+        """scrub_credentials must be importable from wiki.util."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials  # noqa: F401
+
+    def test_scrub_credentials_is_callable(self):
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        assert callable(scrub_credentials)
+
+    def test_qdrant_url_api_key_value_scrubbed(self):
+        """scrub_credentials on a QDRANT_URL with ?api_key=SEKRET123 must not return the secret value."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "https://xyz.cloud.qdrant.io/collections/x?api_key=SEKRET123"
+        result = scrub_credentials(url)
+        assert "SEKRET123" not in result, (
+            f"scrub_credentials must not return the raw api_key value; got: {result!r}"
+        )
+
+    def test_qdrant_url_api_key_query_param_scrubbed(self):
+        """scrub_credentials on a QDRANT_URL must not return the raw ?api_key= substring."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "https://xyz.cloud.qdrant.io/collections/x?api_key=SEKRET123"
+        result = scrub_credentials(url)
+        assert "?api_key=" not in result, (
+            f"scrub_credentials must not return the raw ?api_key= query string; got: {result!r}"
+        )
+
+    def test_qdrant_url_host_preserved(self):
+        """scrub_credentials must preserve the host portion of the URL."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "https://xyz.cloud.qdrant.io/collections/x?api_key=SEKRET123"
+        result = scrub_credentials(url)
+        assert "xyz.cloud.qdrant.io" in result, (
+            f"scrub_credentials must preserve the host; got: {result!r}"
+        )
+
+    def test_userinfo_password_scrubbed(self):
+        """scrub_credentials on a URL with userinfo must not return the password."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "https://api-user:api-secret@hosted.example.com/v1/chat"
+        result = scrub_credentials(url)
+        assert "api-secret" not in result, (
+            f"scrub_credentials must not return the userinfo password; got: {result!r}"
+        )
+
+    def test_userinfo_colon_password_at_combo_scrubbed(self):
+        """scrub_credentials must not return the raw 'user:pass@' userinfo component."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "https://api-user:api-secret@hosted.example.com/v1/chat"
+        result = scrub_credentials(url)
+        assert "api-user:api-secret@" not in result, (
+            f"scrub_credentials must not return the raw 'user:pass@' form; got: {result!r}"
+        )
+
+    def test_userinfo_host_preserved(self):
+        """scrub_credentials must preserve the host when userinfo is stripped."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "https://api-user:api-secret@hosted.example.com/v1/chat"
+        result = scrub_credentials(url)
+        assert "hosted.example.com" in result, (
+            f"scrub_credentials must preserve the host; got: {result!r}"
+        )
+
+    def test_plain_url_unchanged(self):
+        """scrub_credentials on a plain URL with no credentials must return a non-empty string."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "https://localhost:6333/collections/anytype_semantic"
+        result = scrub_credentials(url)
+        assert result, "scrub_credentials must return a non-empty string for plain URLs"
+        assert "localhost" in result, (
+            f"scrub_credentials must preserve plain URL host; got: {result!r}"
+        )
+
+    def test_returns_string(self):
+        """scrub_credentials must always return a string."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        result = scrub_credentials("https://example.com/path?key=value")
+        assert isinstance(result, str), (
+            f"scrub_credentials must return str, got {type(result)!r}"
+        )

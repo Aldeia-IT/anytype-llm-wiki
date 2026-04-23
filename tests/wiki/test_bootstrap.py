@@ -381,11 +381,12 @@ class TestBootstrapMissingSpace:
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
         result = wiki_bootstrap(space_id=FAKE_MISSING_SPACE_ID)
-        # Either raises an exception or returns a dict with error info
+        # Spec line 733: wiki_bootstrap with missing space returns [CONFIG ERROR] with space_id echoed.
+        # Must contain [CONFIG ERROR] — status=='error' alone is insufficient.
         if isinstance(result, dict):
             result_str = str(result)
-            assert "[CONFIG ERROR]" in result_str or result.get("status") == "error", (
-                f"Expected [CONFIG ERROR] or status=error for missing space, got: {result}"
+            assert "[CONFIG ERROR]" in result_str, (
+                f"Expected [CONFIG ERROR] in result for missing space, got: {result}"
             )
             assert FAKE_MISSING_SPACE_ID in result_str, (
                 "space_id must be echoed in the error response"
@@ -678,10 +679,39 @@ class TestBootstrapSchemaOutdated:
             "object": {"id": "coll-001", "name": "Wiki", "wiki_schema_version": "0.2.0"}
         }))
 
+        from anytype_llm_wiki.wiki import types_schema as _ts
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
         result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
         assert result.get("status") == "ok", (
             f"wiki_bootstrap on outdated schema must return status='ok', got {result.get('status')!r}"
+        )
+        # Spec line 1604: must include a schema_upgrade section listing added properties.
+        assert "schema_upgrade" in result, (
+            f"wiki_bootstrap on outdated schema must include 'schema_upgrade' in result; got keys: {list(result.keys())}"
+        )
+        upgrade = result["schema_upgrade"]
+        assert isinstance(upgrade, dict), (
+            f"schema_upgrade must be a dict, got {type(upgrade)!r}"
+        )
+        # Must record from-version (the old schema seeded in the mock) and to-version (current)
+        assert "from" in upgrade, (
+            f"schema_upgrade missing 'from' key: {upgrade}"
+        )
+        assert "to" in upgrade, (
+            f"schema_upgrade missing 'to' key: {upgrade}"
+        )
+        assert upgrade["from"] == "0.1.0", (
+            f"schema_upgrade['from'] must be '0.1.0' (version seeded by mock), got {upgrade['from']!r}"
+        )
+        assert upgrade["to"] == _ts.WIKI_SCHEMA_VERSION, (
+            f"schema_upgrade['to'] must equal WIKI_SCHEMA_VERSION, got {upgrade['to']!r}"
+        )
+        # Must list the properties added during the upgrade
+        assert "properties_added" in upgrade, (
+            f"schema_upgrade missing 'properties_added' key: {upgrade}"
+        )
+        assert isinstance(upgrade["properties_added"], list), (
+            f"schema_upgrade['properties_added'] must be a list, got {type(upgrade['properties_added'])!r}"
         )
 
     @respx.mock
@@ -801,66 +831,6 @@ class TestBootstrapPatchDecisionScaffolding:
             result = wiki_ingest(source="https://example.com/paper", space_id=FAKE_SPACE_ID)
         result_str = str(result)
         assert "patch_decision_missing_or_invalid" in result_str
-
-
-class TestBootstrapCredentialScrubbing:
-    """AC #15: Credential scrubbing regression — error strings must not contain secrets.
-
-    Two test cases:
-    1. QDRANT_URL with api_key= query string — must not leak the key value
-    2. WIKI_EXTRACT_ENDPOINT with userinfo — must not leak user:pass
-    """
-
-    @respx.mock
-    def test_qdrant_url_api_key_not_in_error_string(self, monkeypatch):
-        """When QDRANT_URL contains ?api_key=SEKRET123, that value must not appear in any error output."""
-        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
-        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
-        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        monkeypatch.setenv(
-            "QDRANT_URL",
-            "https://xyz.cloud.qdrant.io/collections/x?api_key=SEKRET123"
-        )
-        # Force an API error path
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(500, json={"error": "internal"}))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(500, json={"error": "internal"}))
-        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
-        try:
-            result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
-            result_str = str(result)
-        except Exception as exc:
-            result_str = str(exc)
-        assert "SEKRET123" not in result_str, (
-            "Secret api_key value 'SEKRET123' must not appear in error output"
-        )
-        assert "?api_key=" not in result_str, (
-            "Raw ?api_key= query-string must not appear in error output"
-        )
-
-    @respx.mock
-    def test_wiki_extract_endpoint_userinfo_not_in_error_string(self, monkeypatch):
-        """When WIKI_EXTRACT_ENDPOINT contains userinfo (api-user:api-secret@), it must be absent from errors."""
-        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
-        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
-        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        monkeypatch.setenv(
-            "WIKI_EXTRACT_ENDPOINT",
-            "https://api-user:api-secret@hosted.example.com/v1/chat"
-        )
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(500, json={"error": "internal"}))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(500, json={"error": "internal"}))
-        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
-        try:
-            result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
-            result_str = str(result)
-        except Exception as exc:
-            result_str = str(exc)
-        assert "api-secret" not in result_str, (
-            "Userinfo password 'api-secret' must not appear in error output"
-        )
-        assert "api-user:api-secret@" not in result_str, (
-            "Raw userinfo 'api-user:api-secret@' must not appear in error output"
-        )
 
 
 class TestBootstrapLiveAPI:

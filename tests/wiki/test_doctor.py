@@ -96,19 +96,25 @@ class TestDoctorReturnShape:
         assert "checks" in result, f"run_doctor() missing 'checks': {result}"
 
 
-# Named check constants matching the spec's 11 checks
+# Named check constants matching the spec's 12 checks.
+# Spec enumerates: 1, 2, 3, 4, 4b, 5, 6, 6b, 7, 8, 9, 10 => 12 check entries.
+# Check 6b is the 16 GB + >=7B extraction model RAM WARN (spec line 1165).
+# Name chosen: "ollama_extraction_model_ram_fit" — signals RAM headroom check
+# for the extraction model specifically. The implementer must emit this name
+# in the run_doctor() report for this check to pass.
 EXPECTED_CHECK_NAMES = [
-    "anytype_api_key",         # Check 1: ANYTYPE_API_KEY set and non-empty
-    "anytype_reachable",       # Check 2: Anytype GET /v1/spaces returns 200
-    "anytype_version_drift",   # Check 3: Anytype API version matches patch-decision.md (WARN)
-    "qdrant_reachable",        # Check 4: Qdrant GET /readyz
-    "qdrant_collection",       # Check 4b: QDRANT_COLLECTION exists
-    "ollama_reachable",        # Check 5: Ollama GET /api/tags
-    "ollama_models_pulled",    # Check 6: Required Ollama models pulled
-    "wiki_lock_dir",           # Check 7: WIKI_LOCK_DIR exists, mode 0o700, writable
-    "patch_decision_md",       # Check 8: patch-decision.md present and parseable
-    "wiki_lock_dir_fs_type",   # Check 9: WIKI_LOCK_DIR filesystem type probe (NFS WARN)
-    "wiki_fetch_extra_ports",  # Check 10: WIKI_FETCH_EXTRA_PORTS empty check (WARN if non-empty)
+    "anytype_api_key",                  # Check 1: ANYTYPE_API_KEY set and non-empty
+    "anytype_reachable",                # Check 2: Anytype GET /v1/spaces returns 200
+    "anytype_version_drift",            # Check 3: Anytype API version matches patch-decision.md (WARN)
+    "qdrant_reachable",                 # Check 4: Qdrant GET /readyz
+    "qdrant_collection",                # Check 4b: QDRANT_COLLECTION exists
+    "ollama_reachable",                 # Check 5: Ollama GET /api/tags
+    "ollama_models_pulled",             # Check 6: Required Ollama models pulled
+    "ollama_extraction_model_ram_fit",  # Check 6b: 16 GB + >=7B extraction model RAM WARN
+    "wiki_lock_dir",                    # Check 7: WIKI_LOCK_DIR exists, mode 0o700, writable
+    "patch_decision_md",                # Check 8: patch-decision.md present and parseable
+    "wiki_lock_dir_fs_type",            # Check 9: WIKI_LOCK_DIR filesystem type probe (NFS WARN)
+    "wiki_fetch_extra_ports",           # Check 10: WIKI_FETCH_EXTRA_PORTS empty check (WARN if non-empty)
 ]
 
 

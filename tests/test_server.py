@@ -3,9 +3,10 @@
 Live-API tests (TestSemanticSearch, TestReindexTool) require all services
 running — they skip automatically via the check_services fixture.
 
-v0.2.0 additions:
-  TestWikiBootstrapRegistered — asserts wiki_bootstrap is registered as an @mcp.tool.
-  No live API required for this test.
+v0.2.0 wiki_bootstrap registration test lives in:
+  tests/wiki/test_server_registration.py
+It is kept separate because the module-level autouse check_services fixture
+here would silence it when live services are absent (BLOCKING-B2).
 """
 
 import pytest
@@ -83,77 +84,3 @@ class TestReindexTool:
         stats = reindex_anytype()
         assert isinstance(stats, dict)
         assert "spaces" in stats
-
-
-# ---------------------------------------------------------------------------
-# v0.2.0 additions — AC #11 (wiki_bootstrap registered as @mcp.tool)
-# These tests do NOT require live services.
-# ---------------------------------------------------------------------------
-
-
-class TestWikiBootstrapRegistered:
-    """Assert wiki_bootstrap is registered in the MCP server as a tool.
-
-    This test does NOT use the check_services fixture.
-    It fails before v0.2.0 is implemented (wiki_bootstrap does not exist in server.py yet).
-    """
-
-    def test_wiki_bootstrap_is_registered_mcp_tool(self):
-        """wiki_bootstrap must be registered as an @mcp.tool in server.py."""
-        from anytype_llm_wiki.server import mcp
-        # FastMCP stores registered tools in _tool_manager or similar
-        # Try several possible attribute names used by FastMCP versions
-        tool_names = set()
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            tool_names = set(mcp._tool_manager._tools.keys())
-        elif hasattr(mcp, "_tools"):
-            tool_names = set(mcp._tools.keys())
-        elif hasattr(mcp, "tools"):
-            raw_tools = mcp.tools
-            if callable(raw_tools):
-                raw_tools = raw_tools()
-            tool_names = {t if isinstance(t, str) else getattr(t, "name", str(t)) for t in raw_tools}
-        else:
-            # Fallback: try to get tool list via the list_tools method
-            import asyncio
-            try:
-                loop = asyncio.new_event_loop()
-                tools = loop.run_until_complete(mcp.list_tools())
-                loop.close()
-                tool_names = {t.name for t in tools}
-            except Exception:
-                pass
-
-        assert "wiki_bootstrap" in tool_names, (
-            f"wiki_bootstrap is not registered as an MCP tool. "
-            f"Registered tools: {sorted(tool_names)}"
-        )
-
-    def test_existing_tools_still_registered(self):
-        """After adding wiki_bootstrap, existing tools semantic_search and reindex_anytype must still be registered."""
-        from anytype_llm_wiki.server import mcp
-        tool_names = set()
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            tool_names = set(mcp._tool_manager._tools.keys())
-        elif hasattr(mcp, "_tools"):
-            tool_names = set(mcp._tools.keys())
-        elif hasattr(mcp, "tools"):
-            raw_tools = mcp.tools
-            if callable(raw_tools):
-                raw_tools = raw_tools()
-            tool_names = {t if isinstance(t, str) else getattr(t, "name", str(t)) for t in raw_tools}
-        else:
-            import asyncio
-            try:
-                loop = asyncio.new_event_loop()
-                tools = loop.run_until_complete(mcp.list_tools())
-                loop.close()
-                tool_names = {t.name for t in tools}
-            except Exception:
-                pass
-
-        for existing_tool in ("semantic_search", "reindex_anytype"):
-            assert existing_tool in tool_names, (
-                f"Existing tool '{existing_tool}' is no longer registered after v0.2.0 changes. "
-                f"The wiki module is additive — existing tools must not be removed."
-            )
