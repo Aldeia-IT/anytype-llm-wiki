@@ -1,8 +1,10 @@
 # anytype-llm-wiki
 
-**The first open-source LLM wiki that uses a typed knowledge-graph store — [Anytype](https://anytype.io)'s native Objects, Types, and Relations — instead of a filesystem of markdown files.**
+**To our knowledge, the first Anytype-native LLM wiki — combining Karpathy's pattern, Hermes' battle-tested operational policies, and [Anytype](https://anytype.io)'s typed knowledge graph (Objects, Types, Relations) into an installable module. No Obsidian required.**
 
 > **Status — April 2026.** This repo was previously named `anytype-rag` (semantic-search MCP server for Anytype). It is being extended into a full LLM wiki: typed ingest, entity/concept synthesis, bidirectional Relations, lint suite. See [Aldeia-IT/aldeia-box#140](https://github.com/Aldeia-IT/aldeia-box/issues/140) for the roadmap. The current v0.1.0 (semantic search only) is the foundation; the wiki pipeline lands in v0.2.0+.
+>
+> **Positioning-verification note.** The "first Anytype-native LLM wiki" claim above is verified at v0.2.0 tag time and the search record is committed at `.aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-any/positioning-verification.md` (analog to `patch-decision.md`). If you are reading this before v0.2.0 ships, the verification file may not yet exist; the spec's fallback line (*"An Anytype-native LLM wiki — combining Karpathy's pattern…"*, drops the "first" claim) is the pre-committed swap. This narrower, verifiable positioning supersedes an earlier, broader "first typed-KG LLM wiki" claim (tightened per the R2 council's CPO and Legal advisories; see [spec](.aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-any/spec.md) §Market Analysis for rationale).
 
 Anytype's built-in search only matches object titles and snippets. It doesn't search body content at all. This means your AI tools can't find information by *what it says* — only by what it's called.
 
