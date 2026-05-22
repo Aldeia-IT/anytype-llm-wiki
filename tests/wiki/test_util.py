@@ -403,3 +403,28 @@ class TestCredentialScrubbing:
         assert isinstance(result, str), (
             f"scrub_credentials must return str, got {type(result)!r}"
         )
+
+    def test_schemeless_userinfo_password_scrubbed(self):
+        """SHOULD-FIX-1: a scheme-less URL with userinfo must not leak the password."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "user:pass@host/path"
+        result = scrub_credentials(url)
+        assert "pass" not in result, (
+            f"scheme-less userinfo password leaked; got: {result!r}"
+        )
+        assert "user:pass@" not in result, (
+            f"scheme-less userinfo prefix leaked; got: {result!r}"
+        )
+        assert "host" in result, (
+            f"scrub_credentials must preserve the host for scheme-less URLs; got: {result!r}"
+        )
+
+    def test_schemeless_userinfo_with_port_and_query_scrubbed(self):
+        """SHOULD-FIX-1: scheme-less userinfo+query must strip both secret and query."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+        url = "user:secretpw@host:6333/v1?api_key=SEKRET"
+        result = scrub_credentials(url)
+        assert "secretpw" not in result, f"userinfo password leaked; got: {result!r}"
+        assert "SEKRET" not in result, f"query secret leaked; got: {result!r}"
+        assert "api_key" not in result, f"query param leaked; got: {result!r}"
+        assert "host" in result, f"host not preserved; got: {result!r}"
