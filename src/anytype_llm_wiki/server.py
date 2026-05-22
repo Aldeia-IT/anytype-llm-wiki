@@ -1,10 +1,13 @@
-"""MCP server exposing semantic search and reindex tools."""
+"""MCP server exposing semantic search, reindex, and wiki bootstrap tools."""
+
+import sys
 
 from fastmcp import FastMCP
 
 from . import config
 from .embedder import embed_query
 from .indexer import reindex
+from .wiki.bootstrap import wiki_bootstrap as _wiki_bootstrap
 
 mcp = FastMCP("anytype-llm-wiki")
 
@@ -77,7 +80,31 @@ def reindex_anytype(space_id: str | None = None) -> dict:
     return reindex(space_id=space_id)
 
 
+@mcp.tool()
+def wiki_bootstrap(space_id: str, domain_tags: list[str] | None = None) -> dict:
+    """Idempotently create the wiki schema (Types, Properties, tags, Collection) in a space.
+
+    Args:
+        space_id: Target Anytype space ID.
+        domain_tags: Optional domain-tag taxonomy. On a first bootstrap these
+            replace the defaults; on a re-bootstrap they are union-only (existing
+            tags preserved, only new tags created).
+
+    Returns:
+        A BootstrapResult dict with per-element created/skipped breakdowns, the
+        root Collection id + deeplink, a WikiLog id + deeplink, and a status of
+        "ok" | "partial" | "error".
+    """
+    return _wiki_bootstrap(space_id=space_id, domain_tags=domain_tags)
+
+
 def main():
+    # Route known CLI subcommands to the wiki CLI; otherwise run the MCP server.
+    from .wiki import cli as wiki_cli
+
+    if len(sys.argv) > 1 and sys.argv[1] in wiki_cli.SUBCOMMANDS:
+        sys.exit(wiki_cli.main(sys.argv[1:]))
+
     mcp.run(transport="stdio")
 
 
