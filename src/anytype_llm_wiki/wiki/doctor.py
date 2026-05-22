@@ -58,21 +58,22 @@ def _check_anytype_api_key() -> dict:
 
 def _check_anytype_reachable() -> dict:
     url = _env("ANYTYPE_API_URL", base_config.ANYTYPE_API_URL)
+    safe_url = util.scrub_credentials(url)
     try:
         resp = _http_get(f"{url}/v1/spaces")
     except httpx.HTTPError as exc:
         return _check(
             "anytype_reachable",
             "FAIL",
-            f"Anytype not reachable at {url} ({type(exc).__name__}). "
+            f"Anytype not reachable at {safe_url} ({type(exc).__name__}). "
             "Start the Anytype desktop app.",
         )
     if 200 <= resp.status_code < 300:
-        return _check("anytype_reachable", "OK", f"Anytype reachable at {url}.")
+        return _check("anytype_reachable", "OK", f"Anytype reachable at {safe_url}.")
     return _check(
         "anytype_reachable",
         "FAIL",
-        f"Anytype at {url} returned HTTP {resp.status_code}.",
+        f"Anytype at {safe_url} returned HTTP {resp.status_code}.",
     )
 
 
@@ -104,20 +105,21 @@ def _check_anytype_version_drift() -> dict:
 
 def _check_qdrant_reachable() -> dict:
     url = _env("QDRANT_URL", base_config.QDRANT_URL)
+    safe_url = util.scrub_credentials(url)
     try:
         resp = _http_get(f"{url}/readyz")
     except httpx.HTTPError as exc:
         return _check(
             "qdrant_reachable",
             "FAIL",
-            f"Qdrant not reachable at {url} ({type(exc).__name__}).",
+            f"Qdrant not reachable at {safe_url} ({type(exc).__name__}).",
         )
     if 200 <= resp.status_code < 300:
-        return _check("qdrant_reachable", "OK", f"Qdrant reachable at {url}.")
+        return _check("qdrant_reachable", "OK", f"Qdrant reachable at {safe_url}.")
     return _check(
         "qdrant_reachable",
         "FAIL",
-        f"Qdrant at {url} returned HTTP {resp.status_code}.",
+        f"Qdrant at {safe_url} returned HTTP {resp.status_code}.",
     )
 
 
@@ -152,17 +154,18 @@ def _check_qdrant_collection() -> dict:
 def _ollama_tags() -> tuple[bool, list[dict], str]:
     """Fetch the Ollama /api/tags model list. Returns (reachable, models, detail)."""
     url = _env("OLLAMA_URL", base_config.OLLAMA_URL)
+    safe_url = util.scrub_credentials(url)
     try:
         resp = _http_get(f"{url}/api/tags")
     except httpx.HTTPError as exc:
-        return False, [], f"Ollama not reachable at {url} ({type(exc).__name__})."
+        return False, [], f"Ollama not reachable at {safe_url} ({type(exc).__name__})."
     if not (200 <= resp.status_code < 300):
-        return False, [], f"Ollama at {url} returned HTTP {resp.status_code}."
+        return False, [], f"Ollama at {safe_url} returned HTTP {resp.status_code}."
     try:
         models = resp.json().get("models", []) or []
     except ValueError:
         models = []
-    return True, models, f"Ollama reachable at {url}."
+    return True, models, f"Ollama reachable at {safe_url}."
 
 
 def _check_ollama_reachable(reachable: bool, detail: str) -> dict:
