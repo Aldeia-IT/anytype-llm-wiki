@@ -151,7 +151,7 @@ class TestDoctorExitCodes:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("WIKI_FETCH_EXTRA_PORTS", "")
         lock_dir = tmp_path / "locks"
-        lock_dir.mkdir(mode=0o700)
+        lock_dir.mkdir(mode=0o700, exist_ok=True)
         monkeypatch.setenv("WIKI_LOCK_DIR", str(lock_dir))
         respx.get(f"{ANYTYPE_BASE}/v1/spaces").mock(
             return_value=httpx.Response(200, json={"data": [{"id": "sp1", "name": "Space"}]})
@@ -208,7 +208,7 @@ class TestDoctorExitCodes:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("WIKI_FETCH_EXTRA_PORTS", "8080,8443")
         lock_dir = tmp_path / "locks"
-        lock_dir.mkdir(mode=0o700)
+        lock_dir.mkdir(mode=0o700, exist_ok=True)
         monkeypatch.setenv("WIKI_LOCK_DIR", str(lock_dir))
         respx.get(f"{ANYTYPE_BASE}/v1/spaces").mock(
             return_value=httpx.Response(200, json={"data": [{"id": "sp1"}]})
