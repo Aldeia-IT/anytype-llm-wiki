@@ -1,0 +1,28 @@
+# anytype-llm-wiki — macOS newsyslog.conf(5) reference fragment
+#
+# newsyslog rotates logs based on size and/or time. This fragment uses a 10 MB
+# size trigger, matching the Linux logrotate sample (docs/samples/anytype-llm-wiki.logrotate).
+#
+# The system-wide /etc/newsyslog.conf is root-only. Two drop-in options:
+#
+#   (a) Append this fragment to the system config (prompts for sudo):
+#         sudo sh -c 'cat docs/samples/anytype-llm-wiki-newsyslog.conf.fragment >> /etc/newsyslog.conf'
+#       newsyslog runs daily via launchd (com.apple.newsyslog) and will pick it up.
+#
+#   (b) Reference it from a per-user launchd wrapper that invokes:
+#         newsyslog -F /absolute/path/to/anytype-llm-wiki-newsyslog.conf.fragment
+#
+# Redirect the server's stderr JSON log to the file with:
+#   anytype-llm-wiki serve 2>> ~/Library/Logs/anytype-llm-wiki/run.log
+#
+# Columns: logfilename [owner:group] mode count size when flags [/pid_file] [sig]
+#   mode  600  -> file recreated with rw------- after rotation
+#   count 5    -> keep 5 archived generations
+#   size  10240 (KB) -> rotate at 10 MB (10240 KB), matching the Linux config
+#   when  *    -> size-only trigger (no time-based rotation)
+#   flags J    -> compress rotated archives with bzip2 (Z for gzip)
+#
+# Replace the path and owner below with your own user. newsyslog does NOT expand
+# ~; use an absolute path.
+
+/Users/youruser/Library/Logs/anytype-llm-wiki/run.log  youruser:staff  600  5  10240  *  J

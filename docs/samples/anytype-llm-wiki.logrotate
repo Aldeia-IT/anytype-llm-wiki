@@ -1,0 +1,33 @@
+# anytype-llm-wiki — Linux logrotate(8) reference config
+#
+# Drop-in usage (system-wide, root-owned path):
+#   sudo cp docs/samples/anytype-llm-wiki.logrotate /etc/logrotate.d/anytype-llm-wiki
+#   # then edit the log path and the `su` line below to match your user/group.
+#
+# User-space usage (no root, run from cron or by hand):
+#   logrotate -s ~/.cache/anytype-llm-wiki/logrotate.state \
+#     docs/samples/anytype-llm-wiki.logrotate
+#
+# The server writes single-line JSON to stderr; redirect it to the log file with:
+#   anytype-llm-wiki serve 2>> ~/.local/share/anytype-llm-wiki/run.log
+#
+# Replace the absolute path below with your own home directory (logrotate does
+# NOT expand ~). The `su` directive must name the operator's user and primary
+# group so rotation does not require root and preserves non-root ownership.
+
+/home/youruser/.local/share/anytype-llm-wiki/run.log {
+    # Rotate when the file reaches 10 MB (matches the macOS newsyslog fragment).
+    size 10M
+    # Keep 5 compressed archives, then discard the oldest.
+    rotate 5
+    compress
+    delaycompress
+    # Tolerate a missing log file (e.g. before the first server run).
+    missingok
+    notifempty
+    # Run rotation as the operator, not root (required for user-owned logs).
+    su youruser youruser
+    # Recreate the log file after rotation with sane permissions.
+    create 0600 youruser youruser
+    copytruncate
+}
