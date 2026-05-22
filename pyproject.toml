@@ -10,6 +10,7 @@ dependencies = [
     "fastmcp>=2.0.0",
     "httpx>=0.27.0",
     "qdrant-client>=1.12.0",
+    "psutil>=5.9",
 ]
 
 [project.scripts]
