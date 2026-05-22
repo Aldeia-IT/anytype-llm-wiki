@@ -125,7 +125,12 @@ class TestWikiClientCreateTag:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        # Match any POST (endpoint shape is flexible per the create_tag contract).
+        # NOTE: the original `respx.post(respx.patterns.M)` form raises a TypeError
+        # at route-registration time in respx 0.23.x (M is a combinator factory,
+        # not a URL). A no-arg `respx.post()` is the idiomatic match-any-POST form
+        # and preserves this test's sole assertion (result is a dict). See debrief.
+        respx.post().mock(return_value=httpx.Response(200, json={
             "option": {"id": "tag-wiki_ai-research", "name": "wiki_ai-research"}
         }))
         from anytype_llm_wiki.wiki.wiki_client import WikiClient
