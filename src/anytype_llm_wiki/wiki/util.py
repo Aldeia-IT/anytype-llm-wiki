@@ -11,6 +11,7 @@
 """
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,22 @@ def scrub_credentials(url: str) -> str:
     except (ValueError, TypeError):
         return url
 
+    # Scheme-less / authority-in-path case (e.g. "user:pass@host/path"). When a
+    # URL has no "scheme://" prefix, urlparse mis-parses the authority into the
+    # `path` (and may even read the userinfo username as a bogus `scheme`), so
+    # the netloc-based `@`-strip below is a no-op and the password survives.
+    # Detect a "://" separator: when it is absent and an `@` appears before the
+    # first `/`, strip the leading `userinfo@`, then re-parse so the query is
+    # dropped by the normal schemed/netloc path below.
+    if "://" not in url:
+        first_slash = url.find("/")
+        authority = url if first_slash == -1 else url[:first_slash]
+        if "@" in authority:
+            stripped = url[url.find("@") + 1:]
+            # Prefix a placeholder scheme so urlparse populates netloc correctly,
+            # then re-scrub to drop query/fragment uniformly.
+            return scrub_credentials("//" + stripped).lstrip("/") or stripped
+
     # Rebuild netloc without userinfo (drop everything up to and including '@').
     netloc = parsed.netloc
     if "@" in netloc:
@@ -112,7 +129,16 @@ def space_ingest_lock(space_id: str, source_ref: str | None = None):
     # makedirs honors umask, so set the mode explicitly afterwards.
     os.chmod(lock_dir, 0o700)
 
-    lock_path = os.path.join(lock_dir, f"ingest-{space_id}.lock")
+    # Sanitize the space_id used in the FILENAME so a value containing path
+    # separators (e.g. "../etc" or "a/b") cannot escape WIKI_LOCK_DIR. Replace
+    # every character outside [A-Za-z0-9._-] with "_"; if the result is empty
+    # (e.g. an all-separator id), fall back to a short hash of the original.
+    # Note: space_ids that are already [A-Za-z0-9._-]-only sanitize to identity,
+    # so existing lock-file-name assertions are unchanged.
+    safe_space_id = re.sub(r"[^A-Za-z0-9._-]", "_", space_id)
+    if not safe_space_id:
+        safe_space_id = hashlib.sha256(space_id.encode("utf-8")).hexdigest()[:16]
+    lock_path = os.path.join(lock_dir, f"ingest-{safe_space_id}.lock")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     os.chmod(lock_path, 0o600)
 
