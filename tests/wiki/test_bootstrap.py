@@ -536,50 +536,35 @@ class TestBootstrapTiming:
 
 
 class TestBootstrapReadmePrivacyNotice:
-    """AC #8: README must contain the verbatim privacy notice from the spec."""
+    """AC #8: README must contain the verbatim privacy notice from the spec.
 
-    # The exact text from spec lines 645-656 (Privacy and data flow section)
-    EXPECTED_PRIVACY_TEXT = "anytype-llm-wiki runs locally on your machine"
+    Per post-test council R1 addendum item 5: the verbatim 10-bullet block —
+    including the hosted-LLM ToS pass-through paragraph, the Qdrant/Ollama
+    off-localhost embedding-inversion warning, the content-rights-and-PII
+    paragraph, and the GDPR Art. 4(7) + LGPD Art. 5(VI) controller disclaimer —
+    is structurally gated against a fixture file rather than via loose substring
+    checks (which would pass on good-faith truncation).
+    """
 
-    def test_readme_contains_privacy_notice(self):
-        """README.md must contain the exact privacy notice from the spec."""
+    def _readme_path(self):
         import pathlib
-        repo_root = pathlib.Path(__file__).parent.parent.parent
-        readme_path = repo_root / "README.md"
+        return pathlib.Path(__file__).parent.parent.parent / "README.md"
+
+    def test_readme_exists_and_is_readable(self):
+        """README.md must exist and be readable (so a filesystem failure surfaces clearly)."""
+        readme_path = self._readme_path()
         assert readme_path.exists(), f"README.md not found at {readme_path}"
-        content = readme_path.read_text(encoding="utf-8")
-        assert self.EXPECTED_PRIVACY_TEXT in content, (
-            f"README.md missing privacy notice. Expected to contain: {self.EXPECTED_PRIVACY_TEXT!r}"
-        )
+        readme_text = readme_path.read_text(encoding="utf-8")
+        assert readme_text, "README.md is empty or unreadable"
 
-    def test_readme_contains_privacy_section_header(self):
-        """README.md must contain the 'Privacy and data flow' section header."""
-        import pathlib
-        repo_root = pathlib.Path(__file__).parent.parent.parent
-        readme_path = repo_root / "README.md"
-        content = readme_path.read_text(encoding="utf-8")
-        assert "Privacy and data flow" in content, (
-            "README.md missing '### Privacy and data flow' section header"
-        )
-
-    def test_readme_contains_localhost_data_flow_statement(self):
-        """README.md must contain the localhost-only data flow statement."""
-        import pathlib
-        repo_root = pathlib.Path(__file__).parent.parent.parent
-        readme_path = repo_root / "README.md"
-        content = readme_path.read_text(encoding="utf-8")
-        assert "localhost" in content.lower() or "127.0.0.1" in content, (
-            "README.md must describe the localhost-only data flow"
-        )
-
-    def test_readme_contains_gdpr_controller_statement(self):
-        """README.md must contain the GDPR Art. 4(7) controller statement."""
-        import pathlib
-        repo_root = pathlib.Path(__file__).parent.parent.parent
-        readme_path = repo_root / "README.md"
-        content = readme_path.read_text(encoding="utf-8")
-        assert "GDPR" in content or "controller" in content, (
-            "README.md must contain the GDPR controller disclaimer"
+    def test_readme_contains_verbatim_privacy_notice(self):
+        """README.md must contain the verbatim privacy-and-data-flow block (fixture-gated)."""
+        from pathlib import Path
+        readme_text = self._readme_path().read_text(encoding="utf-8")
+        fixture = Path(__file__).parent / "fixtures" / "readme_privacy_notice_verbatim.md"
+        assert fixture.read_text(encoding="utf-8") in readme_text, (
+            "README.md does not contain the verbatim privacy-and-data-flow block "
+            "from tests/wiki/fixtures/readme_privacy_notice_verbatim.md"
         )
 
 
@@ -604,7 +589,7 @@ class TestBootstrapInsufficientTokenScope:
             result_str = str(result)
         except Exception as exc:
             result_str = str(exc)
-        assert "insufficient_token_scope" in result_str or "[CONFIG ERROR]" in result_str, (
+        assert "insufficient_token_scope" in result_str and "[CONFIG ERROR]" in result_str, (
             f"Expected [CONFIG ERROR] insufficient_token_scope, got: {result_str!r}"
         )
 
@@ -625,7 +610,7 @@ class TestBootstrapInsufficientTokenScope:
         except Exception as exc:
             result_str = str(exc)
         # The error must reference Settings → API so operators know where to go
-        assert "Settings" in result_str and "API" in result_str, (
+        assert "Settings → API" in result_str, (
             f"Error must mention 'Settings → API': {result_str!r}"
         )
 
