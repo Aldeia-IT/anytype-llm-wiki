@@ -264,8 +264,13 @@ class TestSpaceIngestLockConcurrency:
         )
         holder.start()
 
-        # Give the child process time to acquire the lock
-        time.sleep(0.3)
+        # Deterministic handoff: block until the child confirms it holds the lock
+        # (the child puts "acquired" on the queue inside its locked context).
+        # This replaces a fixed sleep, removing a CI-flake race.
+        handoff = result_queue.get(timeout=5)
+        assert handoff == "acquired", (
+            f"Child process failed to acquire the lock first; got: {handoff!r}"
+        )
 
         # Attempt to acquire from the parent process — must fail
         try:
