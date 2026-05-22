@@ -70,7 +70,7 @@ class TestDoctorReturnShape:
     def test_run_doctor_has_exit_code(self, monkeypatch):
         """run_doctor() result must include 'exit_code' key."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={"data": [], "models": [{"name": "bge-m3"}]}))
+        respx.get().mock(return_value=httpx.Response(200, json={"data": [], "models": [{"name": "bge-m3"}]}))
         from anytype_llm_wiki.wiki.doctor import run_doctor
         result = run_doctor()
         assert "exit_code" in result, f"run_doctor() missing 'exit_code': {result}"
@@ -79,7 +79,7 @@ class TestDoctorReturnShape:
     def test_run_doctor_exit_code_valid_values(self, monkeypatch):
         """run_doctor() exit_code must be 0, 1, or 2."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={"data": [], "models": [{"name": "bge-m3"}]}))
+        respx.get().mock(return_value=httpx.Response(200, json={"data": [], "models": [{"name": "bge-m3"}]}))
         from anytype_llm_wiki.wiki.doctor import run_doctor
         result = run_doctor()
         assert result["exit_code"] in (0, 1, 2), (
@@ -90,7 +90,7 @@ class TestDoctorReturnShape:
     def test_run_doctor_has_checks_key(self, monkeypatch):
         """run_doctor() result must include 'checks' key (list of check results)."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={"data": [], "models": [{"name": "bge-m3"}]}))
+        respx.get().mock(return_value=httpx.Response(200, json={"data": [], "models": [{"name": "bge-m3"}]}))
         from anytype_llm_wiki.wiki.doctor import run_doctor
         result = run_doctor()
         assert "checks" in result, f"run_doctor() missing 'checks': {result}"
@@ -126,7 +126,7 @@ class TestDoctorChecksPresent:
     def test_check_present_in_report(self, check_name, monkeypatch):
         """run_doctor() report must include check: {check_name}."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "models": [{"name": "bge-m3"}], "result": {"name": "anytype_semantic"}
         }))
         from anytype_llm_wiki.wiki.doctor import run_doctor
@@ -180,7 +180,7 @@ class TestDoctorExitCodes:
         """run_doctor() must return exit_code=1 when ANYTYPE_API_KEY is not set."""
         monkeypatch.delenv("ANYTYPE_API_KEY", raising=False)
         monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={"data": []}))
+        respx.get().mock(return_value=httpx.Response(200, json={"data": []}))
         from anytype_llm_wiki.wiki.doctor import run_doctor
         result = run_doctor()
         assert result.get("exit_code") == 1, (
@@ -195,7 +195,7 @@ class TestDoctorExitCodes:
         respx.get(f"{ANYTYPE_BASE}/v1/spaces").mock(
             side_effect=httpx.ConnectError("connection refused")
         )
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={"data": []}))
+        respx.get().mock(return_value=httpx.Response(200, json={"data": []}))
         from anytype_llm_wiki.wiki.doctor import run_doctor
         result = run_doctor()
         assert result.get("exit_code") == 1, (
@@ -250,7 +250,7 @@ class TestDoctorCheckShape:
         """All checks in run_doctor() report must have 'name'/'check' and 'status' keys."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "models": [{"name": "bge-m3"}], "result": {"name": "anytype_semantic"}
         }))
         from anytype_llm_wiki.wiki.doctor import run_doctor
@@ -265,7 +265,7 @@ class TestDoctorCheckShape:
         """Check status values must be one of OK, WARN, FAIL (case-insensitive)."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "models": [{"name": "bge-m3"}], "result": {"name": "anytype_semantic"}
         }))
         from anytype_llm_wiki.wiki.doctor import run_doctor
@@ -287,7 +287,7 @@ class TestDoctorRamWarn:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
         monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "models": [{"name": "bge-m3"}, {"name": "qwen2.5:7b"}],
             "result": {"name": "anytype_semantic"}
         }))

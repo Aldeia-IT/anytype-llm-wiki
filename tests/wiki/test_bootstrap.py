@@ -102,13 +102,13 @@ class TestBootstrapResult:
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
         # Catch-all mock for all POST/GET on the Anytype base
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -134,13 +134,13 @@ class TestBootstrapResult:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -153,13 +153,13 @@ class TestBootstrapResult:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -188,8 +188,8 @@ class TestBootstrapCreatesTypesAndProperties:
                 pass
             return httpx.Response(200, json={"type": {"id": "t1", "key": "wiki_source"}})
 
-        respx.post(respx.patterns.M).mock(side_effect=capture_type)
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(side_effect=capture_type)
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
 
@@ -207,13 +207,13 @@ class TestBootstrapCreatesTypesAndProperties:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -228,13 +228,13 @@ class TestBootstrapCreatesTypesAndProperties:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "coll-001", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -249,13 +249,13 @@ class TestBootstrapCreatesTypesAndProperties:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -270,13 +270,13 @@ class TestBootstrapCreatesTypesAndProperties:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -301,14 +301,12 @@ class TestBootstrapIdempotency:
             {"id": f"t{i}", "key": key, "name": key.replace("wiki_", "")}
             for i, key in enumerate(CANONICAL_TYPE_KEYS)
         ]
-        respx.get(
-            respx.patterns.M
-        ).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": existing_types,
             "pagination": {"has_more": False}
         }))
         # POST should not be called if all types already exist
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t_new", "key": "wiki_source"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
@@ -328,10 +326,10 @@ class TestBootstrapIdempotency:
             {"id": f"t{i}", "key": key, "name": key}
             for i, key in enumerate(CANONICAL_TYPE_KEYS)
         ]
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": existing_types, "pagination": {"has_more": False}
         }))
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "object": {"id": "c1", "name": "Wiki"},
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -351,10 +349,10 @@ class TestBootstrapIdempotency:
             {"id": f"t{i}", "key": key, "name": key}
             for i, key in enumerate(CANONICAL_TYPE_KEYS)
         ]
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": existing_types, "pagination": {"has_more": False}
         }))
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "object": {"id": "c1", "name": "Wiki"},
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -373,10 +371,10 @@ class TestBootstrapMissingSpace:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(404, json={
+        respx.get().mock(return_value=httpx.Response(404, json={
             "error": "space not found"
         }))
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(404, json={
+        respx.post().mock(return_value=httpx.Response(404, json={
             "error": "space not found"
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -401,7 +399,7 @@ class TestBootstrapMissingSpace:
         respx.post(
             f"{ANYTYPE_BASE}/v1/spaces/{FAKE_MISSING_SPACE_ID}/types"
         ).mock(return_value=httpx.Response(404, json={"error": "space not found"}))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(404, json={}))
+        respx.get().mock(return_value=httpx.Response(404, json={}))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
         try:
             result = wiki_bootstrap(space_id=FAKE_MISSING_SPACE_ID)
@@ -441,13 +439,13 @@ class TestBootstrapCustomDomainTags:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "a"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -492,8 +490,8 @@ class TestBootstrapCustomDomainTags:
                 "data": existing_types, "pagination": {"has_more": False}
             })
 
-        respx.get(respx.patterns.M).mock(side_effect=get_response)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(side_effect=get_response)
+        respx.post().mock(return_value=httpx.Response(200, json={
             "option": {"id": "tag-c", "name": "c"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
@@ -521,13 +519,13 @@ class TestBootstrapTiming:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "property": {"id": "p1", "key": "wiki_url"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         start = time.monotonic()
@@ -597,7 +595,7 @@ class TestBootstrapInsufficientTokenScope:
         respx.post(
             f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/types"
         ).mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -616,8 +614,8 @@ class TestBootstrapInsufficientTokenScope:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [], "pagination": {"has_more": False}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -668,14 +666,14 @@ class TestBootstrapSchemaOutdated:
                 "data": existing_types, "pagination": {"has_more": False}
             })
 
-        respx.get(respx.patterns.M).mock(side_effect=get_response)
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(side_effect=get_response)
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t_new", "key": "wiki_source"},
             "property": {"id": "p_new", "key": "wiki_description"},
             "option": {"id": "o1", "name": "wiki_ai-research"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.patch(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.patch().mock(return_value=httpx.Response(200, json={
             "object": {"id": "coll-001", "name": "Wiki", "wiki_schema_version": "0.2.0"}
         }))
 
@@ -720,15 +718,15 @@ class TestBootstrapSchemaOutdated:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.get(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.get().mock(return_value=httpx.Response(200, json={
             "data": [{"id": "coll-001", "wiki_schema_version": "0.1.0"}],
             "pagination": {"has_more": False}
         }))
-        respx.post(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.post().mock(return_value=httpx.Response(200, json={
             "type": {"id": "t1", "key": "wiki_source"},
             "object": {"id": "c1", "name": "Wiki"},
         }))
-        respx.patch(respx.patterns.M).mock(return_value=httpx.Response(200, json={
+        respx.patch().mock(return_value=httpx.Response(200, json={
             "object": {"id": "coll-001"}
         }))
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
@@ -763,7 +761,7 @@ class TestBootstrapSchemaOutdatedV3Plus:
         # If we get here, the module exists. Seed outdated schema version via mock.
         import respx as _respx, httpx as _httpx
         with _respx.mock:
-            _respx.get(_respx.patterns.M).mock(return_value=_httpx.Response(200, json={
+            _respx.get().mock(return_value=_httpx.Response(200, json={
                 "data": [{"id": "coll-001", "wiki_schema_version": "0.2.0"}],
                 "pagination": {"has_more": False}
             }))
@@ -783,7 +781,7 @@ class TestBootstrapSchemaOutdatedV3Plus:
         from anytype_llm_wiki.wiki.query import wiki_query  # v0.4.0 module
         import respx as _respx, httpx as _httpx
         with _respx.mock:
-            _respx.get(_respx.patterns.M).mock(return_value=_httpx.Response(200, json={
+            _respx.get().mock(return_value=_httpx.Response(200, json={
                 "data": [{"id": "coll-001", "wiki_schema_version": "0.2.0"}],
                 "pagination": {"has_more": False}
             }))
@@ -824,8 +822,8 @@ class TestBootstrapPatchDecisionScaffolding:
         from anytype_llm_wiki.wiki.ingest import wiki_ingest
         import respx as _respx, httpx as _httpx
         with _respx.mock:
-            _respx.post(_respx.patterns.M).mock(return_value=_httpx.Response(200, json={}))
-            _respx.get(_respx.patterns.M).mock(return_value=_httpx.Response(200, json={
+            _respx.post().mock(return_value=_httpx.Response(200, json={}))
+            _respx.get().mock(return_value=_httpx.Response(200, json={
                 "data": [], "pagination": {"has_more": False}
             }))
             result = wiki_ingest(source="https://example.com/paper", space_id=FAKE_SPACE_ID)
