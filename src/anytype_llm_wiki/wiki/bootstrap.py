@@ -48,9 +48,12 @@ def _object_deeplink(space_id: str, object_id: str) -> str:
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:
-    """Parse a dotted version string into a tuple of ints for comparison.
+    """Parse a dotted version string into a 3-tuple of ints for comparison.
 
-    Non-integer components are treated as 0; missing components pad to 0.
+    Non-integer components are treated as 0. Missing trailing components are
+    padded to 0 so semantically-equal versions of differing arity compare equal
+    (e.g. ``_version_tuple("0.2") == _version_tuple("0.2.0")``). Versions with
+    more than three components retain all of them.
     """
     parts: list[int] = []
     for part in str(version).split("."):
@@ -58,6 +61,10 @@ def _version_tuple(version: str) -> tuple[int, ...]:
             parts.append(int(part))
         except ValueError:
             parts.append(0)
+    # Pad to at least 3 components (major.minor.patch) so comparisons against
+    # equal-but-differently-arity versions do not spuriously order.
+    while len(parts) < 3:
+        parts.append(0)
     return tuple(parts)
 
 
