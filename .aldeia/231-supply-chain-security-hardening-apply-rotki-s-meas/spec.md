@@ -1,6 +1,6 @@
 # Supply-Chain Security Hardening (rotki measures) — #231
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-05-30
 **Author:** spec-writer agent
 **Review rounds:** 0
