@@ -8,50 +8,54 @@ here. Versions not listed require no migration steps.
 
 v0.2.0 is the first public release, so there is no prior public version to
 migrate **from**. There is, however, a one-time setup step that v0.2.0
-introduces, and which every user — new or upgrading — should follow before
-indexing.
+introduces, and which every user should follow before indexing.
 
 ### 1. Configure your environment
 
-Ensure your `.env` is populated (see the [README](README.md) for the full list),
-including `ANYTYPE_API_KEY`, `ANYTYPE_SPACE_ID`, `QDRANT_URL`, `OLLAMA_BASE_URL`,
-and `OLLAMA_EMBEDDING_MODEL`.
+Create a `.env` (or set the equivalent environment variables). At minimum you
+need `ANYTYPE_API_KEY`; the Anytype, Qdrant, and Ollama endpoints default to
+`localhost`. See the [README](README.md) configuration reference and
+[`.env.example`](.env.example) for the full list.
 
-### 2. Provision the Wiki object type
+### 2. Provision the wiki schema
 
-Run the bootstrap command to provision the dedicated "Wiki" object type and its
-properties in your Anytype space:
+Run the bootstrap command to provision the dedicated wiki schema (Types,
+Properties, domain tags, and a root Collection) in your Anytype space:
 
 ```bash
-anytype-wiki wiki-bootstrap
+anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
 ```
 
 This command is **idempotent** — it is safe to run on a fresh space or an
-existing one, and re-running it will not create duplicates. Pass `--space-id` to
-target a specific space, `--dry-run` to preview the changes without applying
-them, or `--force` if you need to reconcile an existing setup.
+existing one, and re-running it will not create duplicates. Add `--dry-run` to
+preview the planned changes without calling Anytype, `--domain-tags a,b,c` to
+override the default domain-tag taxonomy on first bootstrap, or `--json` for
+machine-readable output.
 
 ### 3. Confirm the environment is healthy
 
 Run the read-only health check to confirm everything is wired up correctly:
 
 ```bash
-anytype-wiki doctor
+anytype-llm-wiki doctor
 ```
 
 `doctor` verifies the Anytype API, Qdrant, Ollama, and embedding-model
 availability without modifying anything. It exits `0` only when all checks pass.
 Resolve any reported issues before proceeding.
 
-### 4. Index your knowledge base
+### 4. Index and serve
 
-Once `doctor` reports all green, index your objects:
+Register the MCP server with your client and let it index your space (the first
+`semantic_search` triggers a reindex when the collection is empty; you can also
+invoke the `reindex_anytype` tool explicitly). To run the server directly:
 
 ```bash
-anytype-wiki index
+anytype-llm-wiki
 ```
 
-You are now ready to run `anytype-wiki serve` and connect an MCP client.
+See the [README](README.md) for client registration (Claude Desktop, Cursor,
+Claude Code) and background/auto-reindex setup.
 
 ## Future versions
 

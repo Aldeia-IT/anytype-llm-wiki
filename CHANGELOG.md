@@ -9,10 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Roadmap
 
-- **Coming in v0.3.0: automated content ingestion.** Scheduled, hands-off
-  ingestion that keeps your Qdrant index continuously in sync with your Anytype
-  knowledge base, so semantic search always reflects the latest content without
-  manual re-indexing.
+- **Coming in v0.3.0: automated content ingestion** — LLM-driven extraction of
+  entities and concepts from your sources into typed Anytype Objects with
+  bidirectional Relations, turning the v0.2.0 foundation into a full LLM wiki.
 
 ## [0.2.0] - 2026-05-30
 
@@ -21,30 +20,33 @@ First public release (preview). This is the first open-source release of
 
 ### Added
 
-- **`wiki-bootstrap` command** — provisions a dedicated "Wiki" object type and
-  its supporting properties in an Anytype space. The operation is idempotent, so
-  it is safe to run repeatedly; re-running reconciles the space to the expected
-  shape without creating duplicates. Supports `--space-id`, `--dry-run`, and
-  `--force`.
-- **`doctor` command** — a read-only health check that verifies connectivity and
-  readiness across the Anytype API, Qdrant, and Ollama, and confirms the
-  configured embedding model is available. It changes nothing and exits `0` only
-  when every check is green, making it suitable for setup validation and CI
-  gating. Supports `--space-id`.
+- **`wiki-bootstrap` command** — provisions the dedicated wiki schema (Types,
+  Properties, domain tags, and a root Collection) in an Anytype space. The
+  operation is idempotent: it is safe to run repeatedly and reconciles the space
+  to the expected schema without creating duplicates, including an in-place
+  schema-upgrade path. Flags: `--space-id` (required), `--domain-tags`,
+  `--dry-run`, and `--json`.
+- **`doctor` command** — a read-only preflight health check that verifies
+  connectivity and readiness across the Anytype API, Qdrant, and Ollama, and
+  confirms the configured embedding model is available. It changes nothing and
+  exits `0` only when every check passes, making it suitable for setup
+  validation. Flag: `--json`.
 - **Public-release collateral** — security policy (`SECURITY.md`), third-party
-  attribution (`NOTICE`), contribution and licensing guidance
-  (`CONTRIBUTING.md`), and documentation of the project's supply-chain posture
-  (two-layer dependency pinning: exact, hashed versions in `uv.lock` for
-  reproducible installs, with compatible ranges declared in `pyproject.toml`).
+  attribution (`NOTICE`), contribution and licensing guidance (`CONTRIBUTING.md`),
+  and documentation of the project's supply-chain posture (two-layer dependency
+  pinning: exact, hashed versions in `uv.lock` for reproducible installs, with
+  compatible ranges declared in `pyproject.toml`).
 
 ### Foundation
 
-This release builds on the existing `index` and `serve` commands:
+This release builds on the existing semantic-search foundation:
 
-- `index` — indexes Anytype objects into the Qdrant vector database using local
-  Ollama embeddings (`--full` for a complete re-index).
-- `serve` — runs the MCP server that exposes semantic search to MCP clients such
-  as Claude Desktop.
+- The MCP server (run with `anytype-llm-wiki`, no arguments) exposes the
+  `semantic_search` and `reindex_anytype` tools to MCP clients such as Claude
+  Desktop, Cursor, and Claude Code.
+- Indexing is incremental: only objects that changed since the last run are
+  re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
+  `semantic_search` also prompts a reindex when the collection is empty).
 
 [Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/releases/tag/v0.2.0
