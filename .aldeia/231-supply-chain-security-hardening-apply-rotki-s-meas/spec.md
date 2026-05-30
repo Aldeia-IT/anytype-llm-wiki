@@ -3,7 +3,18 @@
 **Status:** SPEC
 **Date:** 2026-05-30
 **Author:** spec-writer agent
-**Review rounds:** 1
+**Review rounds:** 2
+
+> **Round 2 re-review (2026-05-30): APPROVED.** Both specialist re-reviewers
+> (infrastructure-lead, chief-technology-officer) returned APPROVED — B1 confirmed correctly
+> resolved (`uv version --short` verified as a real current uv subcommand that reads
+> `project.version` from `pyproject.toml`), all SF-1…SF-10 confirmed present in the spec body,
+> SHA pins unchanged, no new contradictions. The lead applied the residual non-blocking R2
+> items inline: SF2-1 (exact-match tagging contract note on the B1 guard), SF2-2
+> (defense-in-depth note clarifying the `pypi` Environment — not the `if:` expression — is the
+> publish security boundary), and the cosmetic step-6 self-reference fix. The release Mermaid
+> diagram collapsing the two release jobs into one chain is accepted as cosmetic (the prose is
+> authoritative and correct). Zero findings remain open.
 
 > **Round 1 fixes applied (2026-05-30).** This revision addresses every finding in
 > `review-r1.md` (1 BLOCKING, 10 SHOULD-FIX, 4 SUGGESTION) plus the underlying specialist
@@ -778,14 +789,27 @@ jobs:
   instead of a poisoned or partial PyPI release. The guard is gated to
   `github.event_name == 'push'` because a `workflow_dispatch` dry-run has no `v*` tag to
   compare against.
+  - **Tagging contract (R2 SF2-1):** the comparison is an exact string match with no PEP 440
+    normalization. Release tags MUST be exactly `v<project.version>` (e.g. `pyproject.toml`
+    `version = "0.2.0"` → tag `v0.2.0`). Equivalent-but-non-identical forms (`v0.2`,
+    `v0.2.0.0`, `0.2.0`, pre-release suffixes formatted differently) fail closed with the
+    `::error::` message above — this is intentional (fail-closed), but maintainers should
+    follow the exact-match contract to avoid surprise aborts. Documented in `docs/releasing.md`.
 - **SF-2 lockfile gate:** `uv lock --check` runs in BOTH jobs so a tag pushed to a commit
   that never passed the merge-gate cannot build/audit from a drifted lockfile.
 - **SF-10:** the previous redundant `uv sync` before `uv build` is removed — `uv build`
   builds in its own isolated environment.
 - **SF-4 dry-run:** `workflow_dispatch` with `skip_publish: true` exercises
   audit + build + attest without publishing, so the publish path is testable before the
-  first real tag. The `if:` guard on the publish step cannot bypass the `environment: pypi`
-  reviewer gate (the gate applies to the whole job).
+  first real tag. On a real `v*` tag push `inputs.skip_publish` is null, and
+  `null != true` evaluates true, so the publish step runs — the intended behavior.
+  - **Defense-in-depth note (R2 SF2-2):** the `if: ${{ inputs.skip_publish != true }}`
+    expression is a convenience guard, NOT the security boundary. The `if:` guard on the
+    publish step cannot bypass the `environment: pypi` reviewer gate (the gate applies to
+    the whole job). Even if a future edit weakened or removed the `if:`, the Environment
+    required-reviewer + restricted-tag rules (AC5 prerequisite) remain the load-bearing
+    control. Implementers must not rely on the `if:` expression alone to prevent an
+    unintended publish.
 - Elevated permissions (`id-token: write`, `attestations: write`) are scoped to the
   `build-and-publish` job only, following least-privilege.
 - `environment: pypi` links this job to the GitHub Environment with required-reviewer
@@ -954,7 +978,8 @@ Before pushing the first `v*` tag:
    Confirm a `required_reviewers` rule with ≥1 reviewer AND a `v*` tag policy. If either is
    missing, the publish gate is OPEN — do not tag until fixed.
 6. Confirm `pyproject.toml` `version` matches the tag you are about to push (the B1 guard
-   will abort the release otherwise — this is the safety net, not a substitute for step 6).
+   will abort the release otherwise — the guard is the automated safety net, not a substitute
+   for this manual pre-tag check).
 
 If steps 1-4 are skipped, the first `release.yml` run will fail at the publish step (or,
 worse, publish without review if the Environment is a no-op label) — step 5 catches this.
