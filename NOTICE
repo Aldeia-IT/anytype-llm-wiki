@@ -1,0 +1,55 @@
+anytype-llm-wiki
+Copyright (c) 2026 Aldeia IT
+Licensed under the MIT License (see LICENSE).
+
+This product includes third-party software components. The licenses for these
+components are permissive and compatible with the MIT License. This NOTICE file
+is provided to satisfy the attribution requirements of those licenses.
+
+
+Third-party components
+----------------------
+
+The following runtime dependencies are used by this project. Each is listed
+with its respective license:
+
+  fastmcp        Apache License 2.0
+  qdrant-client  Apache License 2.0
+  httpx          BSD 3-Clause License
+  ollama         MIT License
+  pydantic       MIT License
+  python-dotenv  BSD 3-Clause License
+
+Embedding model:
+
+  nomic-embed-text  Apache License 2.0 (used via Ollama)
+
+
+Apache License 2.0 attribution
+------------------------------
+
+The following components are licensed under the Apache License, Version 2.0:
+fastmcp, qdrant-client, and the nomic-embed-text embedding model.
+
+  Portions of this product include software developed under the Apache
+  License, Version 2.0. You may obtain a copy of the License at:
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+  License for the specific language governing permissions and limitations
+  under the License.
+
+This attribution is provided in accordance with Section 4(d) of the Apache
+License, Version 2.0. The above components retain their own copyright notices
+and license terms as distributed by their respective authors.
+
+
+Full license texts
+------------------
+
+This NOTICE summarizes attribution information only. The complete license texts
+and copyright notices for each component are available from that component's
+own source repository and distribution package.
