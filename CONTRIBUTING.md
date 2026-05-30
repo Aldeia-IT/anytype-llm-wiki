@@ -45,6 +45,18 @@ src/anytype_llm_wiki/
 - Tests go in `tests/` and mirror the source structure
 - Integration tests that need external services should skip gracefully with `pytest.skip()`
 
+## Licensing of contributions
+
+This project is distributed under the [MIT License](LICENSE), and contributions are accepted under that same license. By submitting a contribution (for example, a pull request), you agree that your work is offered under the MIT License — the same license the project is released under. This is GitHub's standard [inbound=outbound](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service#6-contributions-under-repository-license) model: what flows in matches what flows out, so everyone can use, modify, and share the result on the same clear, permissive terms. No separate paperwork is required.
+
+Optionally, you may add a [Developer Certificate of Origin (DCO)](https://developercertificate.org/) sign-off to certify that you have the right to submit your work. This is encouraged but not required. To sign off a commit, use the `-s` flag:
+
+```bash
+git commit -s -m "Your commit message"
+```
+
+This appends a `Signed-off-by` line using your configured Git name and email.
+
 ## Areas we need help
 
 - **Chunking strategies** — the current heading-based chunker works for notes and docs, but Anytype has many object types (tasks, bookmarks, collections). Different types may need different chunking.
