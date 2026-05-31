@@ -26,7 +26,15 @@ src/anytype_llm_wiki/
 ├── anytype_client.py   # Anytype REST API client
 ├── chunker.py          # Markdown → chunks with metadata
 ├── embedder.py         # Ollama embedding client
-└── indexer.py          # Incremental index orchestrator
+├── indexer.py          # Incremental index orchestrator
+└── wiki/               # Typed-wiki subpackage (v0.2.0 features)
+    ├── bootstrap.py    # wiki-bootstrap: idempotent schema provisioning
+    ├── doctor.py       # doctor: read-only health check
+    ├── cli.py          # wiki CLI entry points
+    ├── wiki_client.py  # Anytype typed-schema REST client
+    ├── config.py       # wiki-specific config
+    ├── types_schema.py # Type/Property/tag schema definitions
+    └── util.py         # shared helpers
 ```
 
 ## How to contribute

@@ -23,7 +23,7 @@ Run the bootstrap command to provision the dedicated wiki schema (Types,
 Properties, domain tags, and a root Collection) in your Anytype space:
 
 ```bash
-anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
+uv run anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
 ```
 
 This command is **idempotent** — it is safe to run on a fresh space or an
@@ -37,7 +37,7 @@ machine-readable output.
 Run the read-only health check to confirm everything is wired up correctly:
 
 ```bash
-anytype-llm-wiki doctor
+uv run anytype-llm-wiki doctor
 ```
 
 `doctor` verifies the Anytype API, Qdrant, Ollama, and embedding-model
@@ -51,7 +51,7 @@ Register the MCP server with your client and let it index your space (the first
 invoke the `reindex_anytype` tool explicitly). To run the server directly:
 
 ```bash
-anytype-llm-wiki
+uv run anytype-llm-wiki
 ```
 
 See the [README](README.md) for client registration (Claude Desktop, Cursor,
