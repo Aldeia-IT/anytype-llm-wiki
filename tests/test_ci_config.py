@@ -33,10 +33,14 @@ PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
 
 # Regex matching a SHA-pinned `uses:` value: anything@<40-hex-chars>
 _SHA_PIN_RE = re.compile(r"uses:\s+\S+@[0-9a-f]{40}")
-# Regex to identify ANY `uses:` line
-_USES_RE = re.compile(r"^\s+uses:\s+", re.MULTILINE)
-# Regex to identify a `uses:` line NOT SHA-pinned
-_UNPINNED_RE = re.compile(r"^\s+uses:\s+(?!.*@[0-9a-f]{40})", re.MULTILINE)
+# Regex to identify ANY `uses:` line and capture its reference TOKEN (the value
+# immediately after `uses:`, up to the first whitespace). Anchoring to the token —
+# rather than scanning the whole line — closes the trailing-comment soft-pass where a
+# tag-pinned action (`uses: foo/bar@v4  # pinned-from @<40-hex>`) carries a 40-hex
+# string only in its `# …` comment (post-test addendum item 4 / Council-ADV-3).
+_USES_TOKEN_RE = re.compile(r"^\s+(?:-\s+)?uses:\s+(\S+)", re.MULTILINE)
+# A correctly SHA-pinned reference token: the value must itself end in @<40-hex>.
+_TOKEN_PINNED_RE = re.compile(r"\S+@[0-9a-f]{40}$")
 
 
 def _read(path: Path) -> str:
@@ -92,16 +96,19 @@ class TestAC2ShaPinnedActions:
 
     def _assert_no_unpinned_uses(self, path: Path) -> None:
         text = _read(path)
-        uses_lines = _USES_RE.findall(text)
-        unpinned = _UNPINNED_RE.findall(text)
-        assert len(uses_lines) > 0, (
+        # Capture the reference TOKEN of every `uses:` line (the value before any
+        # trailing `# …` comment, which `\S+` naturally stops at on whitespace).
+        tokens = _USES_TOKEN_RE.findall(text)
+        assert len(tokens) > 0, (
             f"{path.name} has no 'uses:' lines at all — the workflow looks empty or malformed."
         )
+        unpinned = [tok for tok in tokens if not _TOKEN_PINNED_RE.match(tok)]
         assert unpinned == [], (
-            f"{path.name} contains {len(unpinned)} unpinned 'uses:' line(s) "
-            f"(must match @[0-9a-f]{{40}}). "
-            f"Every action reference must use a full 40-character commit SHA, not a tag or branch. "
-            f"Offending lines found in {path}"
+            f"{path.name} contains {len(unpinned)} unpinned 'uses:' reference(s) "
+            f"(the token after 'uses:' must itself end in @[0-9a-f]{{40}}). "
+            f"Every action reference must use a full 40-character commit SHA, not a tag or "
+            f"branch — and a 40-hex SHA hiding in a trailing comment does not count. "
+            f"Offending token(s): {unpinned} in {path}"
         )
 
     def test_ci_yml_all_uses_sha_pinned(self):
@@ -387,4 +394,62 @@ class TestDependabotConfig:
         assert has_uv or has_pip, (
             f"dependabot.yml must declare either the 'uv' or 'pip' package-ecosystem "
             f"to keep Python dependencies up to date (AC2 currency): {DEPENDABOT_YML}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# fold #244 — OSS-hygiene scanner suite present on the TAG/audit path
+# Spec ref: spec-addendum-fold-244.md item 9 (bandit / pip-licenses / gitleaks).
+# String-presence is sufficient here, mirroring the other static CI-config tests.
+# ---------------------------------------------------------------------------
+
+class TestFold244OssHygieneScanners:
+    """The bandit, pip-licenses, and gitleaks scanners must appear on the tag/audit path."""
+
+    def test_bandit_present_on_tag_or_audit_path(self):
+        """fold-244: bandit (Python SAST) must run in release.yml and/or audit.yml."""
+        in_release = "bandit" in _read(RELEASE_YML)
+        in_audit = "bandit" in _read(AUDIT_YML)
+        assert in_release or in_audit, (
+            "bandit (Python static analysis) must appear in release.yml and/or audit.yml "
+            "(fold #244 OSS-hygiene scanner suite)."
+        )
+
+    def test_pip_licenses_present_on_tag_or_audit_path(self):
+        """fold-244: pip-licenses (license compatibility) must run in release.yml and/or audit.yml."""
+        in_release = "pip-licenses" in _read(RELEASE_YML)
+        in_audit = "pip-licenses" in _read(AUDIT_YML)
+        assert in_release or in_audit, (
+            "pip-licenses (license compatibility) must appear in release.yml and/or audit.yml "
+            "(fold #244 OSS-hygiene scanner suite)."
+        )
+
+    def test_gitleaks_present_on_tag_or_audit_path(self):
+        """fold-244: gitleaks (secret scanning) must run in release.yml and/or audit.yml."""
+        in_release = "gitleaks" in _read(RELEASE_YML)
+        in_audit = "gitleaks" in _read(AUDIT_YML)
+        assert in_release or in_audit, (
+            "gitleaks (secret scanning) must appear in release.yml and/or audit.yml "
+            "(fold #244 OSS-hygiene scanner suite)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Council-ADV-4 — actionlint YAML-validity gate in ci.yml
+# Spec ref: spec-addendum-post-test-r1.md item 3.
+# Without actionlint, a structurally-broken-but-string-present workflow passes
+# the presence tests yet fails at GitHub parse time = day-one red main.
+# ---------------------------------------------------------------------------
+
+class TestActionlintGate:
+    """ci.yml must invoke actionlint to validate the workflow files."""
+
+    def test_ci_yml_runs_actionlint(self):
+        """Council-ADV-4: ci.yml must contain an 'actionlint' invocation."""
+        text = _read(CI_YML)
+        assert "actionlint" in text, (
+            "ci.yml must invoke 'actionlint' to validate the Actions schema of all three "
+            "workflow files (Council-ADV-4 / post-test addendum item 3). A structurally-broken "
+            "workflow that merely contains the right strings would otherwise red-line main at "
+            f"GitHub parse time: {CI_YML}"
         )
