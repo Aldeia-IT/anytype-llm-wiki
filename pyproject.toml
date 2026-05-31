@@ -19,7 +19,7 @@ anytype-llm-wiki = "anytype_llm_wiki.server:main"
 dev = ["pytest>=8.0.0"]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.29.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
