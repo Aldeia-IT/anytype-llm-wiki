@@ -72,8 +72,12 @@ class TestAC1LockfileFrozen:
         # AC1: release path re-asserts lockfile consistency so a tag pushed to a
         # commit that bypassed the merge-gate cannot build from a drifted lockfile (SF-2).
         text = _read(RELEASE_YML)
-        assert "uv lock --check" in text, (
-            f"release.yml is missing 'uv lock --check' (AC1 release-path lockfile gate): {RELEASE_YML}"
+        count = text.count("uv lock --check")
+        assert count >= 2, (
+            f"release.yml must run 'uv lock --check' on the release path in BOTH the audit job "
+            f"and the build-and-publish job (AC1 / SF-2: a tag pushed to a commit that bypassed "
+            f"the merge-gate must not build from a drifted lockfile). Found {count} occurrence(s), "
+            f"expected >= 2: {RELEASE_YML}"
         )
 
 
