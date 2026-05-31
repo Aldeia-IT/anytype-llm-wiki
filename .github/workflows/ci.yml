@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lockfile check + tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]   # min supported + current latest (AC7 / SF-9)
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Check lockfile consistency
+        run: uv lock --check
+
+      - name: Install dependencies (frozen)
+        run: uv sync --frozen --all-extras --python ${{ matrix.python-version }}
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python-version }} pytest
+
+  actionlint:
+    name: Lint workflow files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # actionlint validates the Actions schema of all three workflow files so a
+      # structurally-broken-but-string-present workflow cannot reach main and red-line
+      # it at GitHub parse time. Installed via `go install` (Go is preinstalled on
+      # ubuntu-latest) and invoked as a `run:` step — deliberately NOT a pinned action
+      # reference, which would otherwise need SHA-pinning (AC2) and pull in a
+      # third-party action.
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.9
+
+      - name: Run actionlint on all workflows
+        run: |
+          "$(go env GOPATH)/bin/actionlint" \
+            .github/workflows/ci.yml \
+            .github/workflows/release.yml \
+            .github/workflows/audit.yml
