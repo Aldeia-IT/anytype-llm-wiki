@@ -157,11 +157,19 @@ For continuous indexing, run a reindex on a schedule. Reindex is available as th
   uv run python -c "from anytype_llm_wiki.indexer import reindex; reindex()"
 ```
 
-**macOS (launchd):** a sample plist is provided at `com.aldeia.anytype-llm-wiki-reindex.plist`. Edit the interpreter path and `ANYTYPE_API_KEY` for your install, then:
+**macOS (launchd):** a sample plist is provided at `com.aldeia.anytype-llm-wiki-reindex.plist`. Edit the absolute `uv` path (find it with `which uv`), the `--directory` path to your repo checkout, and `ANYTYPE_API_KEY` for your install, then:
 ```bash
 cp com.aldeia.anytype-llm-wiki-reindex.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.aldeia.anytype-llm-wiki-reindex.plist
 ```
+
+**Log rotation:** the launchd job appends to `~/Library/Logs/anytype-llm-wiki/reindex.log` every 30 minutes with no built-in rotation, so the file grows unbounded over time. On macOS, rotate it with a `newsyslog.d` fragment:
+```
+# /etc/newsyslog.d/anytype-llm-wiki.conf
+# logfilename                                                [owner:group]  mode count size  when  flags
+/Users/YOUR_USER/Library/Logs/anytype-llm-wiki/reindex.log                  644   7     1024  *     J
+```
+This keeps 7 compressed (`J` = bzip2) rotations, rolling at ~1 MB. Adjust `count`/`size` to taste, and replace `YOUR_USER` with your username.
 
 ## Performance
 
@@ -260,6 +268,8 @@ Longer-term
 | Package manager | uv / pip | uv |
 | Body content search | Yes | Yes |
 | **Typed wiki pipeline (v0.2+)** | **Planned** | — |
+
+The official [`anyproto/anytype-mcp`](https://github.com/anyproto/anytype-mcp) exposes Anytype object access over the API but does not provide built-in semantic / vector search. anytype-llm-wiki's embedding-backed semantic retrieval is its core differentiator over that API-access MCP.
 
 ## Contributing
 

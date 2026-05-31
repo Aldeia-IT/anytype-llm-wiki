@@ -3,8 +3,15 @@
 <!--
   Example launchd job for periodic anytype-llm-wiki reindex on macOS.
 
-  Community users: copy this file to ~/Library/LaunchAgents/, replace the
-  placeholder API keys below with your own, and load with:
+  Community users: copy this file to ~/Library/LaunchAgents/, then edit:
+    - the absolute path to `uv` in ProgramArguments (launchd has no PATH, so it
+      MUST be absolute — find yours with `which uv`, e.g. /opt/homebrew/bin/uv
+      or ~/.local/bin/uv);
+    - the `--directory` path to point at your anytype-llm-wiki repo checkout
+      (this is the documented `uv sync` source install — it runs the project's
+      .venv interpreter, matching the README cron form);
+    - the placeholder API keys below.
+  Then load with:
     launchctl load ~/Library/LaunchAgents/com.aldeia.anytype-llm-wiki-reindex.plist
 
   For production deployments, do NOT commit real keys in this file. Load
@@ -18,7 +25,11 @@
     <string>com.aldeia.anytype-llm-wiki-reindex</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/YOUR_USER/.local/share/uv/tools/anytype-llm-wiki/bin/python3</string>
+        <string>/Users/YOUR_USER/.local/bin/uv</string>
+        <string>run</string>
+        <string>--directory</string>
+        <string>/path/to/anytype-llm-wiki</string>
+        <string>python3</string>
         <string>-c</string>
         <string>from anytype_llm_wiki.indexer import reindex; reindex()</string>
     </array>
