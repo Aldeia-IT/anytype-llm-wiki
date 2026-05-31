@@ -10,14 +10,17 @@ def _services_available() -> bool:
     import httpx
 
     try:
-        httpx.get(f"{config.OLLAMA_URL}/api/tags", timeout=3)
-        httpx.get(f"{config.ANYTYPE_API_URL}/v1/spaces", headers={
+        resp = httpx.get(f"{config.OLLAMA_URL}/api/tags", timeout=3)
+        resp.raise_for_status()
+        resp = httpx.get(f"{config.ANYTYPE_API_URL}/v1/spaces", headers={
             "Authorization": f"Bearer {config.ANYTYPE_API_KEY}",
             "Anytype-Version": config.ANYTYPE_API_VERSION,
         }, timeout=3)
-        httpx.get(f"{config.QDRANT_URL}/collections", headers={
+        resp.raise_for_status()
+        resp = httpx.get(f"{config.QDRANT_URL}/collections", headers={
             "api-key": config.QDRANT_API_KEY,
         }, timeout=3)
+        resp.raise_for_status()
         return True
     except httpx.HTTPError:
         return False

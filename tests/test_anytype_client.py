@@ -12,7 +12,7 @@ def check_anytype():
     import httpx
 
     try:
-        httpx.get(
+        resp = httpx.get(
             f"{config.ANYTYPE_API_URL}/v1/spaces",
             headers={
                 "Authorization": f"Bearer {config.ANYTYPE_API_KEY}",
@@ -20,6 +20,7 @@ def check_anytype():
             },
             timeout=5,
         )
+        resp.raise_for_status()
     except httpx.HTTPError:
         pytest.skip("Anytype API not reachable")
 
