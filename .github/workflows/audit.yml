@@ -48,7 +48,20 @@ jobs:
         # the bare token (e.g. "GPL-3.0-only" != "GPL"), so the gate would silently pass a
         # genuinely GPL/AGPL dependency. --partial-match also flags LGPL via "GPL"
         # (acceptable/conservative for an MIT project).
-        run: uvx pip-licenses==5.5.5 --from=mixed --partial-match --fail-on="GPL;AGPL;SSPL;EUPL"
+        #
+        # PROJECT-SCOPED via `uv run`, NOT `uvx`: `uvx` runs pip-licenses in an isolated
+        # ephemeral venv, so it scans only its OWN ~3 deps — never the project tree — making
+        # the gate a vacuous no-op that can never catch a real GPL/AGPL dependency. `uv run`
+        # runs it against the synced project environment (verified: 85 packages). The
+        # `uv sync --frozen --all-extras` step above is what makes that project env available.
+        #
+        # docutils WAIVER (--ignore-packages docutils): docutils:0.22.4 carries a GPL Trove
+        # classifier, but the ONLY GPL-licensed file in the package is an unused Emacs editor
+        # config (rst.el); the package itself is public-domain + BSD and is AGPL-clean (which
+        # matters for this network-served MCP). The waiver is per-package and auditable; the
+        # --fail-on token set is intentionally NOT broadened. Upstream COPYING:
+        # https://docutils.sourceforge.io/COPYING.html
+        run: uv run --frozen --with pip-licenses==5.5.5 python -m piplicenses --from=mixed --partial-match --fail-on="GPL;AGPL;SSPL;EUPL" --ignore-packages docutils
 
       - name: Secret scan (gitleaks)
         # `gitleaks git` scans the full commit HISTORY (requires fetch-depth: 0 on checkout);
