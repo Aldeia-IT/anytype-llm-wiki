@@ -23,7 +23,7 @@ def _services_available() -> bool:
             "api-key": config.QDRANT_API_KEY,
         }, timeout=3)
         return True
-    except (httpx.ConnectError, httpx.TimeoutException):
+    except httpx.HTTPError:
         return False
 
 
