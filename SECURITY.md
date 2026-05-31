@@ -76,7 +76,7 @@ This policy also reflects the vulnerability-handling and reporting expectations
 of the EU Cyber Resilience Act (Regulation (EU) 2024/2847). The Act establishes
 obligations for products with digital elements, including coordinated
 vulnerability handling and the reporting of actively exploited vulnerabilities;
-its Article 14 reporting obligations apply from 11 June 2026. By maintaining a
+its Article 14 reporting obligations apply from 11 September 2026. By maintaining a
 clear private reporting channel, defined response timelines, and a coordinated
 disclosure process, the project takes coordinated vulnerability handling
 seriously and aligns with these expectations.

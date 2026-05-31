@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-05-30
 
-First public release (preview). This is the first open-source release of
-`anytype-llm-wiki` and marks the start of public versioning.
+Initial tagged preview release. This marks the start of public semantic
+versioning for `anytype-llm-wiki`.
 
 ### Added
 
