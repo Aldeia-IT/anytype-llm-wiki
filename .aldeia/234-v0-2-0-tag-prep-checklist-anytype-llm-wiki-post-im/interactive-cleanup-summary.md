@@ -60,8 +60,10 @@ the remaining tag-gating work is:
    `uv lock` check; the **`pyproject.toml` minor-range upper bounds** (e.g. `>=1.2,<1.3`) still
    need to be applied if #231 doesn't.
 3. **Version bump** `pyproject.toml` `0.1.0` → `0.2.0` (still 0.1.0).
-4. **License-scan** (`pip-licenses`, fail on GPL/AGPL/SSPL/EUPL) and **`.bandit` baseline** — only
-   if #231 deferred them (its council flagged an OSS-hygiene follow-up). Don't duplicate.
+4. **License-scan / `.bandit` / gitleaks — NOT #234's job (deduped 2026-05-31).** These were
+   folded into **#231**'s impl scope (see #231 `spec-addendum-fold-244.md`); they land on #231's
+   tag/audit CI. The former tracking ticket **#244 is closed**. Do **not** re-implement them in
+   #234. (Likewise `SECURITY.md` is #234's — #231 will not duplicate it.)
 5. **Developer-doc polish** (Jan's product/tech split — tech owns dev docs): confirm the exact
    source-install MCP registration command works as written; verify the "FastMCP v3" comparison
    detail.
