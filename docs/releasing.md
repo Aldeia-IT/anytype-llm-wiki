@@ -7,6 +7,15 @@ rests on the `pypi` GitHub Environment being correctly protected — that contro
 is **fail-open**, so the first-release checklist below includes a scriptable
 hard-gate that you MUST run before the first tag.
 
+> **⚠️ Publishing is OFF by default — the project is git-tag-only.** The `uv publish`
+> step is gated on the repo variable **`PYPI_PUBLISH_ENABLED`** (Settings → Secrets
+> and variables → Actions → Variables). While it is unset/`false`, a `v*` tag runs
+> audit + build + provenance-attest and goes **green, but nothing is published to
+> PyPI** — this is the intended state for v0.2.0 (dogfooded internally first).
+> Turning publishing on is step **(d)** of the first-release checklist below: set
+> `PYPI_PUBLISH_ENABLED=true` *after* the trusted-publisher + Environment setup.
+> You never edit or remove the guard — you flip the variable.
+
 > **Audience:** maintainers with admin access to `Aldeia-IT/anytype-llm-wiki` and
 > ownership/maintainer rights on the PyPI project `anytype-llm-wiki`.
 
@@ -21,8 +30,10 @@ A push of a `v*` tag (e.g. `v0.2.0`) triggers `.github/workflows/release.yml`:
    gitleaks). Any finding fails the release before anything is built.
 2. **`build-and-publish` job** (`needs: audit`, `environment: pypi`) —
    re-checks the lockfile, runs the **tag-vs-version guard**, builds the sdist +
-   wheel cache-free, attests build provenance, then publishes to PyPI via
-   `uv publish`.
+   wheel cache-free, attests build provenance, then — **only when the repo
+   variable `PYPI_PUBLISH_ENABLED` is `true`** — publishes to PyPI via
+   `uv publish`. With the variable unset (default), this job still builds and
+   attests but skips publishing (git-tag-only).
 
 The `environment: pypi` gate pauses the publish job for required-reviewer
 approval. That gate is the load-bearing publish control — see the first-release
@@ -130,6 +141,23 @@ echo "GATE OK: pypi environment has >=1 required reviewer and a 'v*' deployment 
 If this prints `GATE FAIL` for either condition, the publish gate is OPEN — fix
 the environment configuration and re-run until it prints `GATE OK`.
 
+### (d) Enable publishing (flip the toggle — do this LAST)
+
+Steps (a)–(c) leave the project **git-tag-only** (the release workflow builds and
+attests but does not publish). When you are ready for the first PyPI release —
+and only after (a)–(c) are green — turn publishing on by setting the repo
+variable:
+
+```bash
+gh variable set PYPI_PUBLISH_ENABLED --repo Aldeia-IT/anytype-llm-wiki --body true
+```
+
+(or Settings → Secrets and variables → Actions → Variables → New variable
+`PYPI_PUBLISH_ENABLED = true`). From the next `v*` tag onward the
+`build-and-publish` job runs `uv publish`. To pause publishing again later, set
+it back to `false`. **Never edit or remove the guard in `release.yml`** — the
+variable is the on/off switch.
+
 ---
 
 ## Cutting a release
@@ -161,6 +189,11 @@ git push origin v0.2.0
 ```
 
 ### 2. Approve the publish
+
+> Only applies when publishing is enabled (`PYPI_PUBLISH_ENABLED=true`, step (d)).
+> If the variable is unset, the tag is **git-tag-only**: the job builds + attests
+> and the "Publish to PyPI" step is skipped — there is nothing to approve, and the
+> run is green. (This is the v0.2.0 path.)
 
 The `build-and-publish` job pauses on the `pypi` environment for required-reviewer
 approval. A maintainer approves it; `uv publish` then uploads via OIDC.

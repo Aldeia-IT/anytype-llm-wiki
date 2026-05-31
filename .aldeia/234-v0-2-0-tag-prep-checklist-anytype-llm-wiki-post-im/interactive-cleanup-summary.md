@@ -100,9 +100,11 @@ Behavior now:
 - **Git-tag-only (variable unset — current state):** a `v*` tag runs audit + build + provenance-attest
   and goes **green**; **nothing is published.** Tag freely for internal use.
 - **To enable PyPI publishing later (no workflow edit, never remove the guard):**
-  (1) configure PyPI **trusted publishing (OIDC)** for this repo + the `pypi` Environment (see #231's
-  `docs/releasing.md`), then (2) set repo variable **`PYPI_PUBLISH_ENABLED=true`**
-  (Settings → Secrets and variables → Actions → Variables). Next `v*` tag publishes.
+  (1) configure PyPI **trusted publishing (OIDC)** for this repo + the `pypi` Environment, then
+  (2) set repo variable **`PYPI_PUBLISH_ENABLED=true`** (Settings → Secrets and variables → Actions
+  → Variables). Next `v*` tag publishes. **These steps + the toggle are documented durably in
+  `docs/releasing.md`** (publish-OFF callout up top + first-release checklist step (d)) — that is the
+  canonical home, since this work-folder handoff gets archived once the ticket closes.
 - The `workflow_dispatch` dry-run stays publish-free regardless.
 
 `test_ci_config.py` still 27/3 with the change; release.yml YAML validated.
