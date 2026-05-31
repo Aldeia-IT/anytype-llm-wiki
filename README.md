@@ -72,6 +72,21 @@ uv tool install anytype-llm-wiki
 pip install anytype-llm-wiki
 ```
 
+#### Verify build provenance (optional)
+
+Release wheels are published with a signed [SLSA build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations).
+You can verify that a downloaded artifact was built by this repository's release
+workflow before installing it:
+
+```bash
+# Verify a downloaded wheel (substitute the actual version)
+gh attestation verify anytype_llm_wiki-X.Y.Z-py3-none-any.whl \
+  --repo Aldeia-IT/anytype-llm-wiki
+```
+
+`gh attestation verify` does not accept globs — verify each artifact file
+individually.
+
 ### Configure
 
 Create a `.env` file or set environment variables:
@@ -224,13 +239,13 @@ Contributions welcome! This project is maintained by [Aldeia IT](https://github.
 # Clone and set up dev environment
 git clone https://github.com/Aldeia-IT/anytype-llm-wiki.git
 cd anytype-llm-wiki
-uv sync --extra dev
+uv sync --all-extras
 
 # Create .env with your API keys (see .env.example)
 cp .env.example .env
 
 # Run tests (requires Anytype, Ollama, and Qdrant running locally)
-uv run --extra dev pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 Areas where help is most welcome:
