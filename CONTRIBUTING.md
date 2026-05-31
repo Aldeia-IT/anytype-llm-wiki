@@ -62,6 +62,7 @@ including the one-time PyPI trusted-publisher and `pypi` GitHub Environment setu
 - Keep functions focused and small
 - Tests go in `tests/` and mirror the source structure
 - Integration tests that need external services should skip gracefully with `pytest.skip()`
+- Integration tests skip automatically when their backing services (Anytype, Ollama, Qdrant) are absent or not successfully reachable (a non-2xx response such as 401/403 also counts as not reachable); they only run against fully reachable, authorized services
 
 ## Areas we need help
 
