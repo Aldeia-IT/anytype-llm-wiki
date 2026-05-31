@@ -211,11 +211,11 @@ Search is fast enough for interactive use. Indexing is fast enough to run freque
 We pin dependencies in two layers so installs are both reproducible and resilient:
 
 - **`uv.lock` — exact, hashed versions.** Every dependency (direct and transitive) is locked to an exact version with a content hash. `uv sync` reproduces the same dependency tree on every machine, and CI runs `uv lock --locked` to guarantee the lockfile stays in sync with `pyproject.toml`.
-- **`pyproject.toml` — compatible ranges with minor-range upper bounds.** Direct dependencies declare a lower bound and a minor-range upper bound (for example `>=1.2,<1.3`) so a transitive resolution can't silently jump to an unreviewed minor and break the build.
+- **`pyproject.toml` — compatible ranges with a next-major upper bound.** Each direct dependency declares a lower bound and an upper bound at the next major version (for example `>=1.2,<2.0`) so a transitive resolution can't silently cross a major version and break the build.
 
 Together these give adopters reproducible installs today and a controlled, reviewed upgrade path over time.
 
-**Build provenance.** Release artifacts are built cache-free and signed with a [SLSA build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations) by the release workflow. When you install a published release wheel, you can verify it was built by this repository before trusting it:
+**Build provenance.** The release workflow builds artifacts cache-free and signs them with a [SLSA build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations). v0.2.0 ships as a git tag and is installed from source (not published to PyPI); once release wheels are published, you'll be able to verify any wheel was built by this repository before trusting it:
 
 ```bash
 # Verify a downloaded wheel (substitute the actual version)

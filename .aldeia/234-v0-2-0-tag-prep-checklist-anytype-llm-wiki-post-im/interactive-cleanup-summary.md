@@ -61,11 +61,12 @@ the remaining tag-gating work is:
 
 1. ~~Re-rebase onto `main` after #231 merges.~~ **DONE (2026-05-31)** — rebased onto b3ee36f;
    CONTRIBUTING/README overlap reconciled (see Sequencing above).
-2. **Make the README "Supply-chain posture" section true before tag:** #231's CI now supplies the
-   `uv lock --check`. The **`pyproject.toml` minor-range upper bounds** (e.g. `>=1.2,<1.3`) are
-   **still NOT applied** — #231 pinned only the `hatchling` build dep, not the runtime deps. Add
-   the runtime-dep upper bounds (or soften the README claim) before tag.
-3. **Version bump** `pyproject.toml` `0.1.0` → `0.2.0` (still 0.1.0).
+2. ~~Make the README "Supply-chain posture" section true.~~ **DONE (2026-05-31, interactive).**
+   Runtime-dep **next-major upper bounds** applied in `pyproject.toml`
+   (`fastmcp<4.0.0`, `httpx<1.0`, `qdrant-client<2.0.0`, `psutil<8.0.0` — all above the locked
+   versions, no downgrade); `uv lock` regenerated and `uv lock --check` passes; README posture
+   wording aligned to "next-major upper bound". #231's CI supplies `uv lock --check`.
+3. ~~Version bump `0.1.0` → `0.2.0`.~~ **DONE (2026-05-31)** — `pyproject.toml` + `uv.lock` at 0.2.0.
 4. **License-scan / `.bandit` / gitleaks — NOT #234's job (deduped 2026-05-31).** These were
    folded into **#231**'s impl scope (see #231 `spec-addendum-fold-244.md`); they land on #231's
    tag/audit CI. The former tracking ticket **#244 is closed**. Do **not** re-implement them in
@@ -81,6 +82,16 @@ the remaining tag-gating work is:
    small `wiki_client.py` fix before tag.
 7. **Final checks**: `uv run pytest` green · `pip-audit` clean · `bandit -r src/` clean ·
    `uv lock --locked` green · `gitleaks` clean · then `git tag v0.2.0`.
+
+## Release decision — git-tag-only (no PyPI) for v0.2.0
+
+**Jan decided (2026-05-31): v0.2.0 ships as a git tag only — NOT published to PyPI.** Implications:
+- The tag is the release act. **#231's `release.yml` OIDC/Trusted-Publishing + wheel-publish path
+  will not fire** (it's gated on a PyPI publish, which we're not doing). That's fine — it's
+  configured and ready for whenever publishing is turned on (roadmap item).
+- README is already consistent: install is **from source** (`uv sync`), and the **Build
+  provenance** note is framed as forward-looking ("once release wheels are published…").
+- No `NOTICE`/OIDC/PyPI-account work is due for this tag. (Re-evaluate at first PyPI publish.)
 
 ## Positioning note
 
