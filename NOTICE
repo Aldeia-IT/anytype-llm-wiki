@@ -167,3 +167,9 @@ note worth calling out:
  watchfiles                 1.1.1        MIT License
  websockets                 16.0         BSD-3-Clause
  zipp                       3.23.0       MIT
+
+Note on "UNKNOWN" entries: the listing above is generated from package metadata,
+and a package that omits a license classifier shows as UNKNOWN. Verified manually:
+  caio 0.9.25 — actually Apache-2.0 (the published package omits the metadata
+  classifier; the upstream project is Apache-2.0). Permissive and MIT-compatible;
+  the CI license-compatibility gate passes.
