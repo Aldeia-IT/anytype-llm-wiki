@@ -85,22 +85,36 @@ the remaining tag-gating work is:
 
 ## Release decision — git-tag-only (no PyPI) for v0.2.0
 
-**Jan decided (2026-05-31): v0.2.0 ships as a git tag only — NOT published to PyPI.**
+**Jan decided (2026-05-31): v0.2.0 ships as a git tag only — NOT published to PyPI.** Rationale:
+dogfood the module internally on aldeia-box under real-life conditions for a while before a public
+PyPI release.
 
-⚠️ **Implement-phase blocker — `release.yml` auto-publishes on tag push.** `release.yml` triggers
-on `push: tags: v*`, and its `build-and-publish` job runs `uv publish` on a tag push (publish is
-skipped *only* via `workflow_dispatch` with `skip_publish=true`). So **pushing `v0.2.0` as-is would
-trigger a PyPI publish attempt** — which would fail (no trusted-publishing/PyPI project configured)
-but leave a red release-workflow run on the release we want to show off. Before tagging, choose one:
-- **(a, recommended) Add a publish guard to `release.yml`** so the `uv publish` step is skipped
-  unless publishing is explicitly intended (e.g. gate on a `vars`/Environment flag). Small,
-  fits #234's tag-prep scope, keeps the workflow green and the tag clean.
-- (b) Create the tag but **don't push it to origin** (local/private tag) — no GitHub release point.
-- (c) Use the `workflow_dispatch` dry-run (`skip_publish=true`) for audit/build/attest; tag separately.
+**Publish-guard — DONE (interactive).** `release.yml` triggers on `push: tags: v*` and used to run
+`uv publish` on every tag. I gated the publish step on a repo variable:
 
-The **tag-vs-manifest guard already passes** (pyproject bumped to 0.2.0). README is consistent:
-install is **from source** (`uv sync`); the **Build provenance** note is forward-looking ("once
-release wheels are published…"). No NOTICE/OIDC/PyPI-account work is due for this tag.
+```yaml
+if: ${{ inputs.skip_publish != true && vars.PYPI_PUBLISH_ENABLED == 'true' }}
+```
+
+Behavior now:
+- **Git-tag-only (variable unset — current state):** a `v*` tag runs audit + build + provenance-attest
+  and goes **green**; **nothing is published.** Tag freely for internal use.
+- **To enable PyPI publishing later (no workflow edit, never remove the guard):**
+  (1) configure PyPI **trusted publishing (OIDC)** for this repo + the `pypi` Environment (see #231's
+  `docs/releasing.md`), then (2) set repo variable **`PYPI_PUBLISH_ENABLED=true`**
+  (Settings → Secrets and variables → Actions → Variables). Next `v*` tag publishes.
+- The `workflow_dispatch` dry-run stays publish-free regardless.
+
+`test_ci_config.py` still 27/3 with the change; release.yml YAML validated.
+
+**Future note (not now):** the `build-and-publish` job carries job-level `environment: pypi`. While
+that Environment has no protection rules, git-only tags run it fine (build+attest, publish skipped).
+If/when you add required-reviewer protection to the `pypi` Environment, consider splitting publish
+into its own job so git-only tags don't pause for approval. Refinement, not a blocker.
+
+The **tag-vs-manifest guard passes** (pyproject at 0.2.0). README is consistent: install **from
+source** (`uv sync`); **Build provenance** note is forward-looking. No NOTICE/OIDC/PyPI-account work
+is due for this tag.
 
 ## Positioning note
 

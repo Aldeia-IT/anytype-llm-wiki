@@ -112,5 +112,13 @@ jobs:
           subject-path: dist/*
 
       - name: Publish to PyPI
-        if: ${{ inputs.skip_publish != true }}
+        # Publish is gated on the repo variable PYPI_PUBLISH_ENABLED (Settings →
+        # Secrets and variables → Actions → Variables). While it is unset/false,
+        # a `v*` tag still runs audit + build + provenance-attest and goes green,
+        # but nothing is published — the project ships git-tag-only for now.
+        # To enable PyPI releases later: (1) configure PyPI trusted publishing
+        # (OIDC) for this repo's release.yml + the `pypi` Environment, then
+        # (2) set PYPI_PUBLISH_ENABLED=true. No workflow edit needed.
+        # `inputs.skip_publish` keeps the workflow_dispatch dry-run publish-free.
+        if: ${{ inputs.skip_publish != true && vars.PYPI_PUBLISH_ENABLED == 'true' }}
         run: uv publish
