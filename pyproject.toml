@@ -22,7 +22,7 @@ anytype-llm-wiki = "anytype_llm_wiki.server:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
+    "pytest>=9.0.3",
     "respx>=0.21",
     "pytest-timeout>=2.2",
     "freezegun>=1.5",
