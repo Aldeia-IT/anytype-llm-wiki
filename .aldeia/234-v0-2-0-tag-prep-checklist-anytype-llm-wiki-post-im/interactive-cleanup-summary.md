@@ -4,22 +4,26 @@ Jan and the lead did an **interactive pass** on this branch after the post-produ
 routed it to Decide. This note is the authoritative handoff for the Spec/Implement phases.
 It supersedes the staged `README-additions.md` (now consumed and deleted).
 
-## ⚠️ Sequencing — do NOT tag v0.2.0 yet
+## Sequencing — #231 is MERGED; this branch is rebased & reconciled (ready for Implement)
 
-**#234 is paused until #231 lands on `main`.** #231 ("Supply-chain security hardening",
-same repo) is in the pipeline (Test phase) with an APPROVED, council-signed spec. It ships
-the CI/hardening half of this ticket's checklist:
+**#231 ("Supply-chain security hardening") MERGED to `main` (b3ee36f, 2026-05-31).** It shipped
+the CI/hardening half of this ticket's checklist — these are **DONE on `main`, do not
+re-implement here**:
 
-- `.github/workflows/ci.yml` (merge-gate: `uv lock --check` + frozen install + pytest;
-  tag-gate: pip-audit + cache-free build + **build-provenance attestation** + **OIDC
-  Trusted Publishing**)
-- all GitHub Actions SHA-pinned
-- release builds cache-free
+- `.github/workflows/{ci,release,audit}.yml` (merge-gate: `uv lock --check` + frozen install +
+  pytest on 3.11/3.13; tag-gate: pip-audit + cache-free build + **build-provenance attestation**
+  + **OIDC Trusted Publishing** + the fold-244 scanners bandit/pip-licenses/gitleaks)
+- all GitHub Actions SHA-pinned; release builds cache-free; `.github/dependabot.yml`;
+  `pyproject.toml` `hatchling==1.29.0` pin; `docs/dependency-intake.md`, `docs/releasing.md`.
 
-So those items are **#231's, not #234's** — do not re-implement them here. When #231 is on
-`main`: **re-rebase this branch onto `main`** (the prior rebase was clean; #234 touches no
-`.github/` or `pyproject` files, so the second rebase will be clean too), then run Implement
-for the residual below.
+**This branch has been re-rebased onto `main` (with #231) and the overlap reconciled:**
+- `CONTRIBUTING.md` — git folded #234's "Licensing of contributions" (inbound=outbound + DCO)
+  onto #231's file (intake/CI guidance); both present, nothing lost.
+- `README.md` — kept #234's full v0.2.0 assembly; took #231's `uv sync --all-extras` dev-setup;
+  folded #231's build-provenance verify (`gh attestation verify`) into the **Supply-chain
+  posture** section (reframed honestly for the not-yet-on-PyPI status).
+
+Do **not** tag v0.2.0 yet — run Implement for the residual below.
 
 ## Done in this interactive pass (committed on this branch)
 
@@ -55,10 +59,12 @@ CHANGELOG.md, MIGRATIONS.md.
 Authoritative criteria are in **`spec-addendum-post-product-r1.md`** (this folder). Net of #231,
 the remaining tag-gating work is:
 
-1. **Re-rebase onto `main`** after #231 merges.
-2. **Make the README "Supply-chain posture" section true before tag:** #231 supplies the CI
-   `uv lock` check; the **`pyproject.toml` minor-range upper bounds** (e.g. `>=1.2,<1.3`) still
-   need to be applied if #231 doesn't.
+1. ~~Re-rebase onto `main` after #231 merges.~~ **DONE (2026-05-31)** — rebased onto b3ee36f;
+   CONTRIBUTING/README overlap reconciled (see Sequencing above).
+2. **Make the README "Supply-chain posture" section true before tag:** #231's CI now supplies the
+   `uv lock --check`. The **`pyproject.toml` minor-range upper bounds** (e.g. `>=1.2,<1.3`) are
+   **still NOT applied** — #231 pinned only the `hatchling` build dep, not the runtime deps. Add
+   the runtime-dep upper bounds (or soften the README claim) before tag.
 3. **Version bump** `pyproject.toml` `0.1.0` → `0.2.0` (still 0.1.0).
 4. **License-scan / `.bandit` / gitleaks — NOT #234's job (deduped 2026-05-31).** These were
    folded into **#231**'s impl scope (see #231 `spec-addendum-fold-244.md`); they land on #231's
