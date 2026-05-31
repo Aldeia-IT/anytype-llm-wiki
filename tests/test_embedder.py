@@ -12,8 +12,9 @@ def check_ollama():
     import httpx
 
     try:
-        httpx.get(f"{config.OLLAMA_URL}/api/tags", timeout=5)
-    except (httpx.ConnectError, httpx.TimeoutException):
+        resp = httpx.get(f"{config.OLLAMA_URL}/api/tags", timeout=5)
+        resp.raise_for_status()
+    except httpx.HTTPError:
         pytest.skip("Ollama not reachable")
 
 
