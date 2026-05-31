@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:           # manual dry-run path (SF-4)
+    inputs:
+      skip_publish:
+        description: "Run audit + build + attest but skip uv publish (dry-run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: false
+
+      # Release-path lockfile gate: tags can be pushed to commits that bypassed the
+      # merge-gate, so re-assert lock/manifest consistency here (SF-2). Install-free, ~1s.
+      - name: Check lockfile consistency
+        run: uv lock --check
+
+      # Audit the SHIPPED surface only (--no-dev). Dev/test deps are audited separately
+      # by the weekly audit.yml (--all-extras). See Security Considerations.
+      - name: Export lockfile for audit
+        run: uv export --format requirements-txt --no-dev > /tmp/requirements-audit.txt
+
+      - name: Audit dependencies
+        run: uvx pip-audit@2.10.0 -r /tmp/requirements-audit.txt
+
+      # OSS-hygiene scanner suite (fold #244). Tag/audit-gated, each fails on findings.
+      # Install the project so pip-licenses can read installed package metadata.
+      - name: Install dependencies (frozen, for license scan)
+        run: uv sync --frozen --all-extras
+
+      - name: Static analysis (bandit)
+        run: uvx bandit==1.9.4 -r src/
+
+      - name: License compatibility (pip-licenses)
+        # Fail on copyleft licenses incompatible with the project's MIT license.
+        run: uvx pip-licenses==5.5.5 --from=mixed --fail-on="GPL;AGPL;SSPL;EUPL"
+
+      - name: Secret scan (gitleaks)
+        run: |
+          go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" dir . --redact --exit-code 1
+
+  build-and-publish:
+    name: Build, attest, and publish
+    runs-on: ubuntu-latest
+    needs: audit
+    environment: pypi
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: false
+
+      # Re-assert lock consistency on the release path before any build side effect (SF-2).
+      - name: Check lockfile consistency
+        run: uv lock --check
+
+      # B1 GUARD: abort BEFORE build/attest/publish if the tag does not match the manifest.
+      # Skipped on workflow_dispatch (no v* tag to compare against on a manual dry-run).
+      - name: Verify tag matches pyproject version
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          proj_version="$(uv version --short)"
+          echo "tag=${tag_version}  pyproject=${proj_version}"
+          if [ "${tag_version}" != "${proj_version}" ]; then
+            echo "::error::Tag v${tag_version} does not match pyproject version ${proj_version}. Aborting before build/publish."
+            exit 1
+          fi
+
+      # NOTE: no `uv sync` here. `uv build` creates its own isolated build environment and
+      # does not need the project synced — keeping it out reduces install surface on this
+      # privileged (OIDC/attestation) job (SF-10 / tech SF-3).
+      - name: Build distributions
+        run: uv build
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: dist/*
+
+      - name: Publish to PyPI
+        if: ${{ inputs.skip_publish != true }}
+        run: uv publish
