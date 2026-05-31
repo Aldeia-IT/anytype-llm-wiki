@@ -44,7 +44,7 @@ anytype-llm-wiki doctor
 availability without modifying anything. It exits `0` only when all checks pass.
 Resolve any reported issues before proceeding.
 
-### 4. Index and serve
+### 4. Run the MCP server
 
 Register the MCP server with your client and let it index your space (the first
 `semantic_search` triggers a reindex when the collection is empty; you can also

@@ -210,7 +210,7 @@ Search is fast enough for interactive use. Indexing is fast enough to run freque
 
 We pin dependencies in two layers so installs are both reproducible and resilient:
 
-- **`uv.lock` — exact, hashed versions.** Every dependency (direct and transitive) is locked to an exact version with a content hash. `uv sync` reproduces the same dependency tree on every machine, and CI runs `uv lock --locked` to guarantee the lockfile stays in sync with `pyproject.toml`.
+- **`uv.lock` — exact, hashed versions.** Every dependency (direct and transitive) is locked to an exact version with a content hash. `uv sync` reproduces the same dependency tree on every machine, and CI runs `uv lock --check` to guarantee the lockfile stays in sync with `pyproject.toml`.
 - **`pyproject.toml` — compatible ranges with a next-major upper bound.** Each direct dependency declares a lower bound and an upper bound at the next major version (for example `>=1.2,<2.0`) so a transitive resolution can't silently cross a major version and break the build.
 
 Together these give adopters reproducible installs today and a controlled, reviewed upgrade path over time.
