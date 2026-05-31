@@ -85,13 +85,22 @@ the remaining tag-gating work is:
 
 ## Release decision — git-tag-only (no PyPI) for v0.2.0
 
-**Jan decided (2026-05-31): v0.2.0 ships as a git tag only — NOT published to PyPI.** Implications:
-- The tag is the release act. **#231's `release.yml` OIDC/Trusted-Publishing + wheel-publish path
-  will not fire** (it's gated on a PyPI publish, which we're not doing). That's fine — it's
-  configured and ready for whenever publishing is turned on (roadmap item).
-- README is already consistent: install is **from source** (`uv sync`), and the **Build
-  provenance** note is framed as forward-looking ("once release wheels are published…").
-- No `NOTICE`/OIDC/PyPI-account work is due for this tag. (Re-evaluate at first PyPI publish.)
+**Jan decided (2026-05-31): v0.2.0 ships as a git tag only — NOT published to PyPI.**
+
+⚠️ **Implement-phase blocker — `release.yml` auto-publishes on tag push.** `release.yml` triggers
+on `push: tags: v*`, and its `build-and-publish` job runs `uv publish` on a tag push (publish is
+skipped *only* via `workflow_dispatch` with `skip_publish=true`). So **pushing `v0.2.0` as-is would
+trigger a PyPI publish attempt** — which would fail (no trusted-publishing/PyPI project configured)
+but leave a red release-workflow run on the release we want to show off. Before tagging, choose one:
+- **(a, recommended) Add a publish guard to `release.yml`** so the `uv publish` step is skipped
+  unless publishing is explicitly intended (e.g. gate on a `vars`/Environment flag). Small,
+  fits #234's tag-prep scope, keeps the workflow green and the tag clean.
+- (b) Create the tag but **don't push it to origin** (local/private tag) — no GitHub release point.
+- (c) Use the `workflow_dispatch` dry-run (`skip_publish=true`) for audit/build/attest; tag separately.
+
+The **tag-vs-manifest guard already passes** (pyproject bumped to 0.2.0). README is consistent:
+install is **from source** (`uv sync`); the **Build provenance** note is forward-looking ("once
+release wheels are published…"). No NOTICE/OIDC/PyPI-account work is due for this tag.
 
 ## Positioning note
 
