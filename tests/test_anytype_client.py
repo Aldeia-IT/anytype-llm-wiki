@@ -20,7 +20,7 @@ def check_anytype():
             },
             timeout=5,
         )
-    except (httpx.ConnectError, httpx.TimeoutException):
+    except httpx.HTTPError:
         pytest.skip("Anytype API not reachable")
 
 
