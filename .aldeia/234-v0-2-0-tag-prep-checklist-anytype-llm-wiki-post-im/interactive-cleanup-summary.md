@@ -118,6 +118,17 @@ The **tag-vs-manifest guard passes** (pyproject at 0.2.0). README is consistent:
 source** (`uv sync`); **Build provenance** note is forward-looking. No NOTICE/OIDC/PyPI-account work
 is due for this tag.
 
+## License & copyright decision (2026-05-31, Jan)
+
+- **License: MIT — confirmed, no change.** Chosen for maximal adoption / ecosystem fit
+  for a lead-gen OSS showcase (AGPL would deter the adoption that's the whole point;
+  relicense/dual-license later is available since Aldeia holds copyright). The
+  `--fail-on=GPL;AGPL;SSPL;EUPL` CI gate rejects copyleft *dependencies* to keep the
+  MIT project distributable — it is not the project's own license.
+- **Copyright holder: "Aldeia IT" — kept as-is** (council A5 **resolved**). `pyproject`
+  `authors` lists the individual author (Jan); that is metadata about authorship, not
+  the copyright holder — the two may legitimately differ. No file changes.
+
 ## Positioning note
 
 `positioning-verification.md` (this folder, dated 2026-05-30) records that
