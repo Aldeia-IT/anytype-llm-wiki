@@ -111,7 +111,9 @@ The project is **MIT**-licensed. Every dependency's license must be compatible.
       MIT-licensed package. The `pip-licenses --fail-on="GPL;AGPL;SSPL;EUPL"` gate
       will fail the build if one appears.
 - [ ] **Unknown / missing license metadata.** Treat as a blocker until clarified —
-      do not assume permissive.
+      do not assume permissive. Note this is a **manual** blocker: the CI
+      `pip-licenses --fail-on` gate only catches the named copyleft tokens, so an
+      `UNKNOWN`/missing-license dependency passes CI and must be caught here by review.
 
 **Reject if:** the dependency or any new transitive dep is GPL/AGPL/SSPL/EUPL, or
 has unresolved/unknown license metadata.

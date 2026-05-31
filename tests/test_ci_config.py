@@ -424,6 +424,20 @@ class TestFold244OssHygieneScanners:
             "(fold #244 OSS-hygiene scanner suite)."
         )
 
+    def test_pip_licenses_uses_partial_match(self):
+        """B2: wherever pip-licenses runs, it must pass --partial-match so the copyleft
+        --fail-on gate actually fires (exact set-membership never equals the bare
+        GPL/AGPL/SSPL/EUPL token, e.g. 'GPL-3.0-only' != 'GPL')."""
+        for path in (RELEASE_YML, AUDIT_YML):
+            text = _read(path)
+            if "pip-licenses" in text:
+                assert "--partial-match" in text, (
+                    f"{path.name} runs pip-licenses but is missing '--partial-match'. Without it "
+                    f"'--fail-on' exact-matches license strings that never equal the bare token "
+                    f"(e.g. 'GPL-3.0-only' != 'GPL'), so the copyleft gate silently passes "
+                    f"GPL/AGPL deps (B2): {path}"
+                )
+
     def test_gitleaks_present_on_tag_or_audit_path(self):
         """fold-244: gitleaks (secret scanning) must run in release.yml and/or audit.yml."""
         in_release = "gitleaks" in _read(RELEASE_YML)
@@ -432,6 +446,19 @@ class TestFold244OssHygieneScanners:
             "gitleaks (secret scanning) must appear in release.yml and/or audit.yml "
             "(fold #244 OSS-hygiene scanner suite)."
         )
+
+    def test_gitleaks_scans_git_history(self):
+        """B1: wherever gitleaks runs, it must use the 'gitleaks git' subcommand (scans the
+        full commit history), NOT 'gitleaks dir' (working tree only). A secret committed
+        then deleted lives only in history."""
+        for path in (RELEASE_YML, AUDIT_YML):
+            text = _read(path)
+            if "gitleaks" in text:
+                assert "gitleaks git" in text, (
+                    f"{path.name} runs gitleaks but does not use the 'gitleaks git' subcommand. "
+                    f"'gitleaks dir' scans only the working tree and misses secrets that were "
+                    f"committed then deleted in a later commit (B1): {path}"
+                )
 
 
 # ---------------------------------------------------------------------------

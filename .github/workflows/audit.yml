@@ -13,7 +13,11 @@ jobs:
     name: Weekly dependency audit
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 = full clone so `gitleaks git` can scan the entire commit
+      # history (a secret committed then deleted lives only in history).
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
@@ -39,9 +43,17 @@ jobs:
 
       - name: License compatibility (pip-licenses)
         # Fail on copyleft licenses incompatible with the project's MIT license.
-        run: uvx pip-licenses==5.5.5 --from=mixed --fail-on="GPL;AGPL;SSPL;EUPL"
+        # --partial-match is REQUIRED: without it --fail-on does case-insensitive EXACT
+        # set-membership against the SPDX expression / Trove classifier, which never equals
+        # the bare token (e.g. "GPL-3.0-only" != "GPL"), so the gate would silently pass a
+        # genuinely GPL/AGPL dependency. --partial-match also flags LGPL via "GPL"
+        # (acceptable/conservative for an MIT project).
+        run: uvx pip-licenses==5.5.5 --from=mixed --partial-match --fail-on="GPL;AGPL;SSPL;EUPL"
 
       - name: Secret scan (gitleaks)
+        # `gitleaks git` scans the full commit HISTORY (requires fetch-depth: 0 on checkout);
+        # `gitleaks dir` would only see the current working tree and miss secrets that were
+        # committed then deleted in a later commit.
         run: |
           go install github.com/gitleaks/gitleaks/v8@v8.30.1
-          "$(go env GOPATH)/bin/gitleaks" dir . --redact --exit-code 1
+          "$(go env GOPATH)/bin/gitleaks" git . --redact --exit-code 1
