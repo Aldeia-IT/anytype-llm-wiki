@@ -19,7 +19,7 @@ from difflib import SequenceMatcher
 
 import httpx
 
-from . import config, types_schema
+from . import types_schema
 from . import bootstrap as _bootstrap
 from .extraction import (
     check_remote_endpoint_consent,
@@ -106,7 +106,7 @@ def _derive_candidates(markdown: str, *, fallback_name: str | None = None) -> li
     def _flush():
         if current_name is not None:
             body = "\n".join(current_body).strip()
-            candidates.append({"name": current_name, "facts": body})
+            candidates.append({"name": current_name, "facts": body, "kind": "entity"})
 
     for line in markdown.splitlines():
         m = _HEADING_RE.match(line)
@@ -119,7 +119,9 @@ def _derive_candidates(markdown: str, *, fallback_name: str | None = None) -> li
     _flush()
 
     if not candidates and fallback_name:
-        candidates.append({"name": fallback_name, "facts": markdown.strip()})
+        candidates.append(
+            {"name": fallback_name, "facts": markdown.strip(), "kind": "entity"}
+        )
 
     return candidates
 
@@ -127,12 +129,15 @@ def _derive_candidates(markdown: str, *, fallback_name: str | None = None) -> li
 def _merge_extraction(candidates: list[dict], extracted: dict) -> None:
     """Best-effort merge of LLM entities/concepts onto heading candidates.
 
+    LLM ``entities`` are merged as ``kind="entity"`` (facts from ``description``);
+    LLM ``concepts`` as ``kind="concept"`` (definition from ``definition``/
+    ``description``). Heading-derived candidates remain ``kind="entity"``.
     New names that do not already match a heading candidate are appended.
     """
     if not isinstance(extracted, dict):
         return
     existing_keys = {normalize_title(c["name"]) for c in candidates}
-    for key in ("entities", "concepts"):
+    for key, kind in (("entities", "entity"), ("concepts", "concept")):
         for item in extracted.get(key) or []:
             if not isinstance(item, dict):
                 continue
@@ -142,8 +147,11 @@ def _merge_extraction(candidates: list[dict], extracted: dict) -> None:
             nk = normalize_title(name)
             if nk in existing_keys:
                 continue
-            facts = item.get("description") or item.get("definition") or ""
-            candidates.append({"name": name, "facts": facts})
+            if kind == "concept":
+                facts = item.get("definition") or item.get("description") or ""
+            else:
+                facts = item.get("description") or item.get("definition") or ""
+            candidates.append({"name": name, "facts": facts, "kind": kind})
             existing_keys.add(nk)
 
 
@@ -257,17 +265,23 @@ def _write_wikilog(
 # ---------------------------------------------------------------------------
 
 
-def _create_relation(client: WikiClient, space_id: str, from_id: str, to_id: str, label: str) -> dict:
-    """Create one directed relation object. Returns the created object dict."""
-    return client.create_object(
-        space_id,
-        type_key="wiki_relation",
-        name=f"{from_id} -> {to_id}",
-        properties=[
-            {"key": "wiki_relation_from", "text": from_id},
-            {"key": "wiki_relation_to", "text": to_id},
-            {"key": "wiki_relation_label", "text": label},
-        ],
+# Relation property keys are real objects-format properties on the wiki types
+# (types_schema.WIKI_TYPES): Entity uses ``wiki_relations``; Concept uses
+# ``wiki_related``. There is NO ``wiki_relation`` object type — relations are
+# bidirectional property links set on BOTH objects (master spec §ingest step 6).
+_REL_KEY_BY_KIND = {"entity": "wiki_relations", "concept": "wiki_related"}
+
+
+def _rel_key(kind: str) -> str:
+    return _REL_KEY_BY_KIND.get(kind, "wiki_relations")
+
+
+def _patch_relation(
+    client: WikiClient, space_id: str, obj_id: str, rel_key: str, ids: list[str]
+) -> None:
+    """PATCH ``obj_id``'s relation property to the given objects-format id list."""
+    client.update_object(
+        space_id, obj_id, {"properties": [{"key": rel_key, "objects": list(ids)}]}
     )
 
 
@@ -275,35 +289,57 @@ def _write_bidirectional_relations(
     client: WikiClient,
     space_id: str,
     relations: list[tuple[str, str, str]],
+    kind_by_id: dict[str, str],
 ) -> tuple[int, list[str]]:
-    """Write each relation in both directions; roll back on partial failure.
+    """Write each relation bidirectionally via property links; roll back on failure.
+
+    For an A→B relation, PATCH A's relation property (``wiki_relations`` for an
+    entity, ``wiki_related`` for a concept) to append B's id, then PATCH B's
+    relation property to append A's id. If the SECOND (B) side fails, roll back
+    by PATCHing A's relation property back to its prior value.
+
+    ``linked`` accumulates the per-object union of relation ids written this run
+    so each PATCH carries the full objects list (Anytype objects-format set).
 
     Returns (relations_created, rollback_notes).
     """
     created = 0
     rollback_notes: list[str] = []
-    for from_id, to_id, label in relations:
-        first = None
+    linked: dict[str, list[str]] = {}
+    for from_id, to_id, _label in relations:
+        from_key = _rel_key(kind_by_id.get(from_id, "entity"))
+        to_key = _rel_key(kind_by_id.get(to_id, "entity"))
+
+        prior_from = list(linked.get(from_id, []))
+        new_from = prior_from + ([to_id] if to_id not in prior_from else [])
         try:
-            first_obj = _create_relation(client, space_id, from_id, to_id, label)
-            first = first_obj.get("id")
-            _create_relation(client, space_id, to_id, from_id, label)
+            # Side A first.
+            _patch_relation(client, space_id, from_id, from_key, new_from)
+            linked[from_id] = new_from
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            rollback_notes.append(
+                f"relation_rollback: relation {from_id}->{to_id} failed on A-side: {exc}"
+            )
+            continue
+
+        prior_to = list(linked.get(to_id, []))
+        new_to = prior_to + ([from_id] if from_id not in prior_to else [])
+        try:
+            # Side B second.
+            _patch_relation(client, space_id, to_id, to_key, new_to)
+            linked[to_id] = new_to
             created += 2
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-            # One direction failed — roll back the direction that succeeded.
-            if first:
-                try:
-                    client.delete_object(space_id, first)
-                except httpx.HTTPError:
-                    pass
-                rollback_notes.append(
-                    f"relation_rollback: rolled back {first} ({from_id}->{to_id}) "
-                    f"after reciprocal failed: {exc}"
-                )
-            else:
-                rollback_notes.append(
-                    f"relation_rollback: relation {from_id}->{to_id} failed: {exc}"
-                )
+            # B-side failed — roll back A by reverting to its prior value.
+            try:
+                _patch_relation(client, space_id, from_id, from_key, prior_from)
+                linked[from_id] = prior_from
+            except (httpx.HTTPError, KeyError, ValueError, TypeError):
+                pass
+            rollback_notes.append(
+                f"relation_rollback: reverted {from_id}.{from_key} (-> {to_id}) "
+                f"after reciprocal B-side failed: {exc}"
+            )
     return created, rollback_notes
 
 
@@ -348,54 +384,56 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
         )
 
     client = WikiClient()
-
-    # 2. schema-compat (AC-M4).
     try:
-        live_version = _bootstrap._read_schema_version(client, space_id)
-    except httpx.HTTPError as exc:
-        return _error_result(f"[API ERROR] schema_read_failed: {exc}")
+        # 2. schema-compat (AC-M4).
+        try:
+            live_version = _bootstrap._read_schema_version(client, space_id)
+        except httpx.HTTPError as exc:
+            return _error_result(f"[API ERROR] schema_read_failed: {exc}")
 
-    if live_version is None:
-        return _error_result(
-            "[CONFIG ERROR] wiki_schema_missing: run wiki_bootstrap on this space first"
-        )
-
-    code_version = types_schema.WIKI_SCHEMA_VERSION
-    schema_warnings: list[str] = []
-    cmp = _cmp_versions(live_version, code_version)
-    if cmp < 0:
-        return _error_result(
-            f"[CONFIG ERROR] wiki_schema_outdated: space schema {live_version} < code "
-            f"{code_version}; run wiki_bootstrap to upgrade"
-        )
-    if cmp > 0:
-        schema_warnings.append(
-            f"wiki_schema_newer: space schema {live_version} > code {code_version}; continuing"
-        )
-
-    # 3. domain_hint validation (AC#10) — before fetch.
-    if domain_hint:
-        taxonomy = _domain_taxonomy(client, space_id)
-        if domain_hint not in taxonomy:
+        if live_version is None:
             return _error_result(
-                f"[CONFIG ERROR] invalid_domain_hint: '{domain_hint}' is not in the "
-                f"space's wiki_domain_tags taxonomy"
+                "[CONFIG ERROR] wiki_schema_missing: run wiki_bootstrap on this space first"
             )
 
-    # 4. consent (AC-S2.2 / addendum HARD GATE 1) — before any off-machine transmit.
-    endpoint = os.environ.get("WIKI_EXTRACT_ENDPOINT")
-    if endpoint:
-        check_remote_endpoint_consent(endpoint)
-
-    # 5. lock (AC#5 / addendum HARD GATE 2) — entry path acquires it.
-    try:
-        with space_ingest_lock(space_id, source):
-            return _run_ingest(
-                client, source, space_id, domain_hint, schema_warnings
+        code_version = types_schema.WIKI_SCHEMA_VERSION
+        schema_warnings: list[str] = []
+        cmp = _cmp_versions(live_version, code_version)
+        if cmp < 0:
+            return _error_result(
+                f"[CONFIG ERROR] wiki_schema_outdated: space schema {live_version} < code "
+                f"{code_version}; run wiki_bootstrap to upgrade"
             )
-    except RuntimeError as exc:
-        # space_ingest_lock raises [DATA ERROR] ingest_in_progress when held.
-        return _error_result(str(exc))
+        if cmp > 0:
+            schema_warnings.append(
+                f"wiki_schema_newer: space schema {live_version} > code {code_version}; continuing"
+            )
+
+        # 3. domain_hint validation (AC#10) — before fetch.
+        if domain_hint:
+            taxonomy = _domain_taxonomy(client, space_id)
+            if domain_hint not in taxonomy:
+                return _error_result(
+                    f"[CONFIG ERROR] invalid_domain_hint: '{domain_hint}' is not in the "
+                    f"space's wiki_domain_tags taxonomy"
+                )
+
+        # 4. consent (AC-S2.2 / addendum HARD GATE 1) — before any off-machine transmit.
+        endpoint = os.environ.get("WIKI_EXTRACT_ENDPOINT")
+        if endpoint:
+            check_remote_endpoint_consent(endpoint)
+
+        # 5. lock (AC#5 / addendum HARD GATE 2) — entry path acquires it.
+        try:
+            with space_ingest_lock(space_id, source):
+                return _run_ingest(
+                    client, source, space_id, domain_hint, schema_warnings
+                )
+        except RuntimeError as exc:
+            # space_ingest_lock raises [DATA ERROR] ingest_in_progress when held.
+            return _error_result(str(exc))
+    finally:
+        client.close()
 
 
 def _cmp_versions(a: str, b: str) -> int:
@@ -415,9 +453,11 @@ def _run_ingest(
     result["warnings"].extend(schema_warnings)
     status = "ok"
 
-    # 6. fetch.
+    # 6. fetch. Any fetch [DATA ERROR] (ssrf_blocked, file_not_found,
+    # file_read_failed, fetch_failed) short-circuits — never fabricate a junk
+    # entity from an error string.
     markdown = fetch_url(source)
-    if isinstance(markdown, str) and markdown.startswith("[DATA ERROR]") and "ssrf_blocked" in markdown:
+    if isinstance(markdown, str) and markdown.startswith("[DATA ERROR]"):
         return _error_result(markdown)
 
     # 7. derive candidates.
@@ -442,6 +482,11 @@ def _run_ingest(
     # 8. enrich via best-effort extract().
     try:
         extracted = extract(markdown=markdown, space_id=space_id)
+        # AC#11: ollama model not pulled must abort BEFORE Source creation.
+        if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
+            "[CONFIG ERROR] ollama_model_not_pulled"
+        ):
+            return _error_result(str(extracted["error"]))
         if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
             "[CONFIG ERROR]"
         ):
@@ -457,17 +502,28 @@ def _run_ingest(
     source_id = _create_source(client, space_id, source, markdown, result)
     result["source_object_id"] = source_id
 
-    # 10. resolve + create/update each candidate.
+    # 10. resolve + create/update each candidate. A candidate's ``kind`` maps to
+    # its object type: entity → wiki_entity (wiki_facts); concept → wiki_concept
+    # (wiki_definition).
     name_to_id: dict[str, str] = {}
+    kind_by_id: dict[str, str] = {}
     for cand in candidates:
         clean_name = sanitize_name(cand["name"])
         if clean_name is None:
             result["warnings"].append(f"name_policy_rejected: {cand['name']!r}")
             continue
+        kind = cand.get("kind", "entity")
         facts = sanitize_property_value(cand.get("facts", "") or "")
-        try:
-            resolution = resolve_entity(client, space_id, "wiki_entity", clean_name)
+        if kind == "concept":
+            type_key = "wiki_concept"
+            type_label = "concept"
+            props = [{"key": "wiki_definition", "text": facts}]
+        else:
+            type_key = "wiki_entity"
+            type_label = "entity"
             props = [{"key": "wiki_facts", "text": facts}]
+        try:
+            resolution = resolve_entity(client, space_id, type_key, clean_name)
             if resolution["action"] == "update":
                 target = resolution["target"]
                 # Properties-only PATCH — NEVER a body/markdown key (AC-L1).
@@ -476,19 +532,21 @@ def _run_ingest(
                 )
                 obj_id = updated.get("id", target.get("id"))
                 result["objects_updated"].append(
-                    {"title": clean_name, "type": "entity", "object_id": obj_id}
+                    {"title": clean_name, "type": type_label, "object_id": obj_id}
                 )
                 name_to_id[normalize_title(clean_name)] = obj_id
+                kind_by_id[obj_id] = kind
             else:
                 # Create with EMPTY body (properties only — AC-P7/AC-L1).
                 created = client.create_object(
-                    space_id, type_key="wiki_entity", name=clean_name, properties=props
+                    space_id, type_key=type_key, name=clean_name, properties=props
                 )
                 obj_id = created.get("id")
                 result["objects_created"].append(
-                    {"title": clean_name, "type": "entity", "object_id": obj_id}
+                    {"title": clean_name, "type": type_label, "object_id": obj_id}
                 )
                 name_to_id[normalize_title(clean_name)] = obj_id
+                kind_by_id[obj_id] = kind
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
             status = "partial"
             result["warnings"].append(f"object_failed: {clean_name!r}: {exc}")
@@ -496,7 +554,7 @@ def _run_ingest(
     # 11. bidirectional relations (AC#13).
     relations = _derive_relations(candidates, name_to_id)
     rel_created, rollback_notes = _write_bidirectional_relations(
-        client, space_id, relations
+        client, space_id, relations, kind_by_id
     )
     result["relations_created"] = rel_created
     if rollback_notes:
