@@ -80,7 +80,11 @@ jobs:
         # `gitleaks dir` would only see the current working tree and miss secrets that were
         # committed then deleted in a later commit.
         run: |
-          go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          # gitleaks' go.mod declares the module path as github.com/zricethezav/gitleaks
+          # (the original author's path), even though the repo now lives under the
+          # gitleaks org. `go install github.com/gitleaks/...` fails with a module-path
+          # mismatch; the zricethezav path is the canonical, documented install form.
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
           "$(go env GOPATH)/bin/gitleaks" git . --redact --exit-code 1
 
   # The build job carries NO `environment:` so it never pauses for reviewer
