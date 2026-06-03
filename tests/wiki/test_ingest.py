@@ -377,34 +377,39 @@ class TestBidirectionalRelationRollback:
 
     @respx.mock
     def test_bidi_relation_rollback_on_failure(self, monkeypatch, tmp_path):
-        """AC#13: one direction of a bidi relation fails → both rolled back; relation_rollback in log.
+        """AC#13: B-side of a property-based bidi relation fails → A-side reverted; relation_rollback logged.
 
-        Arrange: supply two entities with explicit relation directionality. The first relation
-        direction (A→B) succeeds; the second direction (B→A reciprocal) raises 500. This
+        NOTE — UPDATED FROM THE STANDALONE-RELATION-OBJECT MODEL. The original
+        approved test encoded relations as standalone ``wiki_relation``-typed
+        objects with a DELETE-by-id rollback. That type does NOT exist in
+        ``types_schema.WIKI_TYPES``; the master spec (§ingest step 6) and the
+        verified native-backlinks model represent relations as BIDIRECTIONAL
+        OBJECTS-FORMAT PROPERTY LINKS — ``wiki_relations`` on an Entity (and
+        ``wiki_related`` on a Concept) set on BOTH sides. This test is rewritten
+        to that property-based mechanism while preserving its intent: when one
+        side of the bidirectional write fails, the succeeded side is rolled back
+        and the WikiLog records ``relation_rollback``.
+
+        Arrange: two heading entities (Alpha, Beta) are created → one A→B relation
+        is derived. The A-side relation PATCH (on the Alpha object id) succeeds;
+        the B-side relation PATCH (on the Beta object id) returns 500. This
         triggers the rollback path.
 
         Assertions:
-          1. The first-direction relation that succeeded is rolled back — a DELETE (or unset PATCH)
-             is made for the relation object id that was created in direction 1.
-          2. The WikiLog create_object call carries a property with key "wiki_notes" (or
-             "relation_rollback" tag marker) recording the rollback event.
+          1. A rollback PATCH was issued against the A object id that reverts the
+             link (the A-side property is PATCHed a SECOND time back to its prior
+             empty objects list).
+          2. A WikiLog POST payload's JSON contains "relation_rollback".
 
-        Spy approach: capture all POST/PATCH/DELETE calls; after the call:
-          - At least one DELETE (or rollback-unset PATCH) call was made targeting the
-            first-direction relation id ("relation-dir1-001").
-          - At least one WikiLog POST payload includes "relation_rollback" in properties
-            or notes.
-
-        Covers: §9.1 AC#13 (v0.3.0 bidi relation rollback).
+        Covers: §9.1 AC#13 (v0.3.0 bidi relation rollback, property-based).
         """
         import json as _json
 
-        # Track calls for rollback verification
-        relation_dir1_id = "relation-dir1-001"
-        rollback_calls: list[str] = []   # DELETE/unset call paths
+        a_id = "entity-alpha-001"
+        b_id = "entity-beta-001"
         wikilog_payloads: list[dict] = []
-
-        relation_call_count = {"n": 0}
+        # All relation PATCHes targeting the A object id, with their objects list.
+        a_relation_patches: list[list] = []
 
         def mock_post(request, **kwargs):
             try:
@@ -416,39 +421,39 @@ class TestBidirectionalRelationRollback:
                 wikilog_payloads.append(payload)
                 return httpx.Response(201, json={"object": {"id": "wikilog-001", "name": "log"}})
 
-            # Relation creation calls: first direction succeeds, second fails
-            path = str(request.url)
-            if "relation" in path.lower() or payload.get("type_key") in ("relation", "wiki_relation"):
-                relation_call_count["n"] += 1
-                if relation_call_count["n"] == 1:
-                    # Direction A→B: succeeds, returns the relation id we'll track for rollback
-                    return httpx.Response(
-                        201, json={"object": {"id": relation_dir1_id, "name": "rel-a-to-b"}}
-                    )
-                # Direction B→A: fails — triggers rollback
-                return httpx.Response(500, json={"error": "relation creation failed"})
-
-            # Regular object creates (entities, source, etc.)
-            return httpx.Response(201, json={"object": {"id": "entity-001", "name": "Entity"}})
-
-        def mock_delete(request, **kwargs):
-            rollback_calls.append(str(request.url))
-            return httpx.Response(200, json={})
+            # Entity creates: first → Alpha, second → Beta. Source/others → src.
+            type_key = payload.get("type_key")
+            if type_key == "wiki_entity":
+                name = payload.get("name", "")
+                if "Alpha" in name:
+                    return httpx.Response(201, json={"object": {"id": a_id, "name": name}})
+                if "Beta" in name:
+                    return httpx.Response(201, json={"object": {"id": b_id, "name": name}})
+            return httpx.Response(201, json={"object": {"id": "src-001", "name": "src"}})
 
         def mock_patch(request, **kwargs):
-            # Some implementations roll back via PATCH (unset) rather than DELETE
             try:
                 payload = _json.loads(request.content)
             except Exception:
                 payload = {}
-            if relation_dir1_id in str(request.url) or relation_dir1_id in str(payload):
-                rollback_calls.append(str(request.url))
-            return httpx.Response(200, json={"object": {"id": relation_dir1_id}})
+            url = str(request.url)
+            # Extract the relation objects list (if this is a relation PATCH).
+            rel_objects = None
+            for prop in payload.get("properties", []) or []:
+                if prop.get("key") in ("wiki_relations", "wiki_related"):
+                    rel_objects = prop.get("objects")
+            # A-side relation PATCH (on Alpha) — record and succeed.
+            if a_id in url and rel_objects is not None:
+                a_relation_patches.append(rel_objects)
+                return httpx.Response(200, json={"object": {"id": a_id}})
+            # B-side relation PATCH (on Beta) — fail to trigger rollback.
+            if b_id in url and rel_objects is not None:
+                return httpx.Response(500, json={"error": "relation patch failed"})
+            return httpx.Response(200, json={"object": {"id": "patched"}})
 
-        # Markdown with two entities and explicit bidirectional relation
+        # Two heading entities → one derived A->B relation.
         md_content = (
-            "# Entity Alpha\n\nFact: Alpha relates to Beta.\n"
-            "Relation: Alpha → Beta (bidirectional)\n\n"
+            "# Entity Alpha\n\nFact: Alpha relates to Beta.\n\n"
             "# Entity Beta\n\nFact: Beta relates to Alpha.\n"
         )
         import tempfile
@@ -460,7 +465,6 @@ class TestBidirectionalRelationRollback:
 
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
         respx.post().mock(side_effect=mock_post)
-        respx.delete().mock(side_effect=mock_delete)
         respx.patch().mock(side_effect=mock_patch)
 
         from anytype_llm_wiki.wiki.ingest import wiki_ingest
@@ -471,17 +475,23 @@ class TestBidirectionalRelationRollback:
             f"wiki_ingest must return a dict even on rollback; got {type(result)}"
         )
 
-        # AC#13 assertion 2: the first-direction relation was rolled back
-        # Either a DELETE call targeted relation-dir1-001, OR a PATCH-unset call did
-        rolled_back = any(relation_dir1_id in call for call in rollback_calls)
-        assert rolled_back, (
-            f"AC#13: first-direction relation '{relation_dir1_id}' must be rolled back "
-            f"(DELETE or unset PATCH) when the second direction fails. "
-            f"Rollback calls captured: {rollback_calls!r}"
+        # AC#13 assertion 2: the A-side relation was PATCHed twice — once to set
+        # the link (objects == [b_id]) and once to revert it (objects == []).
+        assert len(a_relation_patches) >= 2, (
+            f"AC#13: A-side relation property must be PATCHed to set the link AND "
+            f"a SECOND time to roll it back when the B-side fails. "
+            f"A-side relation PATCHes captured: {a_relation_patches!r}"
+        )
+        assert b_id in (a_relation_patches[0] or []), (
+            f"AC#13: first A-side relation PATCH must set the link to B; got "
+            f"{a_relation_patches[0]!r}"
+        )
+        assert b_id not in (a_relation_patches[-1] or []), (
+            f"AC#13: rollback PATCH must REMOVE B from A's relation property; "
+            f"final A-side relation PATCH was {a_relation_patches[-1]!r}"
         )
 
         # AC#13 assertion 3: WikiLog records relation_rollback event
-        # Check for "relation_rollback" in any WikiLog property key, value, or notes
         wikilog_records_rollback = any(
             "relation_rollback" in _json.dumps(payload)
             for payload in wikilog_payloads
@@ -693,30 +703,41 @@ class TestUpdatePathNoBodyKey:
                 update_payloads.append(payload)
             except Exception:
                 pass
-            return httpx.Response(200, json={"object": {"id": "entity-001"}})
+            return httpx.Response(200, json={"object": {"id": "existing-entity-001"}})
 
-        respx.get().mock(return_value=httpx.Response(200, json={
-            "data": [
-                {
-                    "id": "coll-001",
-                    "name": "Wiki",
-                    "type": {"key": "collection"},
-                    "properties": [{"key": "wiki_schema_version", "text": "0.3.0"}],
-                },
-                {
-                    "id": "entity-001",
-                    "name": "Existing Entity",
-                    "type": {"key": "wiki_entity"},
-                    "properties": [{"key": "wiki_facts", "text": "old facts"}],
-                },
-            ],
-            "pagination": {"has_more": False},
-        }))
-        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "src-001"}}))
+        # The headingless URL source names the candidate after the source URL.
+        # Seed a search result whose name matches so resolve_entity returns
+        # action="update" → the PATCH-capturing loop is NON-VACUOUS.
+        source_url = "https://example.com/update-paper"
+
+        def capture_post(request, **kwargs):
+            import json as _json
+            # /search → return a SEARCH-SHAPED response that matches the candidate.
+            if "/search" in str(request.url):
+                return httpx.Response(200, json={
+                    "data": [
+                        {
+                            "id": "existing-entity-001",
+                            "name": source_url,
+                            "type": {"key": "wiki_entity"},
+                            "properties": [{"key": "wiki_facts", "text": "old"}],
+                        },
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            # Non-search POST (Source create, etc.).
+            return httpx.Response(201, json={"object": {"id": "src-001"}})
+
+        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
+        respx.post().mock(side_effect=capture_post)
         respx.patch().mock(side_effect=capture_patch)
 
         from anytype_llm_wiki.wiki.ingest import wiki_ingest
-        wiki_ingest(source="https://example.com/update-paper", space_id=FAKE_SPACE_ID)
+        wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        # Vacuous-loop guard (addendum item 3 / QA-ADV-1): the update path must
+        # actually fire, otherwise the body/markdown assertions pass vacuously.
+        assert update_payloads, "update path must fire (non-vacuous guard)"
 
         for payload in update_payloads:
             assert "body" not in payload, (
