@@ -14,7 +14,7 @@ parent_spec: 140-wiki-library-module-port-llm-wiki-pattern-onto-any
 **Status:** SPEC
 **Date:** 2026-06-03
 **Author:** spec-writer agent
-**Review rounds:** 1
+**Review rounds:** 2 (council R1 rework)
 
 ---
 
@@ -270,16 +270,31 @@ instructions" guidance bound the exposure.
   `chunk_object` — the indexer already has the summary `obj_summary` in scope at the
   `get_object` / `chunk_object` call site (`indexer.py:69-75`).
 
+  **Markdown-key assumption (CTO-A3 — make explicit so it is checked).** The body-chunk path
+  reads `obj.get("markdown")`. This assumes the `format=md` response carries the body under a
+  `"markdown"` key. That key name is so-far **unproven** against the live API. V1 (and the live
+  end-to-end gate V3, §10.2) implicitly validate it: if `objects_indexed` inverts to > 0 for a
+  body-bearing object, the `markdown` key was read correctly. The implementer MUST confirm the
+  actual key name during V1 (inspect the `get_object(format=md)` response) and adjust the
+  chunker's body read if the key differs.
+
 - **V2 (MUST — release-blocking):** After a property PATCH (`update_object` with a `properties`
   payload), confirm `last_modified_date` is updated in the object returned by `list_objects`.
   Pass criterion: re-read via `list_objects`, compare `last_modified_date` before and after
-  PATCH — the value must increase. **Fail action (SF5):** the incremental reindex
-  (`indexer.py:_get_last_modified`) will miss property-only updates, which silently breaks the
-  Decision 1 closure on the **update path** (re-ingested facts never re-embed). This is a
-  release-blocking gate, not a "file a ticket" item: if V2 fails, `wiki_ingest` MUST trigger a
-  **full reindex** of the space after a property-only update (bypassing the
-  `last_modified_date` short-circuit) so the updated `wiki_facts` are re-embedded. The update
-  path is covered end-to-end by AC-P7 (§8.2).
+  PATCH — the value must increase. **Fail action (SF5 — release-blocking, NOT a deferred
+  ticket):** the incremental reindex (`indexer.py:_get_last_modified`) will miss property-only
+  updates, which silently breaks the Decision 1 closure on the **update path** (re-ingested facts
+  never re-embed). This is a release-blocking gate: if V2 fails, `wiki_ingest` MUST force a
+  re-embed of the affected object(s) after a property-only update (bypassing the
+  `last_modified_date` short-circuit) so the updated `wiki_facts` are re-embedded.
+  **Preferred mechanism — object-scoped re-embed (QA-A1 / Infra-A3):** delete + re-upsert the
+  Qdrant points for the updated object filtered by its `object_id` payload field, then re-chunk
+  and re-embed that single object. This is preferred over a whole-space full reindex because a
+  full sweep grows with corpus size; the object-scoped path is O(1) in the number of ingested
+  objects. **Fallback:** if object-scoped delete-by-payload-filter is not available in the
+  deployed Qdrant client, fall back to a full-space reindex. The update path is covered
+  end-to-end by AC-P7 (§8.2); the bypass-firing behavior is pinned by AC-P9 / a deterministic
+  test (§9.2, `test_update_path_forces_reembed`).
 
 ```mermaid
 flowchart TD
@@ -591,12 +606,13 @@ noted.
 | Concurrent ingest lock (fcntl.flock) | §Concurrent Ingest Policy ~line 1572 | No change; tests MUST use `multiprocessing.Process` (Mem0 learning) |
 | Schema-compat read + upgrade | §Schema Compatibility / Upgrade Story ~line 1588 | Marker read order updated: Collection first, WikiLog fallback (Decision 2, §4.2) |
 | Configuration env vars | §Configuration ~line 1539 | No change for new v0.3.0 vars; `wiki_action` tags covered by bootstrap |
-| Failure modes table | §Failure modes per tool ~line 1637 | Add: `wiki_action_tag_not_found` warning (degraded WikiLog) |
+| Failure modes table | §Failure modes per tool ~line 1637 | Add: `wiki_action_tag_not_found` warning (degraded WikiLog). **Add (ADV-10, CPO-A1): Ollama-OOM-mid-extraction** — if Ollama OOMs partway through extraction, `wiki_ingest` returns `status: "partial"` with a WikiLog entry recording the partial outcome (per the append-only / partial-report policy, inherited AC#3); already-created objects are retained, the failed extraction is reported in `warnings`, and no rollback of successfully-written objects is performed. |
 | Resource impact | §Resource Impact ~line 1617 | No change |
 | Security: token handling + scrub | §Token handling ~line 1806; §LLM extraction data exfiltration ~line 1836 | Startup log/banner emitting active `WIKI_EXTRACT_ENDPOINT` must pass through `scrub_credentials` (pinned by AC-S1, §8.5) |
+| Extraction data flow: local-by-default + consent banner | §LLM extraction data exfiltration ~lines 1831-1837 | Extraction defaults to on-device Ollama (no off-machine egress when `WIKI_EXTRACT_ENDPOINT` unset); the first-run consent banner + ack-file mechanism (master ~line 1837) ships and fires before any source content is transmitted to a non-local endpoint (pinned by **AC-S2**, §8.5) |
 | Name-policy regex + value sanitization | §Token handling / bidi sanitization ~line 1810 | Bidi/control-char sanitizer applied to property **values** on write, not only names (SF2; AC#16 extended) |
 | `domain_hint` validation | §Ingest Pipeline ~line 389 | No change |
-| Post-ingest reindex | §Ingest Pipeline step 8 ~line 430 | No change; auto-reindex triggers `chunk_object` which now includes property chunks |
+| Post-ingest reindex | §Ingest Pipeline step 8 ~line 430 | Auto-reindex triggers `chunk_object` which now includes property chunks. **Concurrency note (ADV-12, Infra-A4):** the post-ingest reindex can overlap the launchd-scheduled reindex. The implementation MUST be concurrency-safe — either use **deterministic Qdrant point IDs** (so a concurrent reindex re-upserts the same point IDs rather than duplicating points) OR guard the launchd-scheduled reindex against the post-ingest reindex with an `fcntl.flock`. Confirmed as a §10.1 verification item. |
 | Observability / structured logger | §Failure modes ~line 1643 | No change |
 
 ---
@@ -757,7 +773,9 @@ deltas due to locked constraints are appended in brackets.
     divergence. Master AC#14 already specifies "on the root Collection" — this is not a delta,
     only a confirmation that v0.3.0 honors the master home.]**
 15. Missing or malformed `patch-decision.md` → `[CONFIG ERROR] patch_decision_missing_or_invalid`
-    before any write. **[No delta]**
+    before any write. **[CTO-A1 canonical-path pin: `patch-decision.md` lives ONLY at
+    `.aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-any/patch-decision.md` (the #140
+    parent dir — there is NO #284 copy). The implementation MUST read this exact path.]**
 16. Extraction output containing U+FEFF, U+2028, U+2029, or Unicode tag characters
     (U+E0020–U+E007F) in entity/concept name → `name_policy_rejected`. **[SF2 delta: the
     bidi/control-char sanitizer is additionally applied to property *values*
@@ -775,10 +793,14 @@ deltas due to locked constraints are appended in brackets.
 markdown body produces **at least one chunk** from `chunk_object`. The chunk's `heading` field
 equals `"Facts"` and its `text` field matches the `wiki_facts` value.
 
-**AC-P2:** After `wiki_ingest` creates a new Entity (with `wiki_facts` populated) and auto-
-reindex completes, `semantic_search` on a query semantically related to that entity's facts
-returns the entity in the result set (i.e. the indexer property gap is closed end-to-end).
-This AC requires live Anytype + Qdrant + Ollama (mark `@pytest.mark.live`).
+**AC-P2 (create-side end-to-end retrieval — non-skippable pre-tag gate, §10.1):** After
+`wiki_ingest` creates a new Entity (with `wiki_facts` populated) and auto-reindex completes,
+`semantic_search` on a query semantically related to that entity's facts returns **that specific
+named entity** in the result set (assert the created entity's `name`/`object_id` appears in the
+results — a **named-entity** assertion, NOT merely an aggregate result count). This is the
+end-to-end proof that the indexer property gap is closed on the create path. This AC requires
+live Anytype + Qdrant + Ollama (mark `@pytest.mark.live`). It is verified by §9.2 row
+`test_create_side_named_entity_retrieval` and is a non-skippable pre-tag gate (§10.1).
 
 **AC-P3:** A non-wiki Anytype object (no `wiki_*` properties) passed to `chunk_object` produces
 **zero property chunks** — its existing behavior is unchanged (blast-radius safety).
@@ -806,6 +828,16 @@ is the end-to-end guard that V2's release-blocking gate (§10.2) protects.
 **AC-P8 (B3):** `chunk_object` invoked on a property-only object whose dict is **missing**
 `space_id` (and/or `id`) does **not** raise `KeyError`; it returns property chunks with
 `space_id`/`object_id` defaulting to `""`. (Test `test_property_chunk_missing_space_id_tolerated`.)
+
+**AC-P9 (QA-B2 — CI-runnable seam test, backstops the live gates):** A **CI-runnable**
+integration test (no live Anytype/Qdrant/Ollama; uses a **fake/mock Qdrant client and a fake
+embedder**) asserts that reindexing a **property-only (empty-body)** wiki object drives the path
+`chunk_object → indexer → embed → Qdrant upsert` to produce a Qdrant **upsert whose payload
+carries the property chunk's `text` and `heading`** (e.g. `heading == "Facts"` and the
+`wiki_facts` text). This test backstops — it does **not** replace — the live gates AC-P2 / AC-P7 /
+V3: it exists so a future refactor of `indexer.py` (dropping `properties[]` before `chunk_object`,
+or re-introducing a `last_modified_date` short-circuit) cannot regress the property gap silently
+with a green CI. (Test `test_property_only_reindex_upserts_payload`, §9.2.)
 
 ### 8.3 New ACs — Schema-Version Marker (Decision 2)
 
@@ -838,11 +870,14 @@ WikiLog).
 schema-compat check returns `wiki_schema_outdated` (because WikiLog shows `0.2.0` and code is
 `0.3.0`), and the error message correctly directs the operator to run `wiki_bootstrap`.
 
-**AC-M5:** Re-running `wiki_bootstrap` on a v0.2.0 space (upgrade path) successfully PATCHes
-the root Collection with `wiki_schema_version = "0.3.0"` and subsequent `_read_schema_version`
-returns `"0.3.0"` from the Collection's `properties[]` (verified by re-reading via
-`list_objects`). Tests mock the `update_object` call to assert it is invoked with the correct
-payload.
+**AC-M5 (Option-a specific — gated on V4 PASS, CTO-A2):** Re-running `wiki_bootstrap` on a v0.2.0
+space (upgrade path) successfully PATCHes the root Collection with
+`wiki_schema_version = "0.3.0"`, and a subsequent `_read_schema_version` **round-trips** `"0.3.0"`
+from the Collection's `properties[]` (verified by re-reading via `list_objects`). Like AC-M1a,
+this AC only applies if Option (a) ships (gate V4 PASS) — it describes the Collection PATCH; for
+Option (b-1) the equivalent round-trip is via the `wiki:schema-marker` WikiLog. Tests mock the
+`update_object` call to assert it is invoked with the correct payload, and assert the post-upgrade
+`_read_schema_version` round-trip (test `test_post_upgrade_round_trip_reads_030`, §9.3, QA-A2).
 
 ### 8.4 New ACs — `wiki_action` Select Tag (Decision 3)
 
@@ -888,6 +923,28 @@ contains neither `KEY`, nor `SEKRET`, nor `user:` followed by `@host` (the `user
 form), while the host (`host`) is preserved. If a `doctor` extraction-endpoint reachability check
 is added, its message must scrub the endpoint identically (matching `doctor.py:79,134,183`).
 
+**AC-S2 (CA-B2 / Legal-Adv3 / CSO-A2 — local-by-default + first-run consent banner):** Pins two
+things that keep the first public release honest about its "local-first / no cloud" promise:
+
+1. **Local-by-default.** Extraction defaults to **on-device Ollama**. When `WIKI_EXTRACT_ENDPOINT`
+   is **unset** (the default), `wiki_ingest` makes **no off-machine call** — fetched source
+   content and local-file notes never leave the machine. Test: with the endpoint unset, assert no
+   HTTP call is made to any non-local host during extraction (the extraction client targets the
+   local Ollama address only).
+2. **Opt-in remote-extraction consent banner ships and fires.** When `WIKI_EXTRACT_ENDPOINT` is
+   **non-local** (not `127.0.0.1`/`localhost`), the master-spec CLI first-run **consent banner**
+   (master spec §LLM extraction data exfiltration ~line 1837: one-time warning + ack file keyed by
+   `sha256(endpoint)[:8]` at `~/.local/share/anytype-llm-wiki/extraction-endpoint-acknowledged-…`)
+   **ships and fires before any source content is transmitted**. Reference the master mechanism;
+   do not redesign it. Test (mocking the ack-file path): with a non-local endpoint and **no** ack
+   file present, the banner fires / a one-time warning is emitted **before** the first
+   transmission; a later change to a different hosted endpoint re-prompts (new hash → new ack
+   file). The ack file stores only the endpoint hash and timestamp — no secrets.
+
+Covered by §9.5 rows `test_local_default_no_offmachine_call` and
+`test_remote_endpoint_consent_banner_fires`. The README data-flow callout (§11) is bound to this
+AC; AC-S2 is referenced from §10.1 as a non-skippable pre-tag item.
+
 ---
 
 ## 9. Test Plan
@@ -916,11 +973,14 @@ partial-state idempotency (AC #18 disposition recorded in pre-release checklist)
 | `test_empty_property_not_emitted` | allowlisted key present but `text` is empty string → not emitted |
 | `test_property_chunk_missing_space_id_tolerated` | property-only obj missing `space_id` (and `id`) → no `KeyError`; chunks emitted with `space_id`/`object_id` defaulting to `""` (B3, AC-P8) |
 | `test_property_value_sanitized` | property value containing U+FEFF/U+2028/U+2029/tag chars → sanitizer strips them on write (SF2, AC#16 delta) |
+| `test_property_only_reindex_upserts_payload` | **CI-runnable seam test (AC-P9, QA-B2)** — fake Qdrant client + fake embedder; reindex a property-only (empty-body) wiki object → assert a Qdrant **upsert** is issued whose payload carries the property chunk's `text` and `heading` (e.g. `heading=="Facts"`, `wiki_facts` text). Backstops the live path `chunk_object → indexer → embed → upsert`; no live deps. |
+| `test_update_path_forces_reembed` | **deterministic (QA-A1, V2 fail action)** — simulate a property-only update where `last_modified_date` does NOT advance (V2-fail condition); assert `wiki_ingest` fires the re-embed bypass for the affected object (preferred: object-scoped delete-by-`object_id` + re-upsert; fallback: full-space reindex). Uses fake Qdrant/indexer spies; no live deps. |
 
-**Update-path end-to-end (`@pytest.mark.live`):**
+**Create/update-path end-to-end (`@pytest.mark.live`):**
 
 | Test | Description |
 |------|-------------|
+| `test_create_side_named_entity_retrieval` | **(AC-P2, QA-B1)** create an entity via `wiki_ingest` (empty body, `wiki_facts` populated) → auto-reindex → `semantic_search` on a query matching its facts returns **that specific named entity** (assert the created entity's `name`/`object_id` is in the results — named-entity, not aggregate count). Create-side end-to-end retrieval proof. |
 | `test_reingest_reembeds_updated_facts` | create entity (empty body) → ingest, reindex, search hits; re-ingest updates `wiki_facts` via property PATCH → reindex → search on the *updated* facts returns the entity (B2/AC-P7); asserts `create_object`/`update_object` carry no body (ties AC-L1) |
 
 ### 9.3 New Tests — Schema Marker Read Order
@@ -937,6 +997,8 @@ partial-state idempotency (AC #18 disposition recorded in pre-release checklist)
 | `test_bootstrap_patches_collection_on_fresh_space` | [V4 PASS / Option a] `update_object` called with `wiki_schema_version="0.3.0"` payload on the collection id (AC-M1a) |
 | `test_bootstrap_creates_named_schema_marker_wikilog` | [V4 FAIL / Option b-1] bootstrap creates one `wiki_log` named `wiki:schema-marker` with `wiki_schema_version="0.3.0"`; re-bootstrap PATCHes the same marker, no duplicate (AC-M1b, SF4) |
 | `test_bootstrap_upgrade_from_v020` | mock `list_objects` to return v0.2.0 WikiLog marker, no collection marker → upgrade path runs, `update_object` called (requires `WIKI_SCHEMA_VERSION=="0.3.0"`, B1) |
+| `test_post_upgrade_round_trip_reads_030` | **(QA-A2, AC-M5)** after the v0.2.0→v0.3.0 upgrade PATCH, a subsequent `_read_schema_version` round-trips `"0.3.0"` from the chosen marker home (Collection for Option a / `wiki:schema-marker` WikiLog for Option b-1) — completes the half-tested AC-M5 round-trip |
+| `test_exactly_one_marker_mechanism_ships` | **(QA-A5, SF9 guard — explicit row)** assert exactly ONE marker mechanism is present in shipped code: the V4-unselected Option (a `update_object` Collection PATCH XOR a `wiki:schema-marker` WikiLog singleton) mechanism is **absent**. No dormant second design ships. |
 | `test_wiki_ingest_outdated_schema_returns_config_error` | `_read_schema_version` returns `"0.2.0"`, code is `"0.3.0"` → `[CONFIG ERROR] wiki_schema_outdated` (AC-M4) |
 
 ### 9.4 New Tests — `wiki_action` Tag Creation and Resolution
@@ -950,6 +1012,7 @@ partial-state idempotency (AC #18 disposition recorded in pre-release checklist)
 | `test_bootstrap_wikilog_carries_bootstrap_action` | bootstrap WikiLog `properties` includes `{"key": "wiki_action", "select": <bootstrap_id>}` |
 | `test_ingest_wikilog_carries_ingest_action` | ingest WikiLog `properties` includes `{"key": "wiki_action", "select": <ingest_id>}` |
 | `test_ingest_action_tag_resolution_failure_writes_wikilog` | `list_tags` raises → ingest completes, WikiLog written, `wiki_action_tag_not_found` in warnings |
+| `test_empty_source_response_shape` | **(QA-A3, AC#8 SF3 delta)** empty-source ingest returns `status: "ok"`, `objects_created: []`, **`objects_skipped: []`**, `warnings: ["empty_source"]`; assert the `objects_skipped: []` field is present (the SF3 delta restoring the full master AC#8 response shape) |
 
 ### 9.5 New Tests — Locked-Constraint Guards (§8.5)
 
@@ -962,6 +1025,8 @@ partial-state idempotency (AC #18 disposition recorded in pre-release checklist)
 | `test_create_wiki_object_empty_body` | mock-spy `create_object`; ingest-authored wiki types created with no body content (AC-P7 create side, AC-L1) |
 | `test_resolve_entity_ignores_wrong_type` | `client.search` returns mixed-`type.key` set incl. same-name wrong-type obj → that obj NOT matched/updated; no `filter={"type_key":...}` arg passed (AC-L2, B5/SF8) |
 | `test_extraction_endpoint_scrubbed_in_startup_log` | `WIKI_EXTRACT_ENDPOINT=https://user:KEY@host/v1?api_key=SEKRET` → emitted startup line excludes `KEY`, `SEKRET`, `user:...@`; host preserved (AC-S1, SF1) |
+| `test_local_default_no_offmachine_call` | **(AC-S2.1)** `WIKI_EXTRACT_ENDPOINT` unset → extraction targets local Ollama only; assert no HTTP call to any non-local host during extraction (no off-machine egress) |
+| `test_remote_endpoint_consent_banner_fires` | **(AC-S2.2)** non-local `WIKI_EXTRACT_ENDPOINT`, no ack file (mock the ack-file path) → consent banner / one-time warning is emitted **before** the first source-content transmission; ack file written keyed by `sha256(endpoint)[:8]`; a later different endpoint re-prompts (new hash) |
 
 ### 9.6 Concurrency Test Requirement (Mem0 Learning)
 
@@ -979,16 +1044,22 @@ the v0.2.0 test design.
 - [ ] **`types_schema.WIKI_SCHEMA_VERSION` bumped from `"0.2.0"` to `"0.3.0"` (B1; prerequisite of Decision 2 — `types_schema.py:25`).**
 - [ ] Verification script rerun if any Anytype version bump since v0.2.0.
 - [ ] `pytest tests/` all green.
-- [ ] `pip-audit` clean; `bandit -r src/` clean; `pip-licenses` scan clean (no GPL/AGPL/SSPL/EUPL).
+- [ ] **Non-skippable pre-tag gates (BLOCKING-1, CPO-B1/QA-B1/CA-B1):** AC-P2 (create-side end-to-end retrieval) and AC-P7 (update-path end-to-end retrieval) — both `@pytest.mark.live` — **MUST pass before the `v0.3.0` git tag / PyPI publish.** They may NOT be skipped at tag time. (V3, below, is the release-blocking gate backing them.)
+- [ ] **CI-runnable seam test (AC-P9, QA-B2) green** — `test_property_only_reindex_upserts_payload` (fake Qdrant + fake embedder) is part of the CI suite and backstops the live path against a silent `indexer.py` regression.
+- [ ] **README ships a conspicuous local-first-by-default / opt-in-remote-extraction data-flow callout (AC-S2, BLOCKING-2).** Verify the off-machine disclosure is a prominent callout (not a buried line) and that the consent banner ships and fires for non-local `WIKI_EXTRACT_ENDPOINT`.
+- [ ] `pip-audit` clean; `bandit -r src/` clean **against a rationale-documented `.bandit` baseline (ADV-5, CSO-A4)** — carry the master CSO-Advisory-#6 annotated baseline so "clean" means clean-against-baseline, NOT blanket `# nosec` suppression of the intentional SSRF primitives in `fetch.py`; `pip-licenses` scan clean (no GPL/AGPL/SSPL/EUPL).
 - [ ] Ingest of 3 representative sources (short article, long paper, local markdown) run by hand.
+- [ ] **First-run flow routes the operator through `doctor` so the RAM-fit WARN is seen (ADV-10, CPO-A1)** — verify a fresh setup surfaces the `doctor` RAM-fit warning before first ingest (qwen2.5:3b on 16 GB is degraded vs qwen2.5:7b on 32 GB).
 - [ ] WikiLog verified in Anytype app (including `wiki_action = ingest`).
-- [ ] README v0.3.0 configuration table with `qwen2.5:7b` (32GB) and `qwen2.5:3b` (16GB) defaults.
+- [ ] README v0.3.0 configuration table with `qwen2.5:7b` (32GB) and `qwen2.5:3b` (16GB) defaults, the provisional dedup thresholds, and the honest hardware/extraction-quality dependency note (ADV-10).
 - [ ] Wikipedia fixture pinned to `archive.org` snapshot; extraction spot-check on both model defaults.
-- [ ] AC #18 partial-state idempotency disposition recorded (ship resume OR document duplicate-Source workaround).
+- [ ] **AC #18 partial-state idempotency disposition recorded as a release-blocking decision (ADV-9, QA-A7/CPO-A2)** — must be decided AND written into the pre-release notes before tag (ship resume OR document duplicate-Source workaround). The "document duplicate-Source workaround" branch visibly weakens AC#2 idempotence under partial failure; choosing it must be a conscious, recorded product call. See §12.
+- [ ] **`docs/known-limitations.md` G5 correction (ADV-8, QA-A6):** the stale `wiki_action` "v0.5.0" line (`known-limitations.md:65`) corrected to "v0.3.0" (Decision 3 brings it forward) — pre-release checklist item.
 - [ ] Credential-scrubbing regression tests run (`QDRANT_API_KEY`, `WIKI_EXTRACT_ENDPOINT`).
 - [ ] `.env.example` updated for v0.3.0 vars.
-- [ ] CHANGELOG.md v0.3.0 entry; `MIGRATIONS.md` v0.3.0 section.
-- [ ] NOTICE file regenerated (markdownify + pydantic; beautifulsoup4 + six transitive — all MIT).
+- [ ] CHANGELOG.md v0.3.0 entry; `MIGRATIONS.md` v0.3.0 section (**finalization gated on the V4-selected marker branch — ADV-6**; do not describe the unshipped option).
+- [ ] **NOTICE file regenerated from the resolved venv via `pip-licenses --from=mixed` (NOT a hand-curated list) — HARD pre-publish gate (ADV-1, Legal-Adv1).** Expected tree: `markdownify` (MIT) + pydantic v2 tree — `pydantic-core` (MIT), `typing-extensions` (**PSF-2.0, NOT MIT**), `annotated-types` (MIT) — plus markdownify's `beautifulsoup4` and `six`; all **OSI-permissive (MIT/PSF/BSD)**. **Manual check:** `pydantic-core` bundles vendored Rust crates that a Python-level license scan will not see — verify their licenses manually.
+- [ ] **`reindex_anytype` concurrency safety confirmed (ADV-12, Infra-A4):** either deterministic Qdrant point IDs (concurrent reindex does not duplicate points) OR the launchd-scheduled reindex and the post-ingest reindex are guarded against overlap with an `fcntl.flock`. Verify one of these holds.
 - [ ] Git tag `v0.3.0`; PyPI publish (first public PyPI release).
 
 ### 10.2 New Pre-Release Gates (v0.3.0)
@@ -1008,18 +1079,31 @@ re-read the object via `list_objects` and compare `last_modified_date` before an
 
 - Pass: `last_modified_date` is updated (later timestamp). Incremental reindex detects
   property-only updates correctly via `_get_last_modified`.
-- Fail: `last_modified_date` is unchanged. The incremental reindex will miss property-only
-  updates. A full-reindex trigger (or a different change-detection mechanism) is required; file
-  a follow-up ticket.
+- Fail: `last_modified_date` is unchanged. **Release-blocking (NOT a deferred ticket — matches
+  §4.1 / Decision 1 V2):** the incremental reindex will miss property-only updates. `wiki_ingest`
+  MUST force a re-embed of the affected object(s) on the property-only update path, bypassing the
+  `last_modified_date` short-circuit. **Preferred:** object-scoped re-embed (delete + re-upsert by
+  `object_id` Qdrant payload filter), which is O(1) in corpus size. **Fallback:** full-space
+  reindex. Pinned by the deterministic test `test_update_path_forces_reembed` (§9.2).
 
-**V3 (SHOULD — end-to-end property indexing):** After the chunker extension is implemented,
-run `reindex_anytype` on the `llm-wiki-test` space (which has 22 wiki objects). Confirm
-`objects_indexed > 0`. The original reproduction of the gap was `objects_checked: 22,
-objects_indexed: 0` — this must invert.
+**V3 (MUST — release-blocking — end-to-end property indexing):** After the chunker extension is
+implemented, run `reindex_anytype` on the `llm-wiki-test` space (which has 22 wiki objects). The
+original reproduction of the gap was `objects_checked: 22, objects_indexed: 0` — this must invert.
+This gate is **release-blocking** (promoted from SHOULD per CPO-B1 / CA-B1): the whole point of
+v0.3.0 is closing this gap, so the proof may not rest on an optional check. The pass criterion is
+strengthened beyond the aggregate: not only `objects_indexed > 0`, but a **named-entity retrieval
+assertion**.
 
-- Pass: `objects_indexed >= 1` for wiki Entity/Concept objects.
-- Fail: still 0. Debug the `properties[]` availability issue (V1 failure path) before
-  proceeding.
+This gate also implicitly validates the so-far-unproven `markdown`-key assumption in the
+`format=md` response (CTO-A3 / V1 note above): a non-zero `objects_indexed` for any body-bearing
+object confirms the body was read under the assumed key.
+
+- Pass: `objects_indexed >= 1` for wiki Entity/Concept objects **AND** a `semantic_search` for a
+  **known entity's facts** in `llm-wiki-test` returns **that specific entity** in the results (a
+  named-entity assertion, not merely the aggregate count).
+- Fail: `objects_indexed` still 0, or the named entity is not retrievable. Debug the
+  `properties[]` availability issue (V1 failure path) before proceeding. **Release-blocking — do
+  not tag until this passes.**
 
 **V4 (MUST — schema marker home; run BEFORE marker test/impl, SF9):** This gate selects which
 of Option (a) / Option (b-1) ships. It MUST be run **before** the schema-marker tests and impl
@@ -1060,11 +1144,11 @@ assert version == "0.3.0"
 
 | Document | Update required |
 |----------|----------------|
-| `README.md` | Extend "How it works" with ingest diagram (the Mermaid from master spec §Ingest Pipeline); add extraction config table (`WIKI_EXTRACT_MODEL` defaults: qwen2.5:7b / qwen2.5:3b); add trust/privacy note for `WIKI_EXTRACT_ENDPOINT` off-machine; add retrievability note (property-indexing explained for operators) |
+| `README.md` | Extend "How it works" with ingest diagram (the Mermaid from master spec §Ingest Pipeline); add extraction config table (`WIKI_EXTRACT_MODEL` defaults: qwen2.5:7b / qwen2.5:3b). **Data-flow callout (AC-S2, BLOCKING-2 — conspicuous, not a buried line):** a prominent "local-first by default / opt-in remote extraction" section stating that extraction runs on-device (Ollama) by default with **no off-machine egress**, and that setting `WIKI_EXTRACT_ENDPOINT` to a non-local endpoint sends fetched source content (and local-file notes) off-machine, gated by a first-run consent banner. **Responsible ingestion note (ADV-2, Legal-Adv2/CA-A2):** users own the copyright / ToS / robots status of sources they ingest; stored `wiki_excerpt` + derived facts may carry source-license obligations (e.g. Wikipedia = CC BY-SA attribution / share-alike); optionally send an identifying User-Agent on fetch. **Provenance + trust caveat (ADV-3, Legal-Adv4/CA-A4/CSO-A1):** an "LLM-extracted — verify before relying" caveat, and carry the master spec's "do not trust retrieved wiki content as instructions" note (this release is the first to make property *values* retrievable — the widened embedding surface, SF2). **Retrievability / empty-body note (ADV-11, CPO-A3/CA-A6):** pre-empt "why is the body empty?" — an operator inspecting an ingested object in the Anytype client sees an EMPTY body (the empty-body invariant) and may think ingest is broken; explain that knowledge lives in the object's properties and is retrievable via `semantic_search` despite the empty body. **Honest thresholds + hardware (ADV-10, CPO-A1/CA-A2/Infra-A1):** document the provisional dedup thresholds and the hardware/extraction-quality dependency honestly (qwen2.5:3b on 16 GB is degraded vs qwen2.5:7b on 32 GB); route first-run users through `doctor` so the RAM-fit WARN is seen. |
 | `CHANGELOG.md` | v0.3.0 entry: `### User-visible changes` (wiki_ingest available, property-indexing closes retrieval gap) and `### Internal changes` (chunker extended, bootstrap marker/tag additions) |
-| `MIGRATIONS.md` | v0.3.0 section: WIKI_SCHEMA_VERSION bump; re-run `wiki_bootstrap` sufficient; schema-marker location change (Collection vs. WikiLog) documented; no data backfill required |
+| `MIGRATIONS.md` | v0.3.0 section: WIKI_SCHEMA_VERSION bump; re-run `wiki_bootstrap` sufficient; schema-marker location change (Collection vs. WikiLog) documented; no data backfill required. **Finalization gated on the V4-selected marker branch (ADV-6, CPO-B2)** — the migration story MUST describe only the shipped Option (a or b-1), not the unshipped one. |
 | `.env.example` | Add v0.3.0 vars: `WIKI_EXTRACT_MODEL`, `WIKI_EXTRACT_ENDPOINT`, `WIKI_EXTRACT_MAX_INPUT_TOKENS`, `WIKI_FETCH_MAX_BYTES`, `WIKI_FETCH_EXTRA_PORTS`, `WIKI_UPSERT_THRESHOLD_TITLE`, `WIKI_UPSERT_THRESHOLD_EMBEDDING`, `WIKI_DUPLICATE_SURFACE_FLOOR`, `WIKI_AUTO_REINDEX` |
-| `NOTICE` | Regenerate: add `markdownify` (MIT) and `pydantic` (MIT); verify `beautifulsoup4` and `six` transitive entries |
+| `NOTICE` | **Regenerate from the resolved venv via `pip-licenses --from=mixed` (NOT hand-curated) — HARD pre-publish gate (ADV-1, Legal-Adv1).** Expected tree: `markdownify` (MIT) + pydantic v2 tree — `pydantic-core` (MIT), `typing-extensions` (**PSF-2.0, NOT MIT**), `annotated-types` (MIT) — plus markdownify's `beautifulsoup4` and `six`. Characterize as **all OSI-permissive (MIT/PSF/BSD)** (NOT "all MIT"). **Manual check:** `pydantic-core` bundles vendored Rust crates a Python-level scan won't see — verify those licenses manually. Accurate attribution is MIT's one substantive obligation and this is the first public distribution. |
 | `docs/known-limitations.md` | **#2 (schema marker):** update to record chosen mechanism (Option a or b-1 depending on V4 gate) and mark resolved once v0.3.0 ships. **#3 (wiki_action tags):** mark resolved — all five tags created by bootstrap, `wiki_ingest` writes `wiki_action = ingest`. **G5: `docs/known-limitations.md:65` still says `wiki_action` arrives in "v0.5.0" — Decision 3 brings it forward to v0.3.0; this stale "v0.5.0" line MUST be corrected to v0.3.0 when #3 is marked resolved.** Items #4 and #5 remain unchanged (already documented; no new implications from v0.3.0). |
 
 ---
@@ -1093,13 +1177,26 @@ is deleted, not shipped dormant. The choice is recorded in `known-limitations.md
 unbounded chunk count per object over time. Accepted as low severity for v0.3.0 (single-operator
 threat model; `_split_large` keeps chunks well-formed). A per-property soft cap plus a
 `wiki_facts_truncated` warning on the update path is deferred to a later increment.
+**Ticket-filing obligation (ADV-12, Infra-A2):** although G3 is accepted for v0.3.0, the deferred
+`wiki_facts` soft-cap MUST be filed as a tracked follow-up ticket before ship (record the ticket
+reference in the pre-release notes); deferral is not the same as forgetting.
 
-### AC #18 Partial-State Idempotency Disposition
+### Ops Watch — Long-Running Internal Deployment (ADV-12, Infra-A2)
+
+For the long-running internal deployment (Mac Mini), add an operational watch on **Qdrant
+collection size** and **Colima RSS** so the unbounded-growth accepted under G3 (and the widened
+property-embedding surface) is observed before it becomes a resource problem. This is an ops
+note, not a code requirement for v0.3.0.
+
+### AC #18 Partial-State Idempotency Disposition (RELEASE-BLOCKING recorded decision — ADV-9)
 
 Whether re-ingest after a partial failure reuses the existing Source (v0.3.0 scope) or is
-deferred to v0.6.0+ (with duplicate-Source lint workaround) is a pre-release decision. Pick
-one and record in the v0.3.0 pre-release notes (master spec AC #18 ~line 838 provides both
-options and the disposition language).
+deferred to v0.6.0+ (with duplicate-Source lint workaround) is a **release-blocking** decision
+(QA-A7 / CPO-A2): it MUST be decided AND written into the v0.3.0 pre-release notes **before the
+git tag**. Note explicitly that the "document duplicate-Source workaround" branch **visibly
+weakens AC#2 idempotence under partial failure**, so choosing it must be a conscious, recorded
+product call — not a silent default. (Master spec AC #18 ~line 838 provides both options and the
+disposition language.) Tracked as a §10.1 checklist item.
 
 ### V1 Failure Path (Indexer Architecture)
 
