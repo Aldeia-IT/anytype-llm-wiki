@@ -1,6 +1,6 @@
 ---
 name: anytype-llm-wiki-v0-3-0-wiki-ingest-compile-pipeli
-status: DRAFT
+status: SPEC
 issue: 284
 repo: anytype-llm-wiki
 target_repo: anytype-llm-wiki
@@ -11,7 +11,7 @@ parent_spec: 140-wiki-library-module-port-llm-wiki-pattern-onto-any
 
 # anytype-llm-wiki v0.3.0 — `wiki_ingest` Compile Pipeline
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-03
 **Author:** spec-writer agent
 **Review rounds:** 0
