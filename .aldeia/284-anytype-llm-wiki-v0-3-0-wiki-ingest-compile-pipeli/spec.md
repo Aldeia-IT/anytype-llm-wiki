@@ -14,7 +14,7 @@ parent_spec: 140-wiki-library-module-port-llm-wiki-pattern-onto-any
 **Status:** SPEC
 **Date:** 2026-06-03
 **Author:** spec-writer agent
-**Review rounds:** 0
+**Review rounds:** 1
 
 ---
 
@@ -140,6 +140,24 @@ refreshed. Any knowledge written to the body at create-time becomes stale on fir
 without delete-and-recreate (which breaks inbound Relations). This matches the Mem0 principle:
 deprecate rejected approaches explicitly.
 
+**Empty-body-on-create invariant (load-bearing — closes the gap on BOTH create and update).**
+Because the body cannot be refreshed after create (§5.1), `wiki_ingest` MUST create all wiki
+`wiki_entity` / `wiki_concept` / `wiki_comparison` / `wiki_query` objects with an **empty
+markdown body** — properties-only on `create_object`. Knowledge lives exclusively in the text
+properties (`wiki_facts`, `wiki_description`, …). This makes "empty body" the **invariant for
+all ingest-authored wiki objects**, which in turn makes the dedup guard (below) sound across the
+full lifecycle:
+
+- On **create**, the object has no body → property chunks are emitted.
+- On **re-ingest / update**, `wiki_facts` etc. are refreshed via property PATCH and the body is
+  still empty → property chunks re-emit with the updated values.
+
+This eliminates the failure mode where an ingest-authored object created *with* a body would
+have its stale body suppress the (now-updated) property chunks — the precise gap v0.3.0 must
+close. Objects a human created manually *with* a body retain the existing body-chunk behavior
+unchanged (the dedup guard still applies to them); only `wiki_ingest`-authored objects are
+bound by the empty-body invariant.
+
 **Resolution — Approach (b): extend `chunker.py` only.**
 
 The fix is a **purely additive change to `chunker.py`**. The indexer already calls
@@ -186,7 +204,7 @@ operational metadata, not knowledge.
 
 ```python
 {
-    "object_id":   obj["id"],
+    "object_id":   obj.get("id", ""),
     "space_id":    obj.get("space_id", ""),
     "object_name": obj.get("name", ""),
     "type_key":    obj.get("type", {}).get("key", "unknown"),
@@ -195,20 +213,53 @@ operational metadata, not knowledge.
 }
 ```
 
+**Defensive key access (MANDATORY — B3).** Today `chunker.py:18-19` reads `obj["id"]` and
+`obj["space_id"]` via direct subscript. Those lines are unreachable for empty/property-only
+objects *today* because of the early-return on empty markdown (`chunker.py:15-16`). The new
+property-chunk path executes *precisely* for empty-body objects, making those subscripts
+reachable. If a `get_object(format=md)` response (shape unverified until gate V1) lacks
+`space_id` or `id`, a direct `obj[...]` raises `KeyError` and crashes the entire reindex loop
+(`indexer.py:75` calls `chunk_object(obj)` with no guard). The implementation **MUST** convert
+the direct-subscript lines to `obj.get("id", "")` / `obj.get("space_id", "")` (the shape above)
+so the property-chunk path tolerates a missing `space_id`/`id`. The body-chunk path inherits the
+same hardening. See test `test_property_chunk_missing_space_id_tolerated` (§9.2).
+
 **Dedup guard:** emit property chunks **only when the object's `markdown` body is empty or
-absent**. If a non-empty body is present (e.g. on a manually created object with body content,
-or the first-create body of a wiki object), the body chunks already cover the content. Property
-chunks supply the structured representation for objects with blank bodies — the normal state
-after property-only ingest.
+absent**. This guard is sound precisely *because* of the empty-body-on-create invariant above:
+every `wiki_ingest`-authored object has a blank body for its whole lifecycle (create AND update),
+so it always takes the property-chunk path. The guard exists only to protect the remaining case —
+a **manually created** wiki object that carries a non-empty body — where the body chunks already
+cover the content and re-emitting property chunks would double-index. No ingest-authored object
+can ever hit the body branch, so the gap the guard once re-opened (a body-bearing wiki object
+whose updated facts are suppressed) is structurally closed.
 
 **Chunk splitting:** Each property value is split by the existing `_split_large` function if it
 exceeds `MAX_CHUNK_CHARS` (1500 chars). This is important for `wiki_facts`, which accumulates
 bullet points across multiple ingests and may grow to several KB.
 
+**Unbounded growth (accepted — G3).** `wiki_facts` (and other accumulating properties) grow
+across re-ingests, producing an unbounded number of chunks for a single object over time. Under
+the single-operator threat model this is **low severity and accepted** for v0.3.0 — there is no
+adversary inflating the corpus, and `_split_large` keeps individual chunks well-formed. A
+per-property soft cap with a `wiki_facts_truncated` warning on the update path is deferred to a
+later increment (tracked under §12 deferred work); v0.3.0 ships without it.
+
 **Blast-radius safety:** The allowlist is explicitly scoped to `wiki_*` keys. An ordinary
 Anytype note or page with properties like `name`, `description`, `status` will have none of its
 property keys in `WIKI_TEXT_PROPERTY_KEYS`. The behavior of `chunk_object` for non-wiki objects
 is unchanged. The `wiki_` prefix is reserved by the module.
+
+**Property-value injection (residual-risk acknowledgement — SF2).** This increment widens the
+embedding surface: property *values* (`wiki_facts`, `wiki_description`, …) were never indexed
+before and are now embedded and retrievable via `semantic_search`. Those values are
+attacker-influenced free text (extracted from fetched source documents). The master spec's
+name-policy regex (§Token handling / bidi sanitization ~line 1810) is **name-only**; the
+bidi/control-char sanitizer (master ~1810) must therefore be applied to property **values** on
+write, not only to names — AC#16 is extended to assert this (see §8.1 AC#16). Semantic
+prompt-injection embedded in a retrieved `wiki_description`/`wiki_facts` that later feeds a
+downstream LLM remains an **accepted residual risk** per the master README trust note (~1372):
+the single-operator threat model and the explicit "do not trust retrieved wiki content as
+instructions" guidance bound the exposure.
 
 **Pre-release verification items:**
 
@@ -216,21 +267,25 @@ is unchanged. The `wiki_` prefix is reserved by the module.
   `properties[]` in the returned object dict. Pass criterion: `get_object()` result contains a
   `"properties"` key that is a list. Fail action: add a step in the indexer (`indexer.py`) to
   carry the summary object's `properties[]` into the full-object dict before calling
-  `chunk_object` — the indexer already has the summary at that point (`_get_last_modified` reads
-  it from the summary, `indexer.py` lines 40-45).
+  `chunk_object` — the indexer already has the summary `obj_summary` in scope at the
+  `get_object` / `chunk_object` call site (`indexer.py:69-75`).
 
-- **V2 (MUST):** After a property PATCH (`update_object` with a `properties` payload), confirm
-  `last_modified_date` is updated in the object returned by `list_objects`. Pass criterion:
-  re-read via `list_objects`, compare `last_modified_date` before and after PATCH — the value
-  must increase. Fail action: the incremental reindex (`indexer.py:_get_last_modified`) will
-  miss property-only updates; a full-reindex trigger or a different change-detection field is
-  required.
+- **V2 (MUST — release-blocking):** After a property PATCH (`update_object` with a `properties`
+  payload), confirm `last_modified_date` is updated in the object returned by `list_objects`.
+  Pass criterion: re-read via `list_objects`, compare `last_modified_date` before and after
+  PATCH — the value must increase. **Fail action (SF5):** the incremental reindex
+  (`indexer.py:_get_last_modified`) will miss property-only updates, which silently breaks the
+  Decision 1 closure on the **update path** (re-ingested facts never re-embed). This is a
+  release-blocking gate, not a "file a ticket" item: if V2 fails, `wiki_ingest` MUST trigger a
+  **full reindex** of the space after a property-only update (bypassing the
+  `last_modified_date` short-circuit) so the updated `wiki_facts` are re-embedded. The update
+  path is covered end-to-end by AC-P7 (§8.2).
 
 ```mermaid
 flowchart TD
     A["chunk_object(obj)"] --> B{markdown present\nand non-empty?}
-    B -->|yes| C[emit body chunks\nexisting path unchanged]
-    B -->|no| D[scan obj.get('properties',[])]
+    B -->|"yes (manually-created\nwith body only —\ningest-authored objects\nhave empty body)"| C[emit body chunks\nexisting path unchanged]
+    B -->|"no (the invariant\nstate for every\ningest-authored object,\ncreate AND update)"| D[scan obj.get('properties',[])]
     D --> E{key in\nWIKI_TEXT_PROPERTY_KEYS?}
     E -->|no| F[skip — non-wiki or\nnon-embeddable property]
     E -->|yes| G{text value\nnon-empty?}
@@ -240,6 +295,10 @@ flowchart TD
     C --> Z[return chunks]
     I --> Z
 ```
+
+Because `wiki_ingest` creates objects with an empty body (the invariant above), every
+ingest-authored object follows the **right branch** on create and on every re-ingest. The left
+(body) branch is reachable only for manually-created body-bearing objects.
 
 ### Decision 2 — Schema-Version Marker Home Reconciliation
 
@@ -254,6 +313,15 @@ type "did not reliably persist a custom property." Under the verified `patch_pro
 works` path, it is unclear whether this applies to system-typed objects (the PATCH is silently
 dropped at the type-schema level) or whether the fix was simply not attempted. This cannot be
 resolved without a live probe.
+
+**Hard prerequisite — bump `WIKI_SCHEMA_VERSION` to `"0.3.0"` (B1).** The entire
+marker/migration design of this Decision assumes the running code's schema version is `"0.3.0"`.
+Today `types_schema.WIKI_SCHEMA_VERSION = "0.2.0"` (`types_schema.py:25`). Until it is bumped,
+the `is_upgrade` detection (`bootstrap.py:251-254`) compares `0.2.0`-vs-`0.2.0` on a v0.2.0
+space (equal → proceeds, no upgrade), V4 would write `{"text": "0.2.0"}`, and **AC-M4 cannot
+pass** (it requires "WikiLog shows 0.2.0 and code is 0.3.0"). The implementation **MUST** bump
+`types_schema.WIKI_SCHEMA_VERSION` to `"0.3.0"` as a named prerequisite of this Decision. This
+step is listed in §7.1 (Modified files) and §10 (checklist).
 
 **Primary design — Option (a): stamp the root Collection (aligns with master spec and AC #13)**
 
@@ -276,23 +344,40 @@ except Exception as exc:
 The WikiLog stamp (`bootstrap.py:416`) is **retained as informational fallback** — do not
 remove it.
 
-**Schema-compat read order (used by `wiki_ingest` and all subsequent tools):**
+**Schema-compat read order (used by `wiki_ingest` and all subsequent tools).** The collection
+value and the WikiLog fallback are **combined with `max(...)`**, not "Collection wins
+unconditionally" — this resolves the stale-marker concern (SF7): a Collection marker left behind
+at an older version cannot mask a newer WikiLog marker. `_read_schema_version` returns
+`max(collection_value, wikilog_max)` over the comparable version tuples (treating a missing side
+as `None`, reusing `_max_version`).
 
 ```mermaid
 flowchart TD
-    A[schema compat check] --> B[list_objects to find root Collection\nname='Wiki', type.key='collection']
-    B --> C{wiki_schema_version\nin collection properties[]}
-    C -->|found| D[use as authoritative version]
-    C -->|not found| E[scan all wiki_log objects\nfind _max_version across properties[]]
-    E --> F{any version found?}
-    F -->|found| G[use as fallback version\nv0.2.0 space or silent PATCH failure]
-    F -->|not found| H[[CONFIG ERROR\nwiki_schema_missing]]
-    D --> I{version comparison}
-    G --> I
+    A[schema compat check] --> B[list_objects to find root Collection\nname='Wiki' AND type.key='collection']
+    B --> C[read wiki_schema_version\nfrom collection properties[] -> collection_value]
+    C --> E[scan loop: for each obj,\n_max_version(found, _found_schema_version(obj))\nfiltered to type.key=='wiki_log' -> wikilog_max]
+    E --> M[version = max(collection_value, wikilog_max)\nvia _max_version]
+    M --> F{any version found?}
+    F -->|none| H[[CONFIG ERROR\nwiki_schema_missing]]
+    F -->|found| I{version comparison}
     I -->|older than code| J[[CONFIG ERROR\nwiki_schema_outdated]]
     I -->|equal| K[proceed]
     I -->|newer than code| L[warn and continue\nwiki_schema_newer]
 ```
+
+**`_read_schema_version` implementation notes (SF6 / G4):**
+
+- The Collection read MUST guard on **both** name and type: `obj.get("name") == "Wiki"` AND
+  `obj.get("type", {}).get("key") == "collection"`. The existing `_find_root_collection`
+  (`bootstrap.py:480-485`) matches **name-only** (impl-review-r2 NIT-1); the version-read path
+  must add the `type.key == "collection"` guard so an unrelated object named "Wiki" is not
+  adopted as the marker source.
+- The WikiLog fallback reproduces the existing **scan-loop** pattern at `bootstrap.py:248-249`
+  (`for obj in objects: found = _max_version(found, _found_schema_version(obj))`). Note
+  `_max_version` (`bootstrap.py:123-129`) is a **2-arg helper**, not a scanner — the fallback
+  drives it with the loop, it does not call `_max_version` once over a collection. For the
+  marker-read path, restrict the scan to `type.key == "wiki_log"` objects (the canonical marker
+  carriers) so AC-M3 ("highest version across all `wiki_log` objects") is literally satisfied.
 
 **Migration for v0.2.0 spaces:**
 
@@ -324,9 +409,17 @@ type is silently dropped (V4 fails), the implementation pivots to Option (b-1):
 The `wiki_log` type is wiki-owned (not a system type), so custom properties are guaranteed to
 persist. This avoids the collection-type PATCH uncertainty entirely.
 
-**Option (b-1) is the deterministic fallback.** Implementation must be ready to pivot; the
-pre-release gate V4 decides which ships. This resolves `known-limitations.md` #2 and
+**Option (b-1) is the deterministic fallback.** This resolves `known-limitations.md` #2 and
 `impl-review-r2.md` SHOULD-FIX-1 / ADVISORY-1.
+
+**V4 sequencing (SF9 — avoid shipping dual live designs).** Shipping both Option (a) and Option
+(b-1) "ready to pivot" is exactly the dual-path shape §5.1 / the Appendix deprecate. To avoid
+test/impl divergence, **gate V4 (§10.2) MUST be run BEFORE the marker tests and impl are
+authored** — not at pre-release. The live probe selects exactly one option; only the selected
+option's code and tests are written, and the loser is **deleted, not shipped dormant**. If V4
+cannot run that early in a given environment, the test suite MUST assert that exactly **one**
+marker mechanism is present in shipped code (a guard test verifying the unselected mechanism is
+absent), so no dormant second design ships.
 
 ### Decision 3 — `wiki_action` Select-Tag Pre-Creation
 
@@ -338,8 +431,11 @@ bootstrap WikiLog writes because no tag was pre-created (`known-limitations.md` 
 **Resolution: create all five `wiki_action` tag options during `wiki_bootstrap`.**
 
 Bootstrap already creates `wiki_domain_tags` options via `create_tag` in a tag-creation loop
-(`bootstrap.py:331-367`). The same infrastructure handles `wiki_action` tags with union-only
-re-bootstrap semantics (detect existing tags by name, skip already-present, create missing).
+(`bootstrap.py:331-372`). The same infrastructure handles `wiki_action` tags with union-only
+re-bootstrap semantics (detect existing tags by name, skip already-present, create missing). The
+bootstrap WikiLog write to extend with the `wiki_action` select is at `bootstrap.py:410-418`
+(`_build_props_list` maps `select` → `{"key": …, "select": value}` at ~449-450, so the
+tag-id payload shape is correct).
 
 **Full enum to create:** `ingest`, `query`, `lint`, `bootstrap`, `archive`
 (all five; later tool versions inherit them without additional bootstrap changes).
@@ -417,12 +513,18 @@ PATCH body silently ignored" as conditional branches. **The Primary path branch 
 deleted from the implementation.** Only the fallback path ships.
 
 This is the Mem0 principle in practice: deprecate rejected approaches explicitly. Test writers
-and impl workers must NOT implement a body-update path.
+and impl workers must NOT implement a body-update path. This locked constraint is pinned by
+**AC-L1** (§8.5): no `body`/`markdown` key may appear in any update-path `update_object` call.
 
-**Impact on chunker:** the body at initial create-time may contain content (the v0.1.0/v0.2.0
-behavior was to create with a body). On re-ingest / update, the body cannot be refreshed.
-Property chunks (Decision 1) are therefore the only reliable embedding surface for wiki objects
-across their full lifecycle.
+**Impact on chunker — empty-body invariant for ingest-authored objects.** Because the body
+cannot be refreshed after create (and any create-time body would go stale on first
+property-PATCH update), `wiki_ingest` creates wiki objects with an **empty markdown body**
+(properties-only on `create_object`; see Decision 1). Property chunks (Decision 1) are therefore
+the **only** embedding surface for ingest-authored wiki objects across their full lifecycle —
+create AND update. A manually-created wiki object that carries a body keeps the body-chunk path
+(the dedup guard still applies to it); only ingest-authored objects are bound by the empty-body
+invariant. This single invariant makes Decision 1's dedup guard sound on both paths and is what
+structurally closes the property gap.
 
 ### 5.2 Type-Key FilterExpression Is a No-Op — Client-Side Filtering
 
@@ -446,9 +548,12 @@ type**. The implementation must filter client-side in Python after receiving the
   which works correctly (Qdrant payload filters are not affected by the Anytype FilterExpression
   no-op). The Qdrant query passes `type_key=type_key` as a payload filter in the vector search.
 
-This must be made explicit in `wiki/ingest.py` — the `client.search` calls in the resolution
-function must not pass `filter={"type_key": ...}` expecting Anytype to scope the results;
-that argument should either be dropped or the post-filter must be applied unconditionally.
+This must be made explicit in `wiki/ingest.py` (SF8 — prescriptive, not either/or): the
+`client.search` calls in the resolution function **MUST NOT pass `filter={"type_key": ...}`** —
+drop the argument entirely so the code does not imply server-side type scoping works — and the
+client-side post-filter `o.get("type", {}).get("key") == type_key` **MUST always be applied**
+before any candidate is considered. This is pinned by **AC-L2** (§8.5): given a mixed-`type.key`
+`client.search` result, a same-name object of the wrong type is never matched/updated.
 
 ### 5.3 Property PATCH Works — Durable Write Mechanism
 
@@ -474,7 +579,7 @@ noted.
 | `wiki_ingest` MCP tool signature | §Ingest Pipeline ~line 379 | Add `wiki_action` tag resolution step in pipeline |
 | IngestResult schema | §Ingest Pipeline ~line 391 | No change |
 | Ingest pipeline steps 1-9 | §Ingest Pipeline ~lines 416-438 | Step 4 entity resolution: type filter must be client-side (§5.2); step 7 WikiLog must include `wiki_action` (Decision 3) |
-| PATCH update path | §Ingest Pipeline ~lines 440-447 | **Primary path deleted.** Only fallback (properties-only) ships. See §5.1. |
+| PATCH update path | §Ingest Pipeline ~lines 440-447 | **Primary path deleted.** Only fallback (properties-only) ships. Wiki objects are CREATEd with an empty body (empty-body invariant, Decision 1 / §5.1). See §5.1; pinned by AC-L1 / AC-P7. |
 | URL fetch + SSRF protections | §SSRF protections ~line 1671 | No change; `scrub_credentials` applies to extraction endpoint in startup log |
 | `markdownify` HTML→markdown | §Ingest Pipeline step 2 ~line 419 | No change |
 | Extraction prompt + JSON schema validation | §Extraction Prompt Structure ~line 1306 | No change |
@@ -488,8 +593,8 @@ noted.
 | Configuration env vars | §Configuration ~line 1539 | No change for new v0.3.0 vars; `wiki_action` tags covered by bootstrap |
 | Failure modes table | §Failure modes per tool ~line 1637 | Add: `wiki_action_tag_not_found` warning (degraded WikiLog) |
 | Resource impact | §Resource Impact ~line 1617 | No change |
-| Security: token handling + scrub | §Token handling ~line 1806 | Startup log printing active extraction endpoint must apply `scrub_credentials` |
-| Name-policy regex | §Token handling / bidi sanitization ~line 1810 | No change |
+| Security: token handling + scrub | §Token handling ~line 1806; §LLM extraction data exfiltration ~line 1836 | Startup log/banner emitting active `WIKI_EXTRACT_ENDPOINT` must pass through `scrub_credentials` (pinned by AC-S1, §8.5) |
+| Name-policy regex + value sanitization | §Token handling / bidi sanitization ~line 1810 | Bidi/control-char sanitizer applied to property **values** on write, not only names (SF2; AC#16 extended) |
 | `domain_hint` validation | §Ingest Pipeline ~line 389 | No change |
 | Post-ingest reindex | §Ingest Pipeline step 8 ~line 430 | No change; auto-reindex triggers `chunk_object` which now includes property chunks |
 | Observability / structured logger | §Failure modes ~line 1643 | No change |
@@ -513,8 +618,9 @@ noted.
 - `pyproject.toml` — add `markdownify>=0.11.0,<0.12.0`, `pydantic>=2.6,<3.0`
 
 **Modified files (new to v0.3.0 scope):**
-- `src/anytype_llm_wiki/chunker.py` — add `WIKI_TEXT_PROPERTY_KEYS`, extend `chunk_object`
-- `src/anytype_llm_wiki/wiki/bootstrap.py` — add schema-marker PATCH + `wiki_action` tag creation
+- `src/anytype_llm_wiki/chunker.py` — add `WIKI_TEXT_PROPERTY_KEYS`, extend `chunk_object`, harden direct key access to `.get(...)` (B3)
+- `src/anytype_llm_wiki/wiki/bootstrap.py` — add schema-marker PATCH + `wiki_action` tag creation; `_read_schema_version` helper
+- `src/anytype_llm_wiki/wiki/types_schema.py` — **bump `WIKI_SCHEMA_VERSION` from `"0.2.0"` to `"0.3.0"`** (B1; prerequisite of Decision 2 — see §4.2 and §10.2)
 
 ### 7.2 Key Function Signatures and Extensions
 
@@ -542,6 +648,11 @@ def chunk_object(obj: dict) -> list[dict]:
     the markdown body is empty or absent. Each chunk carries:
       {object_id, space_id, object_name, type_key, heading, text}
     Property chunks use heading = WIKI_PROPERTY_HEADING[key].
+
+    All metadata reads use obj.get(..., default) — id and space_id MUST tolerate
+    being absent on the property path (B3); a missing key must not raise KeyError.
+    Ingest-authored wiki objects always have an empty body (Decision 1 invariant),
+    so they always take the property path on both create and update.
     """
 ```
 
@@ -587,10 +698,15 @@ def _read_schema_version(
     client: WikiClient,
     space_id: str,
 ) -> str | None:
-    """Read wiki_schema_version using the two-step read order:
-    1. Root Collection properties[] (Option a primary).
-    2. _max_version over wiki_log typed objects (fallback).
-    Returns the version string or None if not found."""
+    """Read wiki_schema_version and return max(collection_value, wikilog_max).
+    1. Root Collection properties[] — guarded on name=='Wiki' AND
+       type.key=='collection' (G4: not name-only) -> collection_value.
+    2. Scan-loop fallback reproducing bootstrap.py:248-249
+       (found = _max_version(found, _found_schema_version(obj)) per obj),
+       restricted to type.key=='wiki_log' objects -> wikilog_max.
+    Combine via _max_version(collection_value, wikilog_max) so a stale
+    Collection marker cannot mask a newer WikiLog marker (SF7).
+    Returns the version string or None if neither source has a marker."""
 ```
 
 This helper is used by the schema-compat check on every tool entry (wiki_ingest, wiki_query,
@@ -621,7 +737,9 @@ deltas due to locked constraints are appended in brackets.
    U+2212, U+FE63, U+FF0D, U+00AD, U+2015.
 7. Malformed extraction JSON triggers one repair attempt before failing.
 8. Empty-source ingest returns `status: "ok"`, Source created, `objects_created: []`,
-   `warnings: ["empty_source"]`, WikiLog notes `empty_source`.
+   `objects_skipped: []`, `warnings: ["empty_source"]`, WikiLog notes `empty_source`.
+   **[SF3: `objects_skipped: []` restored to match master AC#8 ~line 828; full master response
+   shape applies.]**
 9. Post-ingest `reindex_anytype` failure: `status: "ok"`, `reindex_failed` warning, WikiLog
    `wiki_notes` matches, created objects present in Anytype.
 10. `domain_hint` not in space taxonomy → `[CONFIG ERROR] invalid_domain_hint` before fetch.
@@ -629,14 +747,23 @@ deltas due to locked constraints are appended in brackets.
 12. Prompt-injection test per master spec AC #12: injected-name object not created with
     `is_central=true`; name-policy-rejected name (with `"system:"` prefix) never created.
     **[No delta]**
-13. Bidirectional relation rollback: if either direction fails, both are rolled back; WikiLog
-    records `relation_rollback` event. **[No delta]**
+13. (v0.3.0 AC#13 — bidirectional relation rollback) If either direction fails, both are rolled
+    back; WikiLog records `relation_rollback` event. **[No delta]** **[G1: this is the inherited
+    *v0.3.0* AC#13. It is distinct from the *master v0.2.0* AC#13 (`wiki_schema_outdated`,
+    master ~line 743) cited by Decision 2 — every "AC #13" reference is disambiguated as "master
+    v0.2.0 AC#13" vs "v0.3.0 AC#13".]**
 14. `wiki_schema_version` newer than running code → `warn`-level log `wiki_schema_newer`, tool
-    continues. **[Delta: seeded on root Collection per Decision 2, not arbitrary object]**
+    continues. **[G2: Confirms Decision 2 marker home (root Collection); resolves v0.2.0 WikiLog
+    divergence. Master AC#14 already specifies "on the root Collection" — this is not a delta,
+    only a confirmation that v0.3.0 honors the master home.]**
 15. Missing or malformed `patch-decision.md` → `[CONFIG ERROR] patch_decision_missing_or_invalid`
     before any write. **[No delta]**
 16. Extraction output containing U+FEFF, U+2028, U+2029, or Unicode tag characters
-    (U+E0020–U+E007F) in entity/concept name → `name_policy_rejected`. **[No delta]**
+    (U+E0020–U+E007F) in entity/concept name → `name_policy_rejected`. **[SF2 delta: the
+    bidi/control-char sanitizer is additionally applied to property *values*
+    (`wiki_facts`, `wiki_description`, …) on write — not only to names — since property values
+    are now an embedded, retrievable surface. Assert the sanitizer strips these codepoints from
+    a property value, not only from a name.]**
 17. DNS-rebinding tripwire: controlled-resolver fixture → `ssrf_blocked`. **[No delta]**
 18. AC MAY be scoped to v0.6.0+: re-ingest after partial failure reuses existing Source (no
     duplicate). Pre-release checklist records choice. **[No delta]**
@@ -667,20 +794,45 @@ one** property chunk (split behavior).
 `WIKI_TEXT_PROPERTY_KEYS`. A `wiki_source` object with `wiki_excerpt` populated and no body
 produces zero property chunks from the allowlist.
 
+**AC-P7 (B2 empty-body invariant + SF5 update path):** Wiki objects created by `wiki_ingest`
+have an **empty markdown body** (verify the `create_object` call carries no `body`/`markdown`
+content for `wiki_entity`/`wiki_concept`/`wiki_comparison`/`wiki_query`). Their knowledge is
+retrievable via property chunks across BOTH create AND update: re-ingesting an existing entity
+updates `wiki_facts` via property PATCH (empty body unchanged), and after reindex
+`semantic_search` returns the entity for a query matching the **updated** facts (not the
+pre-update facts). This requires live Anytype + Qdrant + Ollama (mark `@pytest.mark.live`); it
+is the end-to-end guard that V2's release-blocking gate (§10.2) protects.
+
+**AC-P8 (B3):** `chunk_object` invoked on a property-only object whose dict is **missing**
+`space_id` (and/or `id`) does **not** raise `KeyError`; it returns property chunks with
+`space_id`/`object_id` defaulting to `""`. (Test `test_property_chunk_missing_space_id_tolerated`.)
+
 ### 8.3 New ACs — Schema-Version Marker (Decision 2)
 
-**AC-M1:** After `wiki_bootstrap` on a clean space, the root Collection object (name=`"Wiki"`,
-type=`collection`) carries `wiki_schema_version = WIKI_SCHEMA_VERSION` in its `properties[]`
-array as returned by `list_objects` [Option (a) path]. If Option (a) PATCH fails silently (V4
-gate fails), the fallback schema-marker WikiLog object named `wiki:schema-marker` carries
-`wiki_schema_version = WIKI_SCHEMA_VERSION` [Option (b-1) path].
+**AC-M1a (Option a — Collection marker, gated on V4 PASS):** After `wiki_bootstrap` on a clean
+space, the root Collection object (name=`"Wiki"` AND type.key=`collection`) carries
+`wiki_schema_version = WIKI_SCHEMA_VERSION` (`"0.3.0"`) in its `properties[]` array as returned
+by `list_objects`. Applies when gate V4 passes (the selected, shipped mechanism).
+
+**AC-M1b (Option b-1 — `wiki:schema-marker` WikiLog singleton, gated on V4 FAIL):** When V4
+fails, `wiki_bootstrap` creates exactly one canonical WikiLog object named `wiki:schema-marker`
+carrying `wiki_schema_version = WIKI_SCHEMA_VERSION` (`"0.3.0"`); re-reading by name
+(`type.key=='wiki_log'`, `name=='wiki:schema-marker'`) returns that single object and its
+version. Re-bootstrap PATCHes the **same** named marker (no duplicate `wiki:schema-marker`
+created). Per SF9, only the V4-selected option's code and tests ship; AC-M1a and AC-M1b are
+mutually exclusive at ship time. Covered by `test_bootstrap_creates_named_schema_marker_wikilog`
+(§9.3).
 
 **AC-M2:** `_read_schema_version(client, space_id)` returns the correct version string when
 the root Collection carries `wiki_schema_version` (primary read path).
 
-**AC-M3:** `_read_schema_version(client, space_id)` falls back to the WikiLog `_max_version`
-scan when the root Collection `properties[]` contains no `wiki_schema_version` key. Returns the
-highest version across all `wiki_log` objects.
+**AC-M3 (SF6):** `_read_schema_version(client, space_id)` falls back to the WikiLog scan-loop
+(`found = _max_version(found, _found_schema_version(obj))` per object, the `bootstrap.py:248-249`
+pattern, restricted to `type.key=='wiki_log'` objects) when the root Collection `properties[]`
+contains no `wiki_schema_version` key. Returns the highest version across all `wiki_log` objects.
+When both the Collection and a WikiLog carry a marker, the return value is
+`_max_version(collection_value, wikilog_max)` (SF7 — stale Collection marker cannot mask a newer
+WikiLog).
 
 **AC-M4:** For a v0.2.0 space (WikiLog marker present, collection no marker): `wiki_ingest`
 schema-compat check returns `wiki_schema_outdated` (because WikiLog shows `0.2.0` and code is
@@ -710,6 +862,32 @@ tag id is in the `select` field).
 ingest **does not abort**. The WikiLog is written without `wiki_action`, and
 `IngestResult.warnings` contains a string matching `"wiki_action_tag_not_found"`.
 
+### 8.5 Locked-Constraint ACs (Guard Against Silent Regression)
+
+These ACs pin the locked constraints of §5 (and the §6 security row) that previously shipped
+with no test. Without them a contributor could re-introduce a deprecated path and pass all tests.
+
+**AC-L1 (B4 — body-PATCH constraint, §5.1):** On the re-ingest/update path, `update_object` is
+invoked with a `properties` payload **only** — **no** `body` or `markdown` key appears in any
+update-path `update_object` call. Verify via a mock-spy on `update_object` call args across the
+update-path tests: assert `"body" not in payload` and `"markdown" not in payload` for every
+update call. (This also guards the empty-body invariant on the create path: ingest `create_object`
+calls for wiki types carry no body content — see AC-P7.)
+
+**AC-L2 (B5 — client-side type filter, §5.2):** Given `client.search` returns a result set
+containing objects of **mixed** `type.key`, entity-resolution steps 1-2 only consider objects
+whose `type.key == type_key`. Feed a mixed-type result set containing a same-name object of a
+**different** type; assert that object is NOT matched and NOT updated (no entity facts written
+onto a wrong-type object). Verify no `filter={"type_key": ...}` argument is passed to
+`client.search` (SF8).
+
+**AC-S1 (SF1 — extraction-endpoint scrub, §6 security row):** The startup log/banner emitting
+the active extraction endpoint passes the value through `scrub_credentials`. Regression test sets
+`WIKI_EXTRACT_ENDPOINT=https://user:KEY@host/v1?api_key=SEKRET` and asserts the emitted line
+contains neither `KEY`, nor `SEKRET`, nor `user:` followed by `@host` (the `user:...@` userinfo
+form), while the host (`host`) is preserved. If a `doctor` extraction-endpoint reachability check
+is added, its message must scrub the endpoint identically (matching `doctor.py:79,134,183`).
+
 ---
 
 ## 9. Test Plan
@@ -736,6 +914,14 @@ partial-state idempotency (AC #18 disposition recorded in pre-release checklist)
 | `test_wiki_excerpt_excluded` | wiki_source obj with `wiki_excerpt` populated, no body → 0 chunks |
 | `test_oversized_wiki_facts_split` | `wiki_facts` value of 3000 chars → 2+ chunks |
 | `test_empty_property_not_emitted` | allowlisted key present but `text` is empty string → not emitted |
+| `test_property_chunk_missing_space_id_tolerated` | property-only obj missing `space_id` (and `id`) → no `KeyError`; chunks emitted with `space_id`/`object_id` defaulting to `""` (B3, AC-P8) |
+| `test_property_value_sanitized` | property value containing U+FEFF/U+2028/U+2029/tag chars → sanitizer strips them on write (SF2, AC#16 delta) |
+
+**Update-path end-to-end (`@pytest.mark.live`):**
+
+| Test | Description |
+|------|-------------|
+| `test_reingest_reembeds_updated_facts` | create entity (empty body) → ingest, reindex, search hits; re-ingest updates `wiki_facts` via property PATCH → reindex → search on the *updated* facts returns the entity (B2/AC-P7); asserts `create_object`/`update_object` carry no body (ties AC-L1) |
 
 ### 9.3 New Tests — Schema Marker Read Order
 
@@ -743,12 +929,15 @@ partial-state idempotency (AC #18 disposition recorded in pre-release checklist)
 
 | Test | Description |
 |------|-------------|
-| `test_read_schema_version_from_collection` | `list_objects` returns collection with `wiki_schema_version` → `_read_schema_version` returns it |
-| `test_read_schema_version_fallback_to_wikilog` | collection has no `wiki_schema_version`; WikiLog objects carry versions → `_max_version` returned |
+| `test_read_schema_version_from_collection` | `list_objects` returns collection (name=='Wiki' AND type.key=='collection') with `wiki_schema_version` → `_read_schema_version` returns it (AC-M2) |
+| `test_read_schema_version_ignores_nonwiki_named_wiki` | a non-collection object named "Wiki" carrying a fake marker is ignored (G4 type.key guard) |
+| `test_read_schema_version_fallback_to_wikilog` | collection has no `wiki_schema_version`; `wiki_log` objects carry versions → scan-loop `_max_version` returned (AC-M3, SF6) |
+| `test_read_schema_version_max_of_collection_and_wikilog` | stale collection marker `0.2.0` + newer WikiLog `0.3.0` → returns `0.3.0` (SF7 max()) |
 | `test_read_schema_version_none_when_absent` | no collection marker, no WikiLog markers → returns None |
-| `test_bootstrap_patches_collection_on_fresh_space` | `update_object` is called with `wiki_schema_version` payload on the collection id |
-| `test_bootstrap_upgrade_from_v020` | mock `list_objects` to return v0.2.0 WikiLog marker, no collection marker → upgrade path runs, `update_object` called |
-| `test_wiki_ingest_outdated_schema_returns_config_error` | `_read_schema_version` returns `"0.2.0"`, code is `"0.3.0"` → `[CONFIG ERROR] wiki_schema_outdated` |
+| `test_bootstrap_patches_collection_on_fresh_space` | [V4 PASS / Option a] `update_object` called with `wiki_schema_version="0.3.0"` payload on the collection id (AC-M1a) |
+| `test_bootstrap_creates_named_schema_marker_wikilog` | [V4 FAIL / Option b-1] bootstrap creates one `wiki_log` named `wiki:schema-marker` with `wiki_schema_version="0.3.0"`; re-bootstrap PATCHes the same marker, no duplicate (AC-M1b, SF4) |
+| `test_bootstrap_upgrade_from_v020` | mock `list_objects` to return v0.2.0 WikiLog marker, no collection marker → upgrade path runs, `update_object` called (requires `WIKI_SCHEMA_VERSION=="0.3.0"`, B1) |
+| `test_wiki_ingest_outdated_schema_returns_config_error` | `_read_schema_version` returns `"0.2.0"`, code is `"0.3.0"` → `[CONFIG ERROR] wiki_schema_outdated` (AC-M4) |
 
 ### 9.4 New Tests — `wiki_action` Tag Creation and Resolution
 
@@ -762,7 +951,19 @@ partial-state idempotency (AC #18 disposition recorded in pre-release checklist)
 | `test_ingest_wikilog_carries_ingest_action` | ingest WikiLog `properties` includes `{"key": "wiki_action", "select": <ingest_id>}` |
 | `test_ingest_action_tag_resolution_failure_writes_wikilog` | `list_tags` raises → ingest completes, WikiLog written, `wiki_action_tag_not_found` in warnings |
 
-### 9.5 Concurrency Test Requirement (Mem0 Learning)
+### 9.5 New Tests — Locked-Constraint Guards (§8.5)
+
+**File:** `tests/wiki/test_ingest.py` (extend); `tests/wiki/test_extraction.py` or
+`tests/wiki/test_server.py` for the startup-log scrub (extend).
+
+| Test | Description |
+|------|-------------|
+| `test_update_path_no_body_key` | mock-spy `update_object`; across update-path calls assert no `body`/`markdown` key in any payload (AC-L1, B4) |
+| `test_create_wiki_object_empty_body` | mock-spy `create_object`; ingest-authored wiki types created with no body content (AC-P7 create side, AC-L1) |
+| `test_resolve_entity_ignores_wrong_type` | `client.search` returns mixed-`type.key` set incl. same-name wrong-type obj → that obj NOT matched/updated; no `filter={"type_key":...}` arg passed (AC-L2, B5/SF8) |
+| `test_extraction_endpoint_scrubbed_in_startup_log` | `WIKI_EXTRACT_ENDPOINT=https://user:KEY@host/v1?api_key=SEKRET` → emitted startup line excludes `KEY`, `SEKRET`, `user:...@`; host preserved (AC-S1, SF1) |
+
+### 9.6 Concurrency Test Requirement (Mem0 Learning)
 
 The concurrent-ingest test (AC #5) MUST use `multiprocessing.Process` to acquire the flock in
 a second process. A `threading.Thread` or `asyncio.gather` against a mocked lock does not
@@ -775,6 +976,7 @@ the v0.2.0 test design.
 
 ### 10.1 Inherited from Master Spec v0.3.0 Checklist (~lines 857-874)
 
+- [ ] **`types_schema.WIKI_SCHEMA_VERSION` bumped from `"0.2.0"` to `"0.3.0"` (B1; prerequisite of Decision 2 — `types_schema.py:25`).**
 - [ ] Verification script rerun if any Anytype version bump since v0.2.0.
 - [ ] `pytest tests/` all green.
 - [ ] `pip-audit` clean; `bandit -r src/` clean; `pip-licenses` scan clean (no GPL/AGPL/SSPL/EUPL).
@@ -819,7 +1021,13 @@ objects_indexed: 0` — this must invert.
 - Fail: still 0. Debug the `properties[]` availability issue (V1 failure path) before
   proceeding.
 
-**V4 (MUST — schema marker home):** After `wiki_bootstrap` runs on a fresh space, execute:
+**V4 (MUST — schema marker home; run BEFORE marker test/impl, SF9):** This gate selects which
+of Option (a) / Option (b-1) ships. It MUST be run **before** the schema-marker tests and impl
+are authored, so only the selected option's code+tests are written and the loser is deleted (not
+shipped dormant). It is listed under §10.2 for completeness but is sequenced at the *start* of
+Decision 2 implementation, not at pre-release. (If V4 cannot run that early, ship a guard test
+asserting exactly one marker mechanism is present — see SF9 in §4.2.) After `wiki_bootstrap` runs
+on a fresh space, execute:
 
 ```python
 client.update_object(
@@ -857,7 +1065,7 @@ assert version == "0.3.0"
 | `MIGRATIONS.md` | v0.3.0 section: WIKI_SCHEMA_VERSION bump; re-run `wiki_bootstrap` sufficient; schema-marker location change (Collection vs. WikiLog) documented; no data backfill required |
 | `.env.example` | Add v0.3.0 vars: `WIKI_EXTRACT_MODEL`, `WIKI_EXTRACT_ENDPOINT`, `WIKI_EXTRACT_MAX_INPUT_TOKENS`, `WIKI_FETCH_MAX_BYTES`, `WIKI_FETCH_EXTRA_PORTS`, `WIKI_UPSERT_THRESHOLD_TITLE`, `WIKI_UPSERT_THRESHOLD_EMBEDDING`, `WIKI_DUPLICATE_SURFACE_FLOOR`, `WIKI_AUTO_REINDEX` |
 | `NOTICE` | Regenerate: add `markdownify` (MIT) and `pydantic` (MIT); verify `beautifulsoup4` and `six` transitive entries |
-| `docs/known-limitations.md` | **#2 (schema marker):** update to record chosen mechanism (Option a or b-1 depending on V4 gate) and mark resolved once v0.3.0 ships. **#3 (wiki_action tags):** mark resolved — all five tags created by bootstrap, `wiki_ingest` writes `wiki_action = ingest`. Items #4 and #5 remain unchanged (already documented; no new implications from v0.3.0). |
+| `docs/known-limitations.md` | **#2 (schema marker):** update to record chosen mechanism (Option a or b-1 depending on V4 gate) and mark resolved once v0.3.0 ships. **#3 (wiki_action tags):** mark resolved — all five tags created by bootstrap, `wiki_ingest` writes `wiki_action = ingest`. **G5: `docs/known-limitations.md:65` still says `wiki_action` arrives in "v0.5.0" — Decision 3 brings it forward to v0.3.0; this stale "v0.5.0" line MUST be corrected to v0.3.0 when #3 is marked resolved.** Items #4 and #5 remain unchanged (already documented; no new implications from v0.3.0). |
 
 ---
 
@@ -875,8 +1083,16 @@ the pre-release notes. This is master spec OQ#3-style deferred work.
 ### V4 Gate Outcome (Design Branch Selection)
 
 The specific implementation of schema marker home (Option a or b-1) depends on the outcome of
-live gate V4. Both designs are fully specified in §4.2. Implementation must be ready to ship
-either; the pre-release live run picks one and the choice is recorded in `known-limitations.md`.
+live gate V4. Both designs are fully specified in §4.2 for reference, but per SF9 the gate is run
+**before** the marker tests/impl are authored, so **only the selected option ships** — the other
+is deleted, not shipped dormant. The choice is recorded in `known-limitations.md` #2.
+
+### Deferred — `wiki_facts` Growth Soft Cap (G3)
+
+`wiki_facts` and other accumulating properties grow unbounded across re-ingests, yielding an
+unbounded chunk count per object over time. Accepted as low severity for v0.3.0 (single-operator
+threat model; `_split_large` keeps chunks well-formed). A per-property soft cap plus a
+`wiki_facts_truncated` warning on the update path is deferred to a later increment.
 
 ### AC #18 Partial-State Idempotency Disposition
 
@@ -908,11 +1124,13 @@ strengthen the 16GB advisory. Formal extraction quality metrics are deferred to 
 The following master spec constructs are **explicitly deprecated for v0.3.0 implementation**
 (they must not appear in shipped code):
 
-| Deprecated construct | Master spec location | Reason |
-|---------------------|---------------------|--------|
-| PATCH `body` for content updates | §Ingest Pipeline ~line 444 ("Primary path — PATCH body works") | `patch_body_updates: silently_ignored` (verified) |
-| `type_key` FilterExpression passed to Anytype search API expecting type-scoped results | §Entity Resolution Semantics pseudocode steps 1-2 ~lines 1270-1285 | `filter_expression: no_op` (verified); client-side filtering required |
-| Unbounded WikiLog accumulation as the sole schema-version marker | `known-limitations.md` #2 | Decision 2 (§4.2) — root Collection primary; named WikiLog singleton fallback |
+| Deprecated construct | Master spec location | Reason | Guard AC |
+|---------------------|---------------------|--------|----------|
+| PATCH `body` for content updates | §Ingest Pipeline ~line 444 ("Primary path — PATCH body works") | `patch_body_updates: silently_ignored` (verified) | AC-L1 (§8.5) |
+| Writing a non-empty `body` when `wiki_ingest` CREATEs a wiki object | §Ingest Pipeline ~line 440 | Empty-body-on-create invariant (Decision 1 / §5.1) — a create-time body would go stale on first property PATCH and re-open the dedup-guard gap (B2) | AC-P7, AC-L1 |
+| `type_key` FilterExpression passed to Anytype search API expecting type-scoped results | §Entity Resolution Semantics pseudocode steps 1-2 ~lines 1270-1285 | `filter_expression: no_op` (verified); client-side filtering required | AC-L2 (§8.5) |
+| Unbounded WikiLog accumulation as the sole schema-version marker | `known-limitations.md` #2 | Decision 2 (§4.2) — root Collection primary; named WikiLog singleton fallback | AC-M1a / AC-M1b |
+| Shipping BOTH marker options dormant ("ready to pivot") | §4.2 | SF9 — V4 selects one; the loser is deleted, not shipped | §4.2 guard test |
 
 Per the Mem0 learning: deprecated approaches must be named and deleted, not left as inactive
 branches. Test writers and impl workers must not implement these paths.
