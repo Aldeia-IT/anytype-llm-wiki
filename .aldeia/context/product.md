@@ -16,7 +16,7 @@ An MCP server that gives AI assistants semantic search over Anytype vaults — f
 
 ## Product Principles
 
-- **Local-first** — all processing happens on-device (Ollama embeddings, Qdrant storage, Anytype API). No cloud dependencies.
+- **Local-first by default** — all processing happens on-device (Ollama embeddings, Qdrant storage, Anytype API). No cloud dependencies by default. The one explicit opt-in exception is remote LLM extraction via `WIKI_EXTRACT_ENDPOINT` (off by default, on-device Ollama otherwise); pointing it at a non-local endpoint sends fetched source content off-machine and is gated by a first-run consent banner.
 - **Zero-config for Aldeia** — works out of the box with our existing infrastructure via environment variables.
 - **Configurable for others** — any Qdrant instance, any Ollama-compatible embedding model, any Anytype vault.
 - **MCP-native** — designed as an MCP server from the start, not a CLI with MCP bolted on.
