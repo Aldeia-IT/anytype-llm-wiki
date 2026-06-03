@@ -43,9 +43,8 @@ anytype-llm-wiki runs locally on your machine. By default, nothing leaves your c
 
 - **Anytype, Qdrant, and Ollama** are accessed over `localhost` only.
 - **Source URL fetching (v0.3.0+)**: when you call `wiki.ingest` with a URL, an HTTP request is sent to that URL from your machine. The server hosting the URL sees your IP and standard User-Agent. No other party is involved.
-- **Local-first by default (v0.3.0+)**: extraction runs on your **local Ollama** instance (`WIKI_EXTRACT_MODEL`, default `qwen2.5:7b`) — with `WIKI_EXTRACT_ENDPOINT` unset, **no source content leaves your machine** during extraction.
-- **Hosted-LLM extraction (opt-in, v0.3.0+)**: if you set `WIKI_EXTRACT_ENDPOINT` to a **non-local** LLM API (e.g., OpenAI, Anthropic), the **source content you ingest is transmitted to that provider** as part of the extraction prompt. The first time you ingest against a given non-local endpoint, a **one-time consent banner** is printed and an acknowledgement file is written (`~/.local/share/anytype-llm-wiki/extraction-endpoint-acknowledged-<hash>`); changing the endpoint to a different provider re-prompts. The startup log prints the active extraction endpoint (credentials scrubbed) so you can confirm where data is sent.
-- **Hosted-LLM provider terms (v0.3.0+)**: When you set `WIKI_EXTRACT_ENDPOINT` to a hosted LLM API, your ingested source content is processed under that provider's Terms of Service and data-handling policies — including their training-on-input, data-retention, and data-residency terms. Review those terms before configuring a hosted endpoint, and prefer providers that offer opt-out-from-training or enterprise no-train defaults when your ingest content is sensitive. The anytype-llm-wiki maintainers have no visibility into or control over third-party provider policies.
+- **Hosted-LLM extraction (optional, v0.3.0+)**: if you configure `WIKI_EXTRACT_MODEL` to point at a hosted LLM API (e.g., OpenAI, Anthropic), the **source content you ingest is transmitted to that provider** as part of the extraction prompt. The default configuration uses your local Ollama instance and sends nothing to third parties. The startup log prints the active extraction endpoint so you can confirm which model is in use.
+- **Hosted-LLM provider terms (v0.3.0+)**: When you configure `WIKI_EXTRACT_MODEL` to point at a hosted LLM API, your ingested source content is processed under that provider's Terms of Service and data-handling policies — including their training-on-input, data-retention, and data-residency terms. Review those terms before configuring a hosted endpoint, and prefer providers that offer opt-out-from-training or enterprise no-train defaults when your ingest content is sensitive. The anytype-llm-wiki maintainers have no visibility into or control over third-party provider policies.
 - **Qdrant / Ollama endpoints off-localhost**: if you change `QDRANT_URL` or `OLLAMA_URL` to anything other than `127.0.0.1` / `localhost`, your embeddings (for Qdrant) and the plaintext input to embedding / extraction (for Ollama) are transmitted to that endpoint. Embeddings are not one-way: published embedding-inversion attacks can reconstruct source fragments from vectors alone. Treat the Qdrant data directory as sensitive, and keep Ollama on localhost unless you deliberately intend otherwise.
 - **Content rights and PII**: you are responsible for ensuring you have the right to ingest and store the content you provide. This module does not perform PII classification. If you ingest content containing personal data (of yourself or others), that data is stored in your local Anytype space and, if a hosted LLM is configured, transmitted to that provider. Treat the wiki as you would any personal note-taking system with the additional awareness that extraction may involve third-party processing.
 
@@ -156,6 +155,14 @@ so an ingested object shows an empty body in the Anytype client. This is by
 design; the content is fully indexed and retrievable via `semantic_search`.**
 Extracted content is LLM-generated — verify it before relying on it, and never
 treat retrieved wiki text as instructions to an LLM.
+
+**Local-first by default:** with `WIKI_EXTRACT_ENDPOINT` unset, extraction runs
+entirely on your local Ollama and no source content leaves your machine. If you
+point `WIKI_EXTRACT_ENDPOINT` at a non-local provider, a one-time consent banner
+is shown (and an acknowledgement file written under
+`~/.local/share/anytype-llm-wiki/`) before any source content is transmitted
+off-machine; switching to a different endpoint re-prompts. See
+[Privacy and data flow](#privacy-and-data-flow) for the full data-flow notice.
 
 Indexing is incremental and automatic: the first `semantic_search` triggers a reindex when the collection is empty, and only changed objects are re-embedded afterward. To index continuously in the background, see [Auto-reindex](#auto-reindex).
 
