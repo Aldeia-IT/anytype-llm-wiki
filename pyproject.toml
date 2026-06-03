@@ -39,3 +39,6 @@ packages = ["src/anytype_llm_wiki"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "live: marks tests as requiring live Anytype + Qdrant + Ollama services (skip with -m 'not live')",
+]
