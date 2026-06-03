@@ -225,7 +225,7 @@ class TestExtractionEndpointScrubInStartupLog:
     Assert as ONE coherent check (Mem0 anti-fragmentation rule).
     """
 
-    def test_extraction_endpoint_scrubbed_in_startup_log(self, monkeypatch, caplog):
+    def test_extraction_endpoint_scrubbed_in_startup_log(self, monkeypatch):
         """AC-S1: startup/init log emitting active WIKI_EXTRACT_ENDPOINT must scrub credentials.
 
         Uses existing scrub_credentials from wiki/util.py.

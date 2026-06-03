@@ -7,9 +7,34 @@ AC-L1 (no body key in update), AC-L2 (no type_key filter in search), AC-S1, AC-S
 
 import multiprocessing
 import os
+import sys
+import time
 import pytest
 import respx
 import httpx
+
+
+# ---------------------------------------------------------------------------
+# Module-level worker functions for multiprocessing.Process (AC#5).
+# These MUST be at module scope so that macOS 'spawn'-mode pickling works.
+# Locally-scoped (nested) functions cannot be pickled by the spawn method.
+# ---------------------------------------------------------------------------
+
+def _hold_lock_worker(q, space_id, lock_dir):
+    """Module-level child-process target: acquire space_ingest_lock, signal parent, hold it.
+
+    Accepts all state via args=(q, space_id, lock_dir) — no closure over test locals.
+    The src/ directory is inserted into sys.path so the module is importable in the
+    spawned child process regardless of whether it is installed in the child's env.
+    """
+    # Resolve src/ relative to this file's directory (tests/wiki/ -> ../../src)
+    src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src")
+    sys.path.insert(0, os.path.abspath(src_dir))
+    os.environ["WIKI_LOCK_DIR"] = lock_dir
+    from anytype_llm_wiki.wiki.util import space_ingest_lock  # noqa: PLC0415
+    with space_ingest_lock(space_id, "http://example.com"):
+        q.put("acquired")
+        time.sleep(5)  # hold the lock while the parent tries to acquire
 
 ANYTYPE_BASE = "http://127.0.0.1:31012"
 FAKE_SPACE_ID = "space-ingest-test-001"
@@ -220,29 +245,93 @@ class TestPartialFailure:
     """AC#3: partial failure → WikiLog entry + coherent response + status:'partial'."""
 
     @respx.mock
-    def test_partial_failure_returns_partial_status(self, monkeypatch):
+    def test_partial_failure_returns_partial_status(self, monkeypatch, tmp_path):
         """AC#3: partial failure produces status:'partial', WikiLog entry, coherent response.
+
+        Arrange: supply a markdown file with TWO entities so that the first create_object
+        call succeeds (201) and the second entity-create raises a 500. The implementation
+        must catch the per-entity failure, continue, and return:
+          - result["status"] == "partial"
+          - result contains "objects_created" and "objects_updated" keys
+          - result contains a "warnings" key (partial failures reported there)
+          - at least one WikiLog (type_key == "wiki_log") create_object call was made
+
+        The WikiLog-create assertion spies on the POST calls and checks that at least one
+        payload carried type_key="wiki_log". This gates the "WikiLog entry written" part
+        of AC#3 without requiring a live client.
 
         Covers: §9.1 AC#3 partial-failure path.
         """
-        call_count = {"n": 0}
+        call_count = {"objects": 0}
+        wikilog_created = {"yes": False}
 
         def partial_post(request, **kwargs):
-            call_count["n"] += 1
-            path = str(request.url)
-            if "objects" in path and call_count["n"] > 2:
-                # Simulate a failure partway through object creation
-                return httpx.Response(500, json={"error": "internal server error"})
-            return httpx.Response(201, json={"object": {"id": f"obj-{call_count['n']}", "name": "Entity"}})
+            import json as _json
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                payload = {}
+
+            # Track WikiLog creation
+            if payload.get("type_key") == "wiki_log":
+                wikilog_created["yes"] = True
+                return httpx.Response(
+                    201, json={"object": {"id": "wikilog-001", "name": "ingest log"}}
+                )
+
+            # First entity create succeeds; second entity create fails (partial failure)
+            if payload.get("type_key") in (
+                "wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query"
+            ):
+                call_count["objects"] += 1
+                if call_count["objects"] == 2:
+                    return httpx.Response(500, json={"error": "internal server error"})
+                return httpx.Response(
+                    201,
+                    json={"object": {"id": f"entity-{call_count['objects']}", "name": "Entity A"}},
+                )
+
+            # Default: all other creates succeed (source object, etc.)
+            return httpx.Response(201, json={"object": {"id": "obj-default", "name": "x"}})
+
+        # Markdown with two distinct named sections to produce two entity candidates
+        md_content = (
+            "# Entity Alpha\n\nFact: Alpha is the first entity in this partial-failure test.\n\n"
+            "# Entity Beta\n\nFact: Beta is the second entity in this partial-failure test.\n"
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, dir=str(tmp_path)
+        ) as f:
+            f.write(md_content)
+            md_file = f.name
 
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
         respx.post().mock(side_effect=partial_post)
 
         from anytype_llm_wiki.wiki.ingest import wiki_ingest
-        # This requires a patch-decision.md to exist — use a real one
-        result = wiki_ingest(source="https://example.com/some-content", space_id=FAKE_SPACE_ID)
-        # Allow partial OR ok — the key check is on partial failures that actually occur
-        assert isinstance(result, dict), f"wiki_ingest must return a dict; got {type(result)}"
+        result = wiki_ingest(source=md_file, space_id=FAKE_SPACE_ID)
+
+        # AC#3 assertion 1: status must be "partial" (not "ok", not "error")
+        assert result.get("status") == "partial", (
+            f"AC#3: partial failure must produce status='partial'; got {result.get('status')!r}. "
+            f"Full result: {result}"
+        )
+        # AC#3 assertion 2: coherent response shape
+        assert "objects_created" in result, (
+            f"AC#3: result must contain 'objects_created' key; got keys: {list(result.keys())}"
+        )
+        assert "objects_updated" in result, (
+            f"AC#3: result must contain 'objects_updated' key; got keys: {list(result.keys())}"
+        )
+        assert "warnings" in result, (
+            f"AC#3: result must contain 'warnings' key; got keys: {list(result.keys())}"
+        )
+        # AC#3 assertion 3: WikiLog entry written
+        assert wikilog_created["yes"], (
+            "AC#3: wiki_ingest must create a WikiLog (type_key='wiki_log') entry "
+            "even when a partial failure occurs — no WikiLog POST detected"
+        )
 
 
 class TestReindexFailureWarning:
@@ -287,30 +376,120 @@ class TestBidirectionalRelationRollback:
     """
 
     @respx.mock
-    def test_bidi_relation_rollback_on_failure(self, monkeypatch):
+    def test_bidi_relation_rollback_on_failure(self, monkeypatch, tmp_path):
         """AC#13: one direction of a bidi relation fails → both rolled back; relation_rollback in log.
+
+        Arrange: supply two entities with explicit relation directionality. The first relation
+        direction (A→B) succeeds; the second direction (B→A reciprocal) raises 500. This
+        triggers the rollback path.
+
+        Assertions:
+          1. The first-direction relation that succeeded is rolled back — a DELETE (or unset PATCH)
+             is made for the relation object id that was created in direction 1.
+          2. The WikiLog create_object call carries a property with key "wiki_notes" (or
+             "relation_rollback" tag marker) recording the rollback event.
+
+        Spy approach: capture all POST/PATCH/DELETE calls; after the call:
+          - At least one DELETE (or rollback-unset PATCH) call was made targeting the
+            first-direction relation id ("relation-dir1-001").
+          - At least one WikiLog POST payload includes "relation_rollback" in properties
+            or notes.
 
         Covers: §9.1 AC#13 (v0.3.0 bidi relation rollback).
         """
-        call_count = {"relations": 0}
+        import json as _json
 
-        def mock_relation_call(request, **kwargs):
+        # Track calls for rollback verification
+        relation_dir1_id = "relation-dir1-001"
+        rollback_calls: list[str] = []   # DELETE/unset call paths
+        wikilog_payloads: list[dict] = []
+
+        relation_call_count = {"n": 0}
+
+        def mock_post(request, **kwargs):
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                payload = {}
+
+            if payload.get("type_key") == "wiki_log":
+                wikilog_payloads.append(payload)
+                return httpx.Response(201, json={"object": {"id": "wikilog-001", "name": "log"}})
+
+            # Relation creation calls: first direction succeeds, second fails
             path = str(request.url)
-            if "relations" in path or "link" in path.lower():
-                call_count["relations"] += 1
-                if call_count["relations"] == 2:
-                    # Second direction fails
-                    return httpx.Response(500, json={"error": "relation creation failed"})
-            return httpx.Response(201, json={"object": {"id": f"obj-{call_count['relations']}"}})
+            if "relation" in path.lower() or payload.get("type_key") in ("relation", "wiki_relation"):
+                relation_call_count["n"] += 1
+                if relation_call_count["n"] == 1:
+                    # Direction A→B: succeeds, returns the relation id we'll track for rollback
+                    return httpx.Response(
+                        201, json={"object": {"id": relation_dir1_id, "name": "rel-a-to-b"}}
+                    )
+                # Direction B→A: fails — triggers rollback
+                return httpx.Response(500, json={"error": "relation creation failed"})
+
+            # Regular object creates (entities, source, etc.)
+            return httpx.Response(201, json={"object": {"id": "entity-001", "name": "Entity"}})
+
+        def mock_delete(request, **kwargs):
+            rollback_calls.append(str(request.url))
+            return httpx.Response(200, json={})
+
+        def mock_patch(request, **kwargs):
+            # Some implementations roll back via PATCH (unset) rather than DELETE
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                payload = {}
+            if relation_dir1_id in str(request.url) or relation_dir1_id in str(payload):
+                rollback_calls.append(str(request.url))
+            return httpx.Response(200, json={"object": {"id": relation_dir1_id}})
+
+        # Markdown with two entities and explicit bidirectional relation
+        md_content = (
+            "# Entity Alpha\n\nFact: Alpha relates to Beta.\n"
+            "Relation: Alpha → Beta (bidirectional)\n\n"
+            "# Entity Beta\n\nFact: Beta relates to Alpha.\n"
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, dir=str(tmp_path)
+        ) as f:
+            f.write(md_content)
+            md_file = f.name
 
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
-        respx.post().mock(side_effect=mock_relation_call)
-        respx.delete().mock(return_value=httpx.Response(200, json={}))
+        respx.post().mock(side_effect=mock_post)
+        respx.delete().mock(side_effect=mock_delete)
+        respx.patch().mock(side_effect=mock_patch)
 
         from anytype_llm_wiki.wiki.ingest import wiki_ingest
-        result = wiki_ingest(source="https://example.com/multi-entity-paper", space_id=FAKE_SPACE_ID)
-        # The test verifies the rollback mechanism exists — pass if no unhandled exception
-        assert isinstance(result, dict), f"wiki_ingest must return a dict even on rollback; got {type(result)}"
+        result = wiki_ingest(source=md_file, space_id=FAKE_SPACE_ID)
+
+        # AC#13 assertion 1: result is a dict (basic sanity)
+        assert isinstance(result, dict), (
+            f"wiki_ingest must return a dict even on rollback; got {type(result)}"
+        )
+
+        # AC#13 assertion 2: the first-direction relation was rolled back
+        # Either a DELETE call targeted relation-dir1-001, OR a PATCH-unset call did
+        rolled_back = any(relation_dir1_id in call for call in rollback_calls)
+        assert rolled_back, (
+            f"AC#13: first-direction relation '{relation_dir1_id}' must be rolled back "
+            f"(DELETE or unset PATCH) when the second direction fails. "
+            f"Rollback calls captured: {rollback_calls!r}"
+        )
+
+        # AC#13 assertion 3: WikiLog records relation_rollback event
+        # Check for "relation_rollback" in any WikiLog property key, value, or notes
+        wikilog_records_rollback = any(
+            "relation_rollback" in _json.dumps(payload)
+            for payload in wikilog_payloads
+        )
+        assert wikilog_records_rollback, (
+            f"AC#13: WikiLog must record a 'relation_rollback' event when bidi rollback occurs. "
+            f"WikiLog payloads captured: {wikilog_payloads!r}"
+        )
 
 
 class TestConcurrentIngestLock:
@@ -318,17 +497,22 @@ class TestConcurrentIngestLock:
     Concurrent call against different space succeeds.
 
     MUST use multiprocessing.Process (kernel-held flock). NOT threading.Thread.
+
+    Worker functions (_hold_lock_worker) are defined at MODULE SCOPE (not nested inside
+    test methods) so that macOS 'spawn'-mode multiprocessing can pickle them. Locally-scoped
+    (closure) functions cannot be pickled by the spawn method, which would cause
+    AttributeError at child.start() before any production code runs.
     """
 
     def test_concurrent_ingest_same_space_rejected(self, tmp_path, monkeypatch):
         """AC#5: concurrent ingest against the same space is rejected with
         [DATA ERROR] ingest_in_progress.
 
-        Uses multiprocessing.Process to hold the flock in a child process — per Mem0 learning.
-        A threading.Thread or asyncio mock does not exercise the kernel-held flock.
+        Uses multiprocessing.Process (module-level _hold_lock_worker) to hold the flock
+        in a child process — per Mem0 learning. A threading.Thread or asyncio mock does
+        not exercise the kernel-held flock.
         """
         from anytype_llm_wiki.wiki.util import space_ingest_lock
-        import time
 
         monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
         os.makedirs(str(tmp_path / "locks"), exist_ok=True)
@@ -336,18 +520,9 @@ class TestConcurrentIngestLock:
         # Sentinel queue for deterministic handshake (Mem0 pattern)
         q: multiprocessing.Queue = multiprocessing.Queue()
 
-        def hold_lock(q, space_id, lock_dir):
-            """Child process: acquire the lock, signal parent, then hold for 5 seconds."""
-            import os, sys
-            os.environ["WIKI_LOCK_DIR"] = lock_dir
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../src"))
-            from anytype_llm_wiki.wiki.util import space_ingest_lock
-            with space_ingest_lock(space_id, "http://example.com"):
-                q.put("acquired")
-                time.sleep(5)  # hold the lock while parent tries to acquire
-
+        # Use the MODULE-LEVEL worker function (picklable on macOS spawn mode)
         child = multiprocessing.Process(
-            target=hold_lock,
+            target=_hold_lock_worker,
             args=(q, FAKE_SPACE_ID, str(tmp_path / "locks")),
             daemon=True,
         )
@@ -358,8 +533,6 @@ class TestConcurrentIngestLock:
             assert sentinel == "acquired", f"Unexpected sentinel: {sentinel}"
 
             # Parent tries to acquire the same space's lock — must fail
-            import sys
-            sys.path.insert(0, str(tmp_path))
             try:
                 with space_ingest_lock(FAKE_SPACE_ID, "http://example.com"):
                     pytest.fail("Expected RuntimeError for concurrent ingest on same space")
@@ -375,6 +548,7 @@ class TestConcurrentIngestLock:
         """AC#5: concurrent ingest against a different space succeeds (different lock file).
 
         Covers: §9.1 AC#5 — different space does not interfere.
+        Uses module-level _hold_lock_worker (picklable on macOS spawn mode).
         """
         monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
         os.makedirs(str(tmp_path / "locks"), exist_ok=True)
@@ -383,18 +557,9 @@ class TestConcurrentIngestLock:
 
         q: multiprocessing.Queue = multiprocessing.Queue()
 
-        def hold_lock_space1(q, space_id, lock_dir):
-            import os, sys
-            os.environ["WIKI_LOCK_DIR"] = lock_dir
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../src"))
-            from anytype_llm_wiki.wiki.util import space_ingest_lock
-            import time
-            with space_ingest_lock(space_id, "http://example.com"):
-                q.put("acquired")
-                time.sleep(5)
-
+        # Use the MODULE-LEVEL worker function (picklable on macOS spawn mode)
         child = multiprocessing.Process(
-            target=hold_lock_space1,
+            target=_hold_lock_worker,
             args=(q, FAKE_SPACE_ID, str(tmp_path / "locks")),
             daemon=True,
         )
@@ -402,7 +567,7 @@ class TestConcurrentIngestLock:
         try:
             sentinel = q.get(timeout=5)
             assert sentinel == "acquired"
-            # Different space — must succeed
+            # Different space — must succeed (different lock file)
             with space_ingest_lock(FAKE_SPACE_ID_2, "http://example.com"):
                 pass  # No exception expected
         finally:
@@ -936,12 +1101,14 @@ class TestIngestUpdateEndToEnd:
         result_ids = [r.get("object_id") for r in search_results]
         result_names = [r.get("object_name") for r in search_results]
 
+        # ONE coherent membership check (QA-ADV-2 — exact equality, no substring scan)
         entity_found = (
             (created_id and created_id in result_ids)
-            or any(ENTITY_NAME in str(n) for n in result_names)
+            or ENTITY_NAME in result_names
         )
         assert entity_found, (
-            f"AC-P7: after update, semantic_search on updated facts must return the entity. "
-            f"Entity id={created_id!r}. "
+            f"AC-P7: after update, semantic_search on updated facts must return the entity "
+            f"in top-K results by exact id/name membership (QA-ADV-2). "
+            f"Entity id={created_id!r}, name={ENTITY_NAME!r}. "
             f"Top-K result ids: {result_ids[:10]!r}, names: {result_names[:10]!r}"
         )
