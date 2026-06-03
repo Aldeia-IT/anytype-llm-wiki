@@ -37,6 +37,7 @@ PATCH_DECISION_PATH=".aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-
 # Probe artifact identifiers — initialized empty so the cleanup trap is a safe
 # no-op if the script is interrupted before the artifacts are created.
 PROBE_TYPE_KEY="__wiki_verify_probe__"
+PROBE_TYPE_ID=""
 PROBE_OBJECT_ID=""
 PROBE_TYPE_CREATED_BY_US=""
 
@@ -84,10 +85,13 @@ cleanup() {
       echo "WARN: probe object DELETE returned HTTP $http_code — zombie probe $PROBE_OBJECT_ID may remain. Response: $body" >&2
     fi
   fi
-  if [[ -n "${PROBE_TYPE_KEY:-}" && "${PROBE_TYPE_CREATED_BY_US:-}" == "1" ]]; then
+  if [[ -n "${PROBE_TYPE_CREATED_BY_US:-}" && "${PROBE_TYPE_CREATED_BY_US:-}" == "1" ]]; then
+    # Delete by type id when known (the API keys deletion by id, not key);
+    # fall back to the key for older API behavior.
+    local type_ref="${PROBE_TYPE_ID:-$PROBE_TYPE_KEY}"
     local type_response
     type_response=$(curl -sS -w "\n%{http_code}" -X DELETE \
-      "$ANYTYPE_API_URL/v1/spaces/$ANYTYPE_SPACE_ID/types/$PROBE_TYPE_KEY" \
+      "$ANYTYPE_API_URL/v1/spaces/$ANYTYPE_SPACE_ID/types/$type_ref" \
       -H "$auth_header" \
       -H "$version_header" 2>&1 || true)
     local type_http_code="${type_response##*$'\n'}"
@@ -106,11 +110,17 @@ trap cleanup EXIT INT TERM
 echo "Creating probe type '$PROBE_TYPE_KEY' ..." >&2
 type_create_response=$(curl -sS -w "\n%{http_code}" -X POST "$ANYTYPE_API_URL/v1/spaces/$ANYTYPE_SPACE_ID/types" \
   -H "$auth_header" -H "$version_header" -H "$content_header" \
-  -d "{\"key\":\"$PROBE_TYPE_KEY\",\"name\":\"Wiki Verify Probe\"}" 2>&1 || true)
+  -d "{\"key\":\"$PROBE_TYPE_KEY\",\"name\":\"Wiki Verify Probe\",\"plural_name\":\"Wiki Verify Probes\",\"layout\":\"basic\"}" 2>&1 || true)
 type_create_code="${type_create_response##*$'\n'}"
+type_create_body="${type_create_response%$'\n'*}"
 if [[ "$type_create_code" == 2* ]]; then
   PROBE_TYPE_CREATED_BY_US=1
-  echo "Probe type created." >&2
+  # The API normalizes the key (snake_case) and returns the canonical key + id;
+  # use them for the object create, filter search, and cleanup.
+  PROBE_TYPE_ID="$(echo "$type_create_body" | jq -r '.type.id // empty')"
+  canonical_key="$(echo "$type_create_body" | jq -r '.type.key // empty')"
+  if [[ -n "$canonical_key" ]]; then PROBE_TYPE_KEY="$canonical_key"; fi
+  echo "Probe type created (key=$PROBE_TYPE_KEY id=$PROBE_TYPE_ID)." >&2
 else
   # The type may already exist from a previous run; proceed without claiming
   # ownership so cleanup does not delete a type we did not create.
@@ -123,7 +133,7 @@ echo "Creating probe object '$probe_name' ..." >&2
 object_create_response=$(curl -sS -w "\n%{http_code}" -X POST \
   "$ANYTYPE_API_URL/v1/spaces/$ANYTYPE_SPACE_ID/objects" \
   -H "$auth_header" -H "$version_header" -H "$content_header" \
-  -d "{\"type_key\":\"$PROBE_TYPE_KEY\",\"name\":\"$probe_name\",\"properties\":{}}" 2>&1 || true)
+  -d "{\"type_key\":\"$PROBE_TYPE_KEY\",\"name\":\"$probe_name\"}" 2>&1 || true)
 object_create_code="${object_create_response##*$'\n'}"
 object_create_body="${object_create_response%$'\n'*}"
 if [[ "$object_create_code" != 2* ]]; then

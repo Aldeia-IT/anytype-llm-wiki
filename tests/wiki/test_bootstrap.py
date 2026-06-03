@@ -855,3 +855,60 @@ class TestBootstrapLiveAPI:
         assert result.get("status") in ("ok", "partial"), (
             f"Live bootstrap returned unexpected status: {result.get('status')}"
         )
+
+
+class TestFoundSchemaVersionRealShape:
+    """_found_schema_version must read the REAL Anytype shape.
+
+    Against a live Anytype API, ``GET /objects`` returns each object's
+    ``properties`` as a LIST of ``{"key": ..., "text": ...}`` entries. That list
+    branch is the only one that fires in production, yet the upgrade-path test
+    seeds the version as a top-level key (the legacy back-compat branch). These
+    tests lock the real array-shaped read path (impl-review-r2 SHOULD-FIX-3).
+    """
+
+    def test_reads_version_from_list_shaped_properties(self):
+        from anytype_llm_wiki.wiki.bootstrap import _found_schema_version
+
+        obj = {
+            "id": "obj1",
+            "name": "bootstrap 2026-06-03T10:10:00Z",
+            "properties": [
+                {"key": "wiki_subject", "text": "Wiki"},
+                {"key": "wiki_schema_version", "text": "0.2.0"},
+            ],
+        }
+        assert _found_schema_version(obj) == "0.2.0"
+
+    def test_list_shape_without_marker_returns_none(self):
+        from anytype_llm_wiki.wiki.bootstrap import _found_schema_version
+
+        obj = {"properties": [{"key": "wiki_subject", "text": "Wiki"}]}
+        assert _found_schema_version(obj) is None
+
+    def test_legacy_dict_and_top_level_shapes_still_supported(self):
+        from anytype_llm_wiki.wiki.bootstrap import _found_schema_version
+
+        assert _found_schema_version({"wiki_schema_version": "0.1.0"}) == "0.1.0"
+        assert (
+            _found_schema_version({"properties": {"wiki_schema_version": "0.1.0"}})
+            == "0.1.0"
+        )
+
+    def test_list_shaped_marker_drives_upgrade_detection(self):
+        """End-to-end: an existing object whose list-shaped properties carry an
+        OLDER version must trigger the schema_upgrade path."""
+        from anytype_llm_wiki.wiki import bootstrap as _b
+
+        older = {
+            "id": "old-log",
+            "name": "bootstrap old",
+            "properties": [{"key": "wiki_schema_version", "text": "0.1.0"}],
+        }
+        # Drive only the version-detection helpers (no HTTP): the max across
+        # objects must be the older version, and it must compare as an upgrade.
+        found = _b._max_version(None, _b._found_schema_version(older))
+        assert found == "0.1.0"
+        assert _b._version_tuple(found) < _b._version_tuple(
+            _b.types_schema.WIKI_SCHEMA_VERSION
+        )
