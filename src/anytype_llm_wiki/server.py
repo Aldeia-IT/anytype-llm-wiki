@@ -106,6 +106,29 @@ def wiki_bootstrap(space_id: str, domain_tags: list[str] | None = None) -> dict:
     return _wiki_bootstrap(space_id=space_id, domain_tags=domain_tags)
 
 
+@mcp.tool()
+def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> dict:
+    """Ingest a source (URL or local file) into the wiki compile pipeline.
+
+    Fetches the source, extracts/derives entities and concepts, resolves them
+    against existing wiki objects, creates/updates typed objects (properties
+    only, empty body), writes bidirectional relations, records a WikiLog entry,
+    and triggers an incremental reindex.
+
+    Args:
+        source: An http(s) URL or an absolute local file path.
+        space_id: Target Anytype space ID.
+        domain_hint: Optional domain tag; must be in the space's taxonomy.
+
+    Returns:
+        An IngestResult dict (source/objects created/updated/skipped, relations,
+        wiki_log_id, warnings, status).
+    """
+    from .wiki.ingest import wiki_ingest as _wiki_ingest
+
+    return _wiki_ingest(source=source, space_id=space_id, domain_hint=domain_hint)
+
+
 def main():
     # Route known CLI subcommands to the wiki CLI; otherwise run the MCP server.
     from .wiki import cli as wiki_cli

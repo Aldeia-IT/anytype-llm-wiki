@@ -18,7 +18,7 @@ from .bootstrap import wiki_bootstrap
 from .doctor import run_doctor
 
 # Subcommands that server.main() routes here instead of starting the MCP server.
-SUBCOMMANDS = ("wiki-bootstrap", "doctor")
+SUBCOMMANDS = ("wiki-bootstrap", "wiki-ingest", "doctor")
 
 
 def _parse_domain_tags(raw: str | None) -> list[str] | None:
@@ -90,6 +90,33 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in ("ok", "partial") else 1
 
 
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    from .ingest import wiki_ingest
+
+    result = wiki_ingest(
+        source=args.source, space_id=args.space_id, domain_hint=args.domain_hint
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        status = result.get("status")
+        print(f"[wiki-ingest] space {args.space_id}: status={status}")
+        print(f"  source:     {result.get('source_object_id')}")
+        print(
+            f"  objects:    {len(result.get('objects_created', []))} created, "
+            f"{len(result.get('objects_updated', []))} updated, "
+            f"{len(result.get('objects_skipped', []))} skipped"
+        )
+        print(f"  relations:  {result.get('relations_created', 0)}")
+        if result.get("wiki_log_id"):
+            print(f"  wiki_log:   {result['wiki_log_id']}")
+        if result.get("error"):
+            print(f"  error:      {result['error']}")
+        for warning in result.get("warnings", []):
+            print(f"  warn:       {warning}")
+    return 0 if result.get("status") in ("ok", "partial") else 1
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     report = run_doctor()
     if args.json:
@@ -129,6 +156,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the result as JSON."
     )
     bootstrap_p.set_defaults(func=_cmd_bootstrap)
+
+    ingest_p = sub.add_parser(
+        "wiki-ingest", help="Ingest a source (URL or file) into the wiki."
+    )
+    ingest_p.add_argument("--source", required=True, help="http(s) URL or local file path.")
+    ingest_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
+    ingest_p.add_argument(
+        "--domain-hint", default=None, help="Optional domain tag (must be in the taxonomy)."
+    )
+    ingest_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    ingest_p.set_defaults(func=_cmd_ingest)
 
     doctor_p = sub.add_parser("doctor", help="Run preflight checks.")
     doctor_p.add_argument(

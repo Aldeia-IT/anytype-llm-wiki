@@ -65,13 +65,15 @@ def normalize_title(raw: str) -> str:
 # tag block. These are invisible or directional-spoofing characters that pollute
 # embeddings without contributing visible content.
 _CONTROL_CHAR_RE = re.compile(
+    # Codepoints written as \u escapes (not literal bidi/zero-width glyphs)
+    # so the source file carries no trojan-source characters (bandit B613).
     "["
     "\x00-\x08\x0b\x0c\x0e-\x1f\x7f"  # C0 controls + DEL, keeping \t \n \r
-    "​-‏"          # zero-width space..RTL mark
-    "‪-‮"          # bidi embedding/override
-    "⁦-⁩"          # bidi isolates
-    "﻿"                 # ZERO WIDTH NO-BREAK SPACE / BOM
-    "  "           # line / paragraph separator
+    "\u200b-\u200f"  # zero-width space..RTL mark
+    "\u202a-\u202e"  # bidi embedding/override
+    "\u2066-\u2069"  # bidi isolates
+    "\ufeff"  # ZERO WIDTH NO-BREAK SPACE / BOM
+    "\u2028\u2029"  # line / paragraph separator
     "\U000e0020-\U000e007f"  # tag block
     "]"
 )
