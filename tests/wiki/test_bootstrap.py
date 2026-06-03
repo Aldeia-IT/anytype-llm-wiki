@@ -47,39 +47,84 @@ def set_anytype_env(monkeypatch):
     monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
 
 
-def _make_bootstrap_respx_router(space_id: str = FAKE_SPACE_ID):
-    """Return a configured respx mock router for a successful bootstrap run."""
-    # POST types → 200 with type stub
-    def type_response(request, **kwargs):
-        body = httpx.Response(200, json={
-            "type": {"id": f"obj-{os.urandom(4).hex()}", "key": "wiki_source"}
-        })
-        return body
+def _wiki_properties_payload():
+    """All unique wiki property keys as list-properties rows (key + id + format).
 
-    # POST properties → 200
-    def prop_response(request, **kwargs):
-        return httpx.Response(200, json={
-            "property": {"id": f"prop-{os.urandom(4).hex()}", "key": "wiki_url"}
-        })
+    Mirrors the real ``GET /v1/spaces/{id}/properties`` shape so bootstrap can
+    resolve ``wiki_domain_tags`` → property_id (required for tag creation).
+    """
+    from anytype_llm_wiki.wiki import types_schema
 
-    # POST tags/options → 200
-    def tag_response(request, **kwargs):
-        return httpx.Response(200, json={
-            "option": {"id": f"tag-{os.urandom(4).hex()}", "name": "wiki_ai-research"}
-        })
+    seen: dict[str, dict] = {}
+    for type_def in types_schema.WIKI_TYPES:
+        for prop in type_def["properties"]:
+            key = prop["property_key"]
+            seen.setdefault(
+                key,
+                {
+                    "object": "property",
+                    "id": f"prop-{key}",
+                    "key": key,
+                    "name": prop["name"],
+                    "format": prop["format"],
+                },
+            )
+    return list(seen.values())
 
-    # POST objects (collection + wiki_log) → 200
-    def object_response(request, **kwargs):
-        return httpx.Response(200, json={
-            "object": {"id": f"col-{os.urandom(4).hex()}", "name": "Wiki"}
-        })
 
-    return {
-        "type_response": type_response,
-        "prop_response": prop_response,
-        "tag_response": tag_response,
-        "object_response": object_response,
-    }
+def _install_success_routes(existing_tags=None, existing_types=None, existing_objects=None):
+    """Install URL-aware respx routes matching the real Anytype write contract.
+
+    - ``GET .../tags``        → existing_tags (default: none)
+    - ``GET .../properties``  → the full wiki property set (with ids)
+    - ``GET .../types``       → existing_types (default: none)
+    - ``GET .../objects``     → existing_objects (default: none)
+    - ``POST .../tags``       → ``{"tag": {...}}``   (NOT the legacy ``option``)
+    - ``POST .../types``      → ``{"type": {...}}``
+    - ``POST .../objects``    → ``{"object": {...}}``
+    - ``POST .../properties`` → ``{"property": {...}}``
+    """
+    existing_tags = existing_tags or []
+    existing_types = existing_types or []
+    existing_objects = existing_objects or []
+    props = _wiki_properties_payload()
+
+    def get_response(request, **kwargs):
+        path = str(request.url).split("?")[0]
+        if path.endswith("/tags"):
+            data = existing_tags
+        elif path.endswith("/properties"):
+            data = props
+        elif path.endswith("/types"):
+            data = existing_types
+        elif path.endswith("/objects"):
+            data = existing_objects
+        else:
+            data = []
+        return httpx.Response(200, json={"data": data, "pagination": {"has_more": False}})
+
+    def post_response(request, **kwargs):
+        path = str(request.url).split("?")[0]
+        if path.endswith("/tags"):
+            return httpx.Response(201, json={
+                "tag": {"id": f"tag-{os.urandom(4).hex()}", "name": "x", "color": "blue"}
+            })
+        if path.endswith("/types"):
+            return httpx.Response(201, json={
+                "type": {"id": f"obj-{os.urandom(4).hex()}", "key": "wiki_source"}
+            })
+        if path.endswith("/objects"):
+            return httpx.Response(201, json={
+                "object": {"id": f"obj-{os.urandom(4).hex()}", "name": "Wiki"}
+            })
+        if path.endswith("/properties"):
+            return httpx.Response(201, json={
+                "property": {"id": f"prop-{os.urandom(4).hex()}", "key": "wiki_url"}
+            })
+        return httpx.Response(200, json={})
+
+    respx.get().mock(side_effect=get_response)
+    respx.post().mock(side_effect=post_response)
 
 
 class TestBootstrapImport:
@@ -249,15 +294,7 @@ class TestBootstrapCreatesTypesAndProperties:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post().mock(return_value=httpx.Response(200, json={
-            "type": {"id": "t1", "key": "wiki_source"},
-            "property": {"id": "p1", "key": "wiki_url"},
-            "option": {"id": "o1", "name": "wiki_ai-research"},
-            "object": {"id": "c1", "name": "Wiki"},
-        }))
-        respx.get().mock(return_value=httpx.Response(200, json={
-            "data": [], "pagination": {"has_more": False}
-        }))
+        _install_success_routes()
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
         result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
         created_tags = {t["tag"] for t in result.get("tags_created", [])}
@@ -439,15 +476,7 @@ class TestBootstrapCustomDomainTags:
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        respx.post().mock(return_value=httpx.Response(200, json={
-            "type": {"id": "t1", "key": "wiki_source"},
-            "property": {"id": "p1", "key": "wiki_url"},
-            "option": {"id": "o1", "name": "a"},
-            "object": {"id": "c1", "name": "Wiki"},
-        }))
-        respx.get().mock(return_value=httpx.Response(200, json={
-            "data": [], "pagination": {"has_more": False}
-        }))
+        _install_success_routes()
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
         result = wiki_bootstrap(space_id=FAKE_SPACE_ID, domain_tags=["a", "b"])
         created_tags = {t["tag"] for t in result.get("tags_created", [])}
@@ -472,29 +501,15 @@ class TestBootstrapCustomDomainTags:
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
 
         existing_tags = [
-            {"id": "tag-a", "name": "a", "propertyKey": "wiki_domain_tags"},
-            {"id": "tag-b", "name": "b", "propertyKey": "wiki_domain_tags"},
+            {"object": "tag", "id": "tag-a", "name": "a", "color": "blue"},
+            {"object": "tag", "id": "tag-b", "name": "b", "color": "teal"},
         ]
         existing_types = [
             {"id": f"t{i}", "key": key, "name": key}
             for i, key in enumerate(CANONICAL_TYPE_KEYS)
         ]
 
-        def get_response(request, **kwargs):
-            url_str = str(request.url)
-            if "options" in url_str or "tags" in url_str:
-                return httpx.Response(200, json={
-                    "data": existing_tags, "pagination": {"has_more": False}
-                })
-            return httpx.Response(200, json={
-                "data": existing_types, "pagination": {"has_more": False}
-            })
-
-        respx.get().mock(side_effect=get_response)
-        respx.post().mock(return_value=httpx.Response(200, json={
-            "option": {"id": "tag-c", "name": "c"},
-            "object": {"id": "c1", "name": "Wiki"},
-        }))
+        _install_success_routes(existing_tags=existing_tags, existing_types=existing_types)
 
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
         result = wiki_bootstrap(space_id=FAKE_SPACE_ID, domain_tags=["c"])

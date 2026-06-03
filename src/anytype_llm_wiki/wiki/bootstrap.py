@@ -1,10 +1,12 @@
 """wiki_bootstrap — idempotent schema bootstrap for an Anytype space.
 
-Creates (or skips, if already present) the six canonical wiki Types, their
-Properties, the default domain-tag taxonomy, a root Collection carrying the
-schema version, and a WikiLog entry recording the run. Idempotency is driven
-from the WikiClient list-helpers (existing items are detected via GET and
-reported as ``*_skipped``).
+Creates (or skips, if already present) the six canonical wiki Types and their
+Properties (created-and-linked inline via the create-type API), the default
+domain-tag taxonomy (multi-select options on ``wiki_domain_tags``), a root
+"Wiki" Collection, and a WikiLog entry recording the run. The WikiLog entry is
+stamped with the running ``wiki_schema_version`` and is the marker read back for
+upgrade detection. Idempotency is driven from the WikiClient list-helpers
+(existing items are detected via GET and reported as ``*_skipped``).
 
 Error handling follows the spec's three-category model:
 - Anytype unreachable (``httpx.ConnectError`` / ``ConnectTimeout`` /
@@ -15,11 +17,15 @@ Error handling follows the spec's three-category model:
   pointing at Anytype Settings → API.
 
 Schema-upgrade exception (spec §Schema Compatibility, bootstrap-specific clause):
-when an existing root Collection carries a ``wiki_schema_version`` older than the
+when an existing WikiLog marker carries a ``wiki_schema_version`` older than the
 running code's ``WIKI_SCHEMA_VERSION``, bootstrap does NOT short-circuit with
 ``wiki_schema_outdated`` (that would be a self-recursive remediation loop).
 Instead it proceeds with an idempotent upgrade and returns a ``schema_upgrade``
-section in the result.
+section in the result. The fresh WikiLog entry stamps the new version, so the
+next bootstrap detects it.
+
+API-contract notes are documented in ``types_schema`` (verified live against the
+Anytype local API, version 2025-11-08).
 """
 
 import logging
@@ -32,11 +38,28 @@ from .wiki_client import WikiClient
 
 logger = logging.getLogger(__name__)
 
-# The Anytype object type used for the root wiki Collection. Anytype's
-# system collection type key.
-_ROOT_COLLECTION_TYPE_KEY = "ot-collection"
+# The Anytype object type used for the root wiki Collection. The live type key
+# for collections is "collection" (NOT "ot-collection").
+_ROOT_COLLECTION_TYPE_KEY = "collection"
 _ROOT_COLLECTION_NAME = "Wiki"
-_DOMAIN_TAGS_PROPERTY_KEY = "wiki_domain_tags"
+_DOMAIN_TAGS_PROPERTY_KEY = types_schema.DOMAIN_TAGS_PROPERTY_KEY
+_SCHEMA_VERSION_PROPERTY_KEY = types_schema.SCHEMA_VERSION_PROPERTY_KEY
+
+# Anytype property formats → the typed field name used in a PropertyLinkWithValue
+# entry when writing an object.
+_FORMAT_VALUE_FIELD = {
+    "text": "text",
+    "number": "number",
+    "date": "date",
+    "url": "url",
+    "email": "email",
+    "phone": "phone",
+    "checkbox": "checkbox",
+    "select": "select",
+    "multi_select": "multi_select",
+    "objects": "objects",
+    "files": "files",
+}
 
 
 def _type_deeplink(space_id: str, type_key: str) -> str:
@@ -47,8 +70,13 @@ def _object_deeplink(space_id: str, object_id: str) -> str:
     return f"anytype://object/{space_id}/{object_id}"
 
 
+def _now_iso() -> str:
+    """UTC timestamp in the ``...Z`` ISO-8601 form Anytype's date fields accept."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _version_tuple(version: str) -> tuple[int, ...]:
-    """Parse a dotted version string into a 3-tuple of ints for comparison.
+    """Parse a dotted version string into a tuple of ints for comparison.
 
     Non-integer components are treated as 0. Missing trailing components are
     padded to 0 so semantically-equal versions of differing arity compare equal
@@ -61,26 +89,44 @@ def _version_tuple(version: str) -> tuple[int, ...]:
             parts.append(int(part))
         except ValueError:
             parts.append(0)
-    # Pad to at least 3 components (major.minor.patch) so comparisons against
-    # equal-but-differently-arity versions do not spuriously order.
     while len(parts) < 3:
         parts.append(0)
     return tuple(parts)
 
 
 def _found_schema_version(obj: dict) -> str | None:
-    """Read a wiki_schema_version off an object, checking top-level then properties."""
+    """Read a wiki_schema_version off an object.
+
+    Tolerates the real Anytype shape (``properties`` is a *list* of
+    ``{"key": ..., "text": ...}`` entries), a legacy/mock dict shape, and a
+    top-level key.
+    """
     if not isinstance(obj, dict):
         return None
-    top = obj.get("wiki_schema_version")
+    top = obj.get(_SCHEMA_VERSION_PROPERTY_KEY)
     if top:
         return top
     props = obj.get("properties")
     if isinstance(props, dict):
-        nested = props.get("wiki_schema_version")
+        nested = props.get(_SCHEMA_VERSION_PROPERTY_KEY)
         if nested:
             return nested
+    if isinstance(props, list):
+        for p in props:
+            if isinstance(p, dict) and p.get("key") == _SCHEMA_VERSION_PROPERTY_KEY:
+                val = p.get("text") or p.get("select")
+                if val:
+                    return val
     return None
+
+
+def _max_version(a: str | None, b: str | None) -> str | None:
+    """Return the higher of two (possibly-None) version strings."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if _version_tuple(a) >= _version_tuple(b) else b
 
 
 def _empty_result(space_id: str) -> dict:
@@ -174,7 +220,6 @@ def wiki_bootstrap(space_id: str, domain_tags: list[str] | None = None) -> dict:
             return _config_error_missing_space(result, space_id)
         if status_code == 403:
             return _config_error_insufficient_scope(result)
-        # Other HTTP errors degrade to a generic API error rather than crashing.
         msg = (
             f"[API ERROR] api_error: Anytype returned HTTP {status_code} during "
             "bootstrap."
@@ -196,26 +241,27 @@ def _run_bootstrap(
     result: dict,
 ) -> dict:
     """Core bootstrap flow. Raises httpx errors for the wrapper to categorize."""
-    # --- detect existing schema version for the upgrade path -----------------
+    # --- detect existing schema version (from any WikiLog marker) ------------
     existing_objects = client.list_objects(space_id)
     root_collection = _find_root_collection(existing_objects)
     found_version: str | None = None
     for obj in existing_objects:
-        v = _found_schema_version(obj)
-        if v:
-            found_version = v
-            break
-    if root_collection is not None and found_version is None:
-        found_version = _found_schema_version(root_collection)
+        found_version = _max_version(found_version, _found_schema_version(obj))
 
     is_upgrade = (
         found_version is not None
         and _version_tuple(found_version) < _version_tuple(types_schema.WIKI_SCHEMA_VERSION)
     )
 
-    # --- Types ---------------------------------------------------------------
+    # --- Types (inline properties are created AND linked in one call) --------
     existing_types = client.list_types(space_id)
     existing_type_keys = {t.get("key") for t in existing_types if t.get("key")}
+    pre_existing_prop_keys = {
+        p.get("key") or p.get("property_key")
+        for p in client.list_properties(space_id)
+        if (p.get("key") or p.get("property_key"))
+    }
+
     for type_def in types_schema.WIKI_TYPES:
         type_key = type_def["type_key"]
         if type_key in existing_type_keys:
@@ -228,7 +274,16 @@ def _run_bootstrap(
             {
                 "key": type_key,
                 "name": type_def["name"],
-                "properties": type_def.get("properties", []),
+                "plural_name": type_def["plural_name"],
+                "layout": type_def["layout"],
+                "properties": [
+                    {
+                        "key": p["property_key"],
+                        "name": p["name"],
+                        "format": p["format"],
+                    }
+                    for p in type_def.get("properties", [])
+                ],
             },
         )
         result["types_created"].append(
@@ -239,19 +294,23 @@ def _run_bootstrap(
             }
         )
 
-    # --- Properties ----------------------------------------------------------
-    existing_props = client.list_properties(space_id)
-    existing_prop_keys = {
-        p.get("property_key") or p.get("key")
-        for p in existing_props
-        if (p.get("property_key") or p.get("key"))
-    }
+    # --- Properties: report created/skipped, build key->id map ---------------
+    prop_map: dict[str, str | None] = {}
+    for p in client.list_properties(space_id):
+        key = p.get("key") or p.get("property_key")
+        if key:
+            prop_map[key] = p.get("id")
+
     properties_added: list[str] = []
+    seen_prop_keys: set[str] = set()
     for type_def in types_schema.WIKI_TYPES:
         type_key = type_def["type_key"]
         for prop in type_def.get("properties", []):
             property_key = prop["property_key"]
-            if property_key in existing_prop_keys:
+            if property_key in seen_prop_keys:
+                continue
+            seen_prop_keys.add(property_key)
+            if property_key in pre_existing_prop_keys:
                 result["properties_skipped"].append(
                     {
                         "type_key": type_key,
@@ -259,51 +318,46 @@ def _run_bootstrap(
                         "reason": "already_exists",
                     }
                 )
-                continue
-            property_id = None
-            try:
-                created = client.create_property(
-                    space_id,
-                    type_key,
-                    {"key": property_key, "format": prop["format"]},
+            else:
+                result["properties_created"].append(
+                    {
+                        "type_key": type_key,
+                        "property_key": property_key,
+                        "property_id": prop_map.get(property_key),
+                    }
                 )
-                property_id = created.get("id")
-            except KeyError:
-                # The create succeeded (2xx) but the response body lacked the
-                # "property" envelope key; record the creation without an id.
-                property_id = None
-            result["properties_created"].append(
-                {
-                    "type_key": type_key,
-                    "property_key": property_key,
-                    "property_id": property_id,
-                }
-            )
-            properties_added.append(property_key)
-            # A property_key may be shared across types (e.g. wiki_domain_tags);
-            # mark it created so the second type reports it as skipped.
-            existing_prop_keys.add(property_key)
+                properties_added.append(property_key)
 
-    # --- Domain tags ---------------------------------------------------------
-    existing_tags = client.list_tags(space_id, _DOMAIN_TAGS_PROPERTY_KEY)
-    existing_tag_names = {t.get("name") for t in existing_tags if t.get("name")}
+    # --- Domain tags (multi-select options on wiki_domain_tags) --------------
+    domain_pid = prop_map.get(_DOMAIN_TAGS_PROPERTY_KEY)
+    if domain_pid:
+        existing_tags = client.list_tags(space_id, domain_pid)
+        existing_tag_names = {t.get("name") for t in existing_tags if t.get("name")}
 
-    if existing_tag_names:
-        # Re-bootstrap: union-only. Preserve all existing tags (skip), create
-        # only argument tags that are not already present.
-        for name in existing_tag_names:
-            result["tags_skipped"].append(
-                {
-                    "property_key": _DOMAIN_TAGS_PROPERTY_KEY,
-                    "tag": name,
-                    "reason": "already_exists",
-                }
+        if existing_tag_names:
+            # Re-bootstrap: union-only. Preserve existing (skip); create only
+            # argument tags not already present.
+            for name in existing_tag_names:
+                result["tags_skipped"].append(
+                    {
+                        "property_key": _DOMAIN_TAGS_PROPERTY_KEY,
+                        "tag": name,
+                        "reason": "already_exists",
+                    }
+                )
+            new_tags = [t for t in (domain_tags or []) if t not in existing_tag_names]
+        else:
+            # First bootstrap: custom domain_tags replace the defaults entirely.
+            new_tags = (
+                domain_tags
+                if domain_tags is not None
+                else types_schema.DEFAULT_DOMAIN_TAGS
             )
-        target_tags = domain_tags or []
-        for tag in target_tags:
-            if tag in existing_tag_names:
-                continue
-            tag_id = _create_tag(client, space_id, tag)
+
+        palette = types_schema.TAG_COLOR_PALETTE
+        for i, tag in enumerate(new_tags):
+            color = palette[i % len(palette)]
+            tag_id = _create_tag(client, space_id, domain_pid, tag, color)
             result["tags_created"].append(
                 {
                     "property_key": _DOMAIN_TAGS_PROPERTY_KEY,
@@ -311,57 +365,26 @@ def _run_bootstrap(
                     "tag_id": tag_id,
                 }
             )
-            existing_tag_names.add(tag)
     else:
-        # First bootstrap: custom domain_tags replace the defaults entirely.
-        target_tags = (
-            domain_tags if domain_tags is not None else types_schema.DEFAULT_DOMAIN_TAGS
+        result["warnings"].append(
+            f"domain-tag taxonomy skipped: property '{_DOMAIN_TAGS_PROPERTY_KEY}' "
+            "id could not be resolved after type creation."
         )
-        for tag in target_tags:
-            tag_id = _create_tag(client, space_id, tag)
-            result["tags_created"].append(
-                {
-                    "property_key": _DOMAIN_TAGS_PROPERTY_KEY,
-                    "tag": tag,
-                    "tag_id": tag_id,
-                }
-            )
 
     # --- Root Collection -----------------------------------------------------
     if root_collection is not None:
         collection_id = root_collection.get("id")
-        result["root_collection_id"] = collection_id
-        if collection_id:
-            result["root_collection_deeplink"] = _object_deeplink(space_id, collection_id)
-        if is_upgrade and collection_id:
-            # Bring the recorded schema version forward (idempotent upgrade).
-            try:
-                client.update_object(
-                    space_id,
-                    collection_id,
-                    {
-                        "properties": {
-                            "wiki_schema_version": types_schema.WIKI_SCHEMA_VERSION
-                        }
-                    },
-                )
-            except httpx.HTTPStatusError as exc:  # pragma: no cover - defensive
-                result["warnings"].append(
-                    f"schema_version PATCH failed (HTTP "
-                    f"{exc.response.status_code if exc.response else '?'}); "
-                    "re-run bootstrap to retry."
-                )
     else:
         collection_id = _create_object(
             client,
             space_id,
             type_key=_ROOT_COLLECTION_TYPE_KEY,
             name=_ROOT_COLLECTION_NAME,
-            properties={"wiki_schema_version": types_schema.WIKI_SCHEMA_VERSION},
+            properties=None,
         )
-        result["root_collection_id"] = collection_id
-        if collection_id:
-            result["root_collection_deeplink"] = _object_deeplink(space_id, collection_id)
+    result["root_collection_id"] = collection_id
+    if collection_id:
+        result["root_collection_deeplink"] = _object_deeplink(space_id, collection_id)
 
     # --- schema_upgrade section ---------------------------------------------
     if is_upgrade:
@@ -377,24 +400,28 @@ def _run_bootstrap(
             len(properties_added),
         )
 
-    # --- WikiLog entry (best-effort) -----------------------------------------
+    # --- WikiLog entry (best-effort; stamps the schema version) --------------
+    total_created = (
+        len(result["types_created"])
+        + len(result["properties_created"])
+        + len(result["tags_created"])
+    )
     try:
+        log_props = _build_props_list(
+            [
+                ("wiki_subject", "text", _ROOT_COLLECTION_NAME),
+                ("wiki_objects_created", "number", total_created),
+                ("wiki_timestamp", "date", _now_iso()),
+                ("wiki_notes", "text", f"schema_version={types_schema.WIKI_SCHEMA_VERSION}"),
+                (_SCHEMA_VERSION_PROPERTY_KEY, "text", types_schema.WIKI_SCHEMA_VERSION),
+            ]
+        )
         log_id = _create_object(
             client,
             space_id,
             type_key="wiki_log",
-            name=f"bootstrap {datetime.now(timezone.utc).isoformat()}",
-            properties={
-                "wiki_action": "bootstrap",
-                "wiki_subject": _ROOT_COLLECTION_NAME,
-                "wiki_objects_created": (
-                    len(result["types_created"])
-                    + len(result["properties_created"])
-                    + len(result["tags_created"])
-                ),
-                "wiki_timestamp": datetime.now(timezone.utc).isoformat(),
-                "wiki_notes": f"schema_version={types_schema.WIKI_SCHEMA_VERSION}",
-            },
+            name=f"bootstrap {_now_iso()}",
+            properties=log_props,
         )
         result["wiki_log_id"] = log_id
         if log_id:
@@ -409,10 +436,27 @@ def _run_bootstrap(
     return result
 
 
-def _create_tag(client: WikiClient, space_id: str, tag: str) -> str | None:
-    """Create a domain tag, tolerating a mock 2xx response missing the envelope."""
+def _build_props_list(entries: list[tuple[str, str, object]]) -> list[dict]:
+    """Build a PropertyLinkWithValue array from ``(key, format, value)`` tuples.
+
+    Skips entries whose value is None/empty. Unknown formats fall back to a
+    ``text`` field with the stringified value.
+    """
+    out: list[dict] = []
+    for key, fmt, value in entries:
+        if value is None or value == "":
+            continue
+        field = _FORMAT_VALUE_FIELD.get(fmt, "text")
+        out.append({"key": key, field: value})
+    return out
+
+
+def _create_tag(
+    client: WikiClient, space_id: str, property_id: str, tag: str, color: str
+) -> str | None:
+    """Create a domain tag (name + required color), tolerating a mock 2xx body."""
     try:
-        created = client.create_tag(space_id, _DOMAIN_TAGS_PROPERTY_KEY, tag)
+        created = client.create_tag(space_id, property_id, {"name": tag, "color": color})
         return created.get("id")
     except KeyError:
         return None
@@ -423,7 +467,7 @@ def _create_object(
     space_id: str,
     type_key: str,
     name: str,
-    properties: dict,
+    properties: list | None,
 ) -> str | None:
     """Create an object, tolerating a mock 2xx response missing the envelope."""
     try:
@@ -434,16 +478,8 @@ def _create_object(
 
 
 def _find_root_collection(objects: list[dict]) -> dict | None:
-    """Locate an existing root wiki Collection among listed objects.
-
-    A root collection is recognized either by name == "Wiki" or by carrying a
-    ``wiki_schema_version`` marker (top-level or in properties).
-    """
+    """Locate an existing root wiki Collection among listed objects (by name)."""
     for obj in objects:
-        if not isinstance(obj, dict):
-            continue
-        if obj.get("name") == _ROOT_COLLECTION_NAME:
-            return obj
-        if _found_schema_version(obj):
+        if isinstance(obj, dict) and obj.get("name") == _ROOT_COLLECTION_NAME:
             return obj
     return None

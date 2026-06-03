@@ -33,32 +33,42 @@ class WikiClient(_BaseAnytypeClient):
         resp.raise_for_status()
         return resp.json()["property"]
 
-    def create_tag(self, space_id: str, property_key: str, tag) -> dict:
-        """POST a new option/tag for a (multi-)select property. Returns the option dict."""
+    def create_tag(self, space_id: str, property_id: str, tag) -> dict:
+        """POST a new tag (select/multi-select option). Returns the created tag dict.
+
+        The Anytype API keys this endpoint by the property's *id* (not its key)
+        and exposes it under ``/tags`` (not ``/options``). ``color`` is REQUIRED
+        and must be drawn from ``types_schema.TAG_COLOR_PALETTE``. ``tag`` may be
+        a plain name (str) or a dict carrying at least ``name`` and ``color``.
+        """
         c = self._client()
         body = tag if isinstance(tag, dict) else {"name": tag}
         resp = c.post(
-            f"/v1/spaces/{space_id}/properties/{property_key}/options",
+            f"/v1/spaces/{space_id}/properties/{property_id}/tags",
             json=body,
         )
         resp.raise_for_status()
-        return resp.json()["option"]
+        return resp.json()["tag"]
 
     def create_object(
         self,
         space_id: str,
         type_key: str,
         name: str,
-        properties: dict,
+        properties: list | None = None,
         body: str | None = None,
     ) -> dict:
-        """POST a new object. Returns the created object dict."""
+        """POST a new object. Returns the created object dict.
+
+        ``properties`` must be a *list* of PropertyLinkWithValue entries, each a
+        ``{"key": <property_key>, <typed_field>: <value>}`` dict (e.g.
+        ``{"key": "wiki_excerpt", "text": "..."}``). The Anytype API rejects a
+        bare ``{key: value}`` mapping. Omitted when empty/None.
+        """
         c = self._client()
-        payload: dict = {
-            "type_key": type_key,
-            "name": name,
-            "properties": properties,
-        }
+        payload: dict = {"type_key": type_key, "name": name}
+        if properties:
+            payload["properties"] = properties
         if body is not None:
             payload["body"] = body
         resp = c.post(f"/v1/spaces/{space_id}/objects", json=payload)
@@ -108,10 +118,13 @@ class WikiClient(_BaseAnytypeClient):
         """GET all properties in a space, paginating while pagination.has_more is true."""
         return self._paginated_get(f"/v1/spaces/{space_id}/properties")
 
-    def list_tags(self, space_id: str, property_key: str) -> list[dict]:
-        """GET all options/tags for a property, paginating while pagination.has_more is true."""
+    def list_tags(self, space_id: str, property_id: str) -> list[dict]:
+        """GET all tags for a property (keyed by property *id*), paginating fully.
+
+        Endpoint is ``/properties/{property_id}/tags`` (not ``.../options``).
+        """
         return self._paginated_get(
-            f"/v1/spaces/{space_id}/properties/{property_key}/options"
+            f"/v1/spaces/{space_id}/properties/{property_id}/tags"
         )
 
     def list_objects(self, space_id: str, offset: int = 0, limit: int = 100) -> list[dict]:
