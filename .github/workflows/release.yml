@@ -37,7 +37,10 @@ jobs:
       # Audit the SHIPPED surface only (--no-dev). Dev/test deps are audited separately
       # by the weekly audit.yml (--all-extras). See Security Considerations.
       - name: Export lockfile for audit
-        run: uv export --format requirements-txt --no-dev > /tmp/requirements-audit.txt
+        # --no-emit-project: exclude the local project itself. uv exports it as an
+        # editable `-e .` entry, which pip-audit cannot install under --require-hashes
+        # ("no single file to hash"). The audit targets third-party deps only.
+        run: uv export --format requirements-txt --no-dev --no-emit-project > /tmp/requirements-audit.txt
 
       - name: Audit dependencies
         run: uvx pip-audit@2.10.0 -r /tmp/requirements-audit.txt
