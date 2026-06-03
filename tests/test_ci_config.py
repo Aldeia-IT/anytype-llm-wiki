@@ -245,6 +245,32 @@ class TestAC5OidcAndNoSecrets:
 
 
 # ---------------------------------------------------------------------------
+# #234 ADVISORY-1 — PYPI_PUBLISH_ENABLED publish-guard regression test
+# The publish step's `if:` is the SINGLE control preventing accidental PyPI
+# publish (git-tag-only until the maintainer opts in). A future edit could
+# weaken it undetected — this test pins both halves of the guard expression.
+# ---------------------------------------------------------------------------
+
+class TestPublishGuard:
+    """The release.yml publish step must be guarded by BOTH PYPI_PUBLISH_ENABLED and skip_publish."""
+
+    def test_release_yml_publish_guard_expression(self):
+        """#234: the publish step's `if:` must contain both gate halves so the project
+        stays git-tag-only (nothing published) until PYPI_PUBLISH_ENABLED is set true,
+        and so the workflow_dispatch dry-run (skip_publish) never publishes."""
+        text = _read(RELEASE_YML)
+        assert "vars.PYPI_PUBLISH_ENABLED == 'true'" in text, (
+            f"release.yml publish step must gate on \"vars.PYPI_PUBLISH_ENABLED == 'true'\" — "
+            f"this repo variable is the single control keeping the project git-tag-only "
+            f"(no accidental PyPI publish): {RELEASE_YML}"
+        )
+        assert "inputs.skip_publish != true" in text, (
+            f"release.yml publish step must gate on 'inputs.skip_publish != true' so the "
+            f"workflow_dispatch dry-run path never publishes: {RELEASE_YML}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # AC6 — Dependency-intake checklist documented in the repo
 # Spec ref: AC6 detail (spec.md ~619), §7 Dependency-Intake Checklist (~538)
 # Addendum item 4: assert seven sections are present (beyond mere file existence)

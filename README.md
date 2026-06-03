@@ -1,10 +1,8 @@
 # anytype-llm-wiki
 
-**To our knowledge, the first Anytype-native LLM wiki — combining Karpathy's pattern, Hermes' battle-tested operational policies, and [Anytype](https://anytype.io)'s typed knowledge graph (Objects, Types, Relations) into an installable module. No Obsidian required.**
+**An MCP-native semantic search and LLM wiki for your [Anytype](https://anytype.io) knowledge base — local-first, typed, and built on Anytype's native Objects, Types, and Relations.**
 
-> **Status — April 2026.** This repo was previously named `anytype-rag` (semantic-search MCP server for Anytype). It is being extended into a full LLM wiki: typed ingest, entity/concept synthesis, bidirectional Relations, lint suite. See [Aldeia-IT/aldeia-box#140](https://github.com/Aldeia-IT/aldeia-box/issues/140) for the roadmap. The current v0.1.0 (semantic search only) is the foundation; the wiki pipeline lands in v0.2.0+.
->
-> **Positioning-verification note.** The "first Anytype-native LLM wiki" claim above is verified at v0.2.0 tag time and the search record is committed at `.aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-any/positioning-verification.md` (analog to `patch-decision.md`). If you are reading this before v0.2.0 ships, the verification file may not yet exist; the spec's fallback line (*"An Anytype-native LLM wiki — combining Karpathy's pattern…"*, drops the "first" claim) is the pre-committed swap. This narrower, verifiable positioning supersedes an earlier, broader "first typed-KG LLM wiki" claim (tightened per the R2 council's CPO and Legal advisories; see [spec](.aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-any/spec.md) §Market Analysis for rationale).
+> **Status — v0.2.0 (preview).** Previously `anytype-rag`, a semantic-search MCP server for Anytype, now growing into a full LLM wiki. v0.2.0 ships the foundation: semantic search over your vault, a `doctor` health check, and `wiki-bootstrap` (idempotent typed-schema provisioning). Automated content ingestion — LLM-driven extraction of entities and concepts into typed Anytype Objects — arrives in v0.3.0. See the [Roadmap](#roadmap).
 
 Anytype's built-in search only matches object titles and snippets. It doesn't search body content at all. This means your AI tools can't find information by *what it says* — only by what it's called.
 
@@ -19,7 +17,7 @@ anytype-llm-wiki: DAO Governance → The Council (score: 0.57)
    to allow a core group of people to step up as delegates..."
 ```
 
-## How it works (v0.1 — semantic search foundation)
+## How it works
 
 ```
 Anytype vault (local API)
@@ -36,6 +34,8 @@ Claude Code / Cursor / any MCP client
 ```
 
 Everything runs locally. No data leaves your machine.
+
+v0.2.0 adds two CLI helpers around this core: `wiki-bootstrap` (provision the typed wiki schema in a space) and `doctor` (verify your environment is ready).
 
 ### Privacy and data flow
 
@@ -56,6 +56,8 @@ Aldeia IT, as the publisher of this open-source module, does not determine the p
 
 ## Quick start
 
+> **Version: v0.2.0 (preview).** First-time setup takes about 5 minutes. v0.2.0 ships the bootstrap + health-check + semantic-search foundation; automated content ingestion arrives in v0.3.0.
+
 ### Prerequisites
 
 - [Anytype](https://anytype.io) desktop (REST API on port 31012) or [anytype-cli](https://github.com/anyproto/anytype-ts/tree/main/dist/cli)
@@ -64,28 +66,15 @@ Aldeia IT, as the publisher of this open-source module, does not determine the p
 
 ### Install
 
-```bash
-# With uv (recommended)
-uv tool install anytype-llm-wiki
-
-# With pip
-pip install anytype-llm-wiki
-```
-
-#### Verify build provenance (optional)
-
-Release wheels are published with a signed [SLSA build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations).
-You can verify that a downloaded artifact was built by this repository's release
-workflow before installing it:
+anytype-llm-wiki is not yet published to PyPI — install from source with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-# Verify a downloaded wheel (substitute the actual version)
-gh attestation verify anytype_llm_wiki-X.Y.Z-py3-none-any.whl \
-  --repo Aldeia-IT/anytype-llm-wiki
+git clone https://github.com/Aldeia-IT/anytype-llm-wiki.git
+cd anytype-llm-wiki
+uv sync
 ```
 
-`gh attestation verify` does not accept globs — verify each artifact file
-individually.
+This creates a project virtualenv with the entry point `anytype-llm-wiki`. Run any command below with `uv run anytype-llm-wiki …` from the repo directory.
 
 ### Configure
 
@@ -105,18 +94,39 @@ EMBED_DIMS=1024                         # must match model output
 QDRANT_COLLECTION=anytype_semantic
 ```
 
+### Verify your environment
+
+`doctor` is a read-only preflight check — it verifies connectivity to Anytype, Qdrant, and Ollama, confirms your embedding model is available, changes nothing, and exits `0` only when every check passes:
+
+```bash
+uv run anytype-llm-wiki doctor      # add --json for machine-readable output
+```
+
+### Provision the wiki schema
+
+`wiki-bootstrap` idempotently creates the typed wiki schema (Types, Properties, a domain-tag taxonomy, and a root Collection) in your Anytype space. It is safe to re-run — it reconciles the space to the expected schema without creating duplicates:
+
+```bash
+uv run anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
+#   --dry-run to preview · --domain-tags a,b,c to customize tags · --json for scripts
+```
+
 ### Register as MCP server
+
+Running `anytype-llm-wiki` with no subcommand starts the MCP server over stdio. Point your MCP client at the project entry point; for a source checkout the simplest robust form is `uv run --directory <repo-path> anytype-llm-wiki`.
 
 **Claude Code:**
 ```bash
-claude mcp add anytype-llm-wiki -e ANYTYPE_API_KEY=your-key -- anytype-llm-wiki
+claude mcp add anytype-llm-wiki -e ANYTYPE_API_KEY=your-key \
+  -- uv run --directory /path/to/anytype-llm-wiki anytype-llm-wiki
 ```
 
 **Claude Desktop / Cursor / other MCP clients** — add to your MCP config:
 ```json
 {
   "anytype-llm-wiki": {
-    "command": "anytype-llm-wiki",
+    "command": "uv",
+    "args": ["run", "--directory", "/path/to/anytype-llm-wiki", "anytype-llm-wiki"],
     "env": {
       "ANYTYPE_API_KEY": "your-key"
     }
@@ -124,37 +134,42 @@ claude mcp add anytype-llm-wiki -e ANYTYPE_API_KEY=your-key -- anytype-llm-wiki
 }
 ```
 
-### Index and search
+### Search your vault
 
-```bash
-# First run: index all objects across all spaces
-# (subsequent runs are incremental — only changed objects are re-indexed)
-```
-
-Once registered, your AI assistant has two new tools (v0.1):
+Once registered, your AI assistant gains three MCP tools:
 
 | Tool | Description |
 |------|-------------|
-| `semantic_search` | Search by meaning. Params: `query`, `space_id?`, `types?`, `limit?` |
-| `reindex_anytype` | Trigger incremental reindex. Params: `space_id?` |
+| `semantic_search` | Search your vault by meaning. Params: `query`, `space_id?`, `types?`, `limit?` |
+| `reindex_anytype` | Trigger an incremental reindex. Params: `space_id?` |
+| `wiki_bootstrap` | Provision the typed wiki schema in a space. Params: `space_id`, `domain_tags?` |
 
-The first `semantic_search` call will prompt a reindex if the collection is empty. For background indexing, see [Auto-reindex](#auto-reindex).
+Indexing is incremental and automatic: the first `semantic_search` triggers a reindex when the collection is empty, and only changed objects are re-embedded afterward. To index continuously in the background, see [Auto-reindex](#auto-reindex).
 
 ## Auto-reindex
 
-For continuous indexing, set up a cron job or launchd service:
+For continuous indexing, run a reindex on a schedule. Reindex is available as the `reindex_anytype` MCP tool and as a one-line module call you can drive from cron or launchd.
 
-**macOS (launchd) — every 30 minutes:**
+**Linux/macOS (cron) — every 30 minutes:**
+```bash
+# Edit with: crontab -e
+*/30 * * * * cd /path/to/anytype-llm-wiki && ANYTYPE_API_KEY=your-key \
+  uv run python -c "from anytype_llm_wiki.indexer import reindex; reindex()"
+```
+
+**macOS (launchd):** a sample plist is provided at `com.aldeia.anytype-llm-wiki-reindex.plist`. Edit the absolute `uv` path (find it with `which uv`), the `--directory` path to your repo checkout, and `ANYTYPE_API_KEY` for your install, then:
 ```bash
 cp com.aldeia.anytype-llm-wiki-reindex.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.aldeia.anytype-llm-wiki-reindex.plist
 ```
 
-**Linux/macOS (cron):**
-```bash
-# Edit with: crontab -e
-*/30 * * * * ANYTYPE_API_KEY=your-key anytype-llm-wiki-reindex
+**Log rotation:** the launchd job appends to `~/Library/Logs/anytype-llm-wiki/reindex.log` every 30 minutes with no built-in rotation, so the file grows unbounded over time. On macOS, rotate it with a `newsyslog.d` fragment:
 ```
+# /etc/newsyslog.d/anytype-llm-wiki.conf
+# logfilename                                                [owner:group]  mode count size  when  flags
+/Users/YOUR_USER/Library/Logs/anytype-llm-wiki/reindex.log                  644   7     1024  *     J
+```
+This keeps 7 compressed (`J` = bzip2) rotations, rolling at ~1 MB. Adjust `count`/`size` to taste, and replace `YOUR_USER` with your username.
 
 ## Performance
 
@@ -193,29 +208,52 @@ Search is fast enough for interactive use. Indexing is fast enough to run freque
 
 **Indexer** — incremental by default. Tracks `last_modified_date` per object in a JSON state file. Only fetches and re-embeds objects that changed since the last run. Cleans up vectors for deleted objects.
 
-**MCP server** — [FastMCP](https://github.com/jlowin/fastmcp) server exposing `semantic_search` and `reindex_anytype` as tools over stdio.
+**MCP server** — [FastMCP](https://github.com/jlowin/fastmcp) server exposing `semantic_search`, `reindex_anytype`, and `wiki_bootstrap` as tools over stdio.
+
+**Wiki bootstrap** — idempotently provisions the typed wiki schema (Types, Properties, a domain-tag taxonomy, and a root Collection) in an Anytype space, with an in-place schema-upgrade path. Keyed by `type_key` so re-runs reconcile rather than duplicate.
+
+**Doctor** — a read-only preflight that checks Anytype, Qdrant, and Ollama connectivity and embedding-model availability, exiting non-zero if anything isn't ready.
+
+## Supply-chain posture
+
+We pin dependencies in two layers so installs are both reproducible and resilient:
+
+- **`uv.lock` — exact, hashed versions.** Every dependency (direct and transitive) is locked to an exact version with a content hash. `uv sync` reproduces the same dependency tree on every machine, and CI runs `uv lock --check` to guarantee the lockfile stays in sync with `pyproject.toml`.
+- **`pyproject.toml` — compatible ranges with a next-major upper bound.** Each direct dependency declares a lower bound and an upper bound at the next major version (for example `>=1.2,<2.0`) so a transitive resolution can't silently cross a major version and break the build.
+
+Together these give adopters reproducible installs today and a controlled, reviewed upgrade path over time.
+
+**Build provenance.** The release workflow builds artifacts cache-free and signs them with a [SLSA build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations). v0.2.0 ships as a git tag and is installed from source (not published to PyPI); once release wheels are published, you'll be able to verify any wheel was built by this repository before trusting it:
+
+```bash
+# Verify a downloaded wheel (substitute the actual version)
+gh attestation verify anytype_llm_wiki-X.Y.Z-py3-none-any.whl \
+  --repo Aldeia-IT/anytype-llm-wiki
+```
+
+(`gh attestation verify` does not accept globs — verify each artifact file individually.)
 
 ## Roadmap
 
-v0.1 ships semantic search over Anytype content. v0.2+ extends into a full LLM wiki (see [#140](https://github.com/Aldeia-IT/aldeia-box/issues/140)):
+v0.2.0 ships the foundation — semantic search plus the typed-wiki bootstrap and a health check. The LLM-wiki pipeline (content ingestion and synthesis) follows in v0.3.0.
 
-**v0.1 (foundation, shipped)**
-- [x] Semantic search via MCP
-- [x] Incremental indexing with change detection
+**v0.2.0 (shipped)**
+- [x] Semantic search via MCP, with incremental indexing and change detection
 - [x] Auto-reindex (launchd/cron)
+- [x] `wiki-bootstrap` — idempotently provision the typed wiki schema (Source, Entity, Concept, Comparison, Query, WikiLog), a domain-tag taxonomy, and a root Collection in an Anytype space
+- [x] `doctor` — read-only environment preflight (Anytype, Qdrant, Ollama, embedding model)
 
-**v0.2+ (LLM wiki pipeline, in design)**
-- [ ] `wiki.bootstrap` — create typed schema (Entity / Concept / Comparison / Query / Source / WikiLog) in an Anytype space
-- [ ] `wiki.ingest` — LLM-driven extraction of entities + concepts from source URLs/files, upserted as typed Anytype Objects with bidirectional Relations
-- [ ] `wiki.query` — synthesized answer with object citations; optional file-back as a Query object
-- [ ] `wiki.lint` — orphans, stale, contradiction drift, oversized objects, tag-taxonomy violations
+**v0.3.0 (LLM wiki pipeline, in design)**
+- [ ] `wiki.ingest` — LLM-driven extraction of entities and concepts from source URLs/files, upserted as typed Anytype Objects with bidirectional Relations
+- [ ] `wiki.query` — synthesized answers with object citations; optional file-back as a Query object
+- [ ] `wiki.lint` — detect orphans, staleness, contradiction drift, oversized objects, and tag-taxonomy violations
 
-Longer-term (beyond v0.2):
+Longer-term
 - [ ] Hybrid search — semantic similarity + keyword matching + metadata filters
 - [ ] Cross-space federation with access control
 - [ ] Relationship-aware retrieval — follow Anytype Relations to pull connected context
 - [ ] Configurable chunking strategies per object type
-- [ ] npm / PyPI publishing
+- [ ] PyPI publishing
 - [ ] Webhook-based indexing when Anytype adds webhook support
 
 ## Comparison with alternatives
@@ -230,6 +268,8 @@ Longer-term (beyond v0.2):
 | Package manager | uv / pip | uv |
 | Body content search | Yes | Yes |
 | **Typed wiki pipeline (v0.2+)** | **Planned** | — |
+
+The official [`anyproto/anytype-mcp`](https://github.com/anyproto/anytype-mcp) exposes Anytype object access over the API but does not provide built-in semantic / vector search. anytype-llm-wiki's embedding-backed semantic retrieval is its core differentiator over that API-access MCP.
 
 ## Contributing
 
@@ -257,4 +297,8 @@ Areas where help is most welcome:
 
 ## License
 
-MIT
+MIT. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution licensing (inbound = outbound).
+
+## Trademarks
+
+Anytype is a trademark of Any Association. This project is not affiliated with, sponsored by, or endorsed by Any Association or the Anytype project. The Anytype name is used solely to identify the platform this software integrates with.

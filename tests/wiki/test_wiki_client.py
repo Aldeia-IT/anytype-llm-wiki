@@ -117,26 +117,33 @@ class TestWikiClientCreateProperty:
 
 
 class TestWikiClientCreateTag:
-    """create_tag POSTs to the appropriate option-creation endpoint."""
+    """create_tag POSTs to /properties/{property_id}/tags and returns the tag dict.
+
+    Contract (verified live against Anytype 2025-11-08): the endpoint is keyed by
+    the property's *id* (not its key) and lives under ``/tags`` (not
+    ``/options``); ``color`` is REQUIRED; the response envelope is ``tag``.
+    """
 
     @respx.mock
-    def test_create_tag_returns_dict(self, monkeypatch):
-        """create_tag must return a dict with tag info."""
+    def test_create_tag_posts_to_tags_endpoint_and_returns_dict(self, monkeypatch):
+        """create_tag must POST to .../properties/{property_id}/tags and unwrap ``tag``."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
         monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        # Match any POST (endpoint shape is flexible per the create_tag contract).
-        # NOTE: the original `respx.post(respx.patterns.M)` form raises a TypeError
-        # at route-registration time in respx 0.23.x (M is a combinator factory,
-        # not a URL). A no-arg `respx.post()` is the idiomatic match-any-POST form
-        # and preserves this test's sole assertion (result is a dict). See debrief.
-        respx.post().mock(return_value=httpx.Response(200, json={
-            "option": {"id": "tag-wiki_ai-research", "name": "wiki_ai-research"}
+        property_id = "prop-wiki_domain_tags"
+        route = respx.post(
+            f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/properties/{property_id}/tags"
+        ).mock(return_value=httpx.Response(201, json={
+            "tag": {"id": "tag-wiki_ai-research", "name": "wiki_ai-research", "color": "blue"}
         }))
         from anytype_llm_wiki.wiki.wiki_client import WikiClient
         client = WikiClient()
-        result = client.create_tag(FAKE_SPACE_ID, "wiki_domain_tags", "wiki_ai-research")
+        result = client.create_tag(
+            FAKE_SPACE_ID, property_id, {"name": "wiki_ai-research", "color": "blue"}
+        )
+        assert route.called
         assert isinstance(result, dict)
+        assert result["id"] == "tag-wiki_ai-research"
 
 
 class TestWikiClientSearch:

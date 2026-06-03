@@ -57,7 +57,20 @@ jobs:
         # the bare token (e.g. "GPL-3.0-only" != "GPL"), so the gate would silently pass a
         # genuinely GPL/AGPL dependency. --partial-match also flags LGPL via "GPL"
         # (acceptable/conservative for an MIT project).
-        run: uvx pip-licenses==5.5.5 --from=mixed --partial-match --fail-on="GPL;AGPL;SSPL;EUPL"
+        #
+        # PROJECT-SCOPED via `uv run`, NOT `uvx`: `uvx` runs pip-licenses in an isolated
+        # ephemeral venv, so it scans only its OWN ~3 deps — never the project tree — making
+        # the gate a vacuous no-op that can never catch a real GPL/AGPL dependency. `uv run`
+        # runs it against the synced project environment (verified: 85 packages). The
+        # `uv sync --frozen --all-extras` step above is what makes that project env available.
+        #
+        # docutils WAIVER (--ignore-packages docutils): docutils:0.22.4 carries a GPL Trove
+        # classifier, but the ONLY GPL-licensed file in the package is an unused Emacs editor
+        # config (rst.el); the package itself is public-domain + BSD and is AGPL-clean (which
+        # matters for this network-served MCP). The waiver is per-package and auditable; the
+        # --fail-on token set is intentionally NOT broadened. Upstream COPYING:
+        # https://docutils.sourceforge.io/COPYING.html
+        run: uv run --frozen --with pip-licenses==5.5.5 python -m piplicenses --from=mixed --partial-match --fail-on="GPL;AGPL;SSPL;EUPL" --ignore-packages docutils
 
       - name: Secret scan (gitleaks)
         # `gitleaks git` scans the full commit HISTORY (requires fetch-depth: 0 on checkout);
@@ -67,12 +80,19 @@ jobs:
           go install github.com/gitleaks/gitleaks/v8@v8.30.1
           "$(go env GOPATH)/bin/gitleaks" git . --redact --exit-code 1
 
-  build-and-publish:
-    name: Build, attest, and publish
+  # The build job carries NO `environment:` so it never pauses for reviewer
+  # approval. Once the maintainer adds required-reviewer protection to the `pypi`
+  # Environment (per docs/releasing.md), only the `publish` job below gates on it —
+  # so a git-tag-only build (PYPI_PUBLISH_ENABLED unset) still runs green and
+  # unattended, attesting provenance without ever waiting for an approval it would
+  # never use.
+  build:
+    name: Build and attest
     runs-on: ubuntu-latest
     needs: audit
-    environment: pypi
     permissions:
+      # id-token + attestations are required by attest-build-provenance to mint
+      # the signed provenance statement; contents:read for checkout.
       id-token: write
       attestations: write
       contents: read
@@ -111,6 +131,47 @@ jobs:
         with:
           subject-path: dist/*
 
+      # Hand the built artifacts to the `publish` job. The publish job downloads
+      # exactly these files, so PyPI receives the same bytes that were attested.
+      - name: Upload distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    # `environment: pypi` gates ONLY this job. When the maintainer adds required
+    # reviewers to the Environment, the approval pause lands here — on the job that
+    # actually publishes — not on every git-only tag build.
+    environment: pypi
+    permissions:
+      # id-token: write is required for PyPI OIDC trusted publishing (no long-lived
+      # token); contents:read for the runner.
+      id-token: write
+      contents: read
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: dist
+          path: dist
+
       - name: Publish to PyPI
-        if: ${{ inputs.skip_publish != true }}
+        # Publish is gated on the repo variable PYPI_PUBLISH_ENABLED (Settings →
+        # Secrets and variables → Actions → Variables). While it is unset/false,
+        # a `v*` tag still runs audit + build + provenance-attest and goes green,
+        # but nothing is published — the project ships git-tag-only for now.
+        # To enable PyPI releases later: (1) configure PyPI trusted publishing
+        # (OIDC) for this repo's release.yml + the `pypi` Environment, then
+        # (2) set PYPI_PUBLISH_ENABLED=true. No workflow edit needed.
+        # `inputs.skip_publish` keeps the workflow_dispatch dry-run publish-free.
+        if: ${{ inputs.skip_publish != true && vars.PYPI_PUBLISH_ENABLED == 'true' }}
         run: uv publish

@@ -35,9 +35,27 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-def _http_get(url: str) -> httpx.Response:
+def _http_get(url: str, headers: dict | None = None) -> httpx.Response:
     """GET a URL with a short timeout. Raises httpx errors on failure."""
-    return httpx.get(url, timeout=_PROBE_TIMEOUT)
+    return httpx.get(url, timeout=_PROBE_TIMEOUT, headers=headers)
+
+
+def _anytype_headers() -> dict:
+    """Auth headers for the Anytype local API (Bearer key + version).
+
+    Without these, every Anytype endpoint replies 401 — which would make the
+    reachability probe report a *running* Anytype as unreachable.
+    """
+    return {
+        "Authorization": f"Bearer {_env('ANYTYPE_API_KEY')}",
+        "Anytype-Version": _env("ANYTYPE_API_VERSION", base_config.ANYTYPE_API_VERSION),
+    }
+
+
+def _qdrant_headers() -> dict | None:
+    """Optional ``api-key`` header for Qdrant when QDRANT_API_KEY is set."""
+    key = _env("QDRANT_API_KEY")
+    return {"api-key": key} if key else None
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +78,7 @@ def _check_anytype_reachable() -> dict:
     url = _env("ANYTYPE_API_URL", base_config.ANYTYPE_API_URL)
     safe_url = util.scrub_credentials(url)
     try:
-        resp = _http_get(f"{url}/v1/spaces")
+        resp = _http_get(f"{url}/v1/spaces", headers=_anytype_headers())
     except httpx.HTTPError as exc:
         return _check(
             "anytype_reachable",
@@ -70,6 +88,14 @@ def _check_anytype_reachable() -> dict:
         )
     if 200 <= resp.status_code < 300:
         return _check("anytype_reachable", "OK", f"Anytype reachable at {safe_url}.")
+    if resp.status_code in (401, 403):
+        return _check(
+            "anytype_reachable",
+            "FAIL",
+            f"Anytype is running at {safe_url} but rejected ANYTYPE_API_KEY "
+            f"(HTTP {resp.status_code}). Regenerate a write-scoped key via "
+            "Anytype Settings → API.",
+        )
     return _check(
         "anytype_reachable",
         "FAIL",
@@ -107,7 +133,7 @@ def _check_qdrant_reachable() -> dict:
     url = _env("QDRANT_URL", base_config.QDRANT_URL)
     safe_url = util.scrub_credentials(url)
     try:
-        resp = _http_get(f"{url}/readyz")
+        resp = _http_get(f"{url}/readyz", headers=_qdrant_headers())
     except httpx.HTTPError as exc:
         return _check(
             "qdrant_reachable",
@@ -127,7 +153,7 @@ def _check_qdrant_collection() -> dict:
     url = _env("QDRANT_URL", base_config.QDRANT_URL)
     collection = _env("QDRANT_COLLECTION", base_config.QDRANT_COLLECTION)
     try:
-        resp = _http_get(f"{url}/collections/{collection}")
+        resp = _http_get(f"{url}/collections/{collection}", headers=_qdrant_headers())
     except httpx.HTTPError as exc:
         return _check(
             "qdrant_collection",
@@ -183,7 +209,10 @@ def _check_ollama_models_pulled(reachable: bool, models: list[dict]) -> dict:
         )
     embed_model = _env("EMBED_MODEL", base_config.EMBED_MODEL)
     names = {m.get("name", "") for m in models}
-    if embed_model in names:
+    # Ollama reports models tagged (e.g. "bge-m3:latest"); an untagged config
+    # value ("bge-m3") must still match. Compare on the base name before ':'.
+    target_base = embed_model.split(":")[0]
+    if embed_model in names or any(n.split(":")[0] == target_base for n in names):
         return _check(
             "ollama_models_pulled",
             "OK",
@@ -230,10 +259,13 @@ def _check_ollama_extraction_model_ram_fit() -> dict:
 def _check_wiki_lock_dir() -> dict:
     path = wiki_config.lock_dir()
     if not os.path.exists(path):
+        # Absent is the normal state on a fresh install — the directory is
+        # created (mode 0o700) on first ingest. Surface as WARN, not FAIL, so a
+        # clean setup is not reported as broken.
         return _check(
             "wiki_lock_dir",
-            "FAIL",
-            f"WIKI_LOCK_DIR {path!r} does not exist. It is created on first "
+            "WARN",
+            f"WIKI_LOCK_DIR {path!r} does not exist yet. It is created on first "
             "ingest; create it now with mode 0o700 if you want to pre-stage.",
         )
     if not os.path.isdir(path):
