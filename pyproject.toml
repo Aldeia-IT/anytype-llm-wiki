@@ -13,7 +13,7 @@ dependencies = [
     # versions (fastmcp 3.x, httpx 0.28, qdrant-client 1.x, psutil 7.x).
     "fastmcp>=2.0.0,<4.0.0",
     "httpx>=0.27.0,<1.0",
-    "qdrant-client>=1.12.0,<2.0.0",
+    "qdrant-client>=1.18.0,<2.0.0",
     "psutil>=5.9,<8.0.0",
 ]
 
