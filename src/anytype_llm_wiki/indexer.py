@@ -86,7 +86,12 @@ def reindex(space_id: str | None = None) -> dict:
 
             points = [
                 PointStruct(
-                    id=str(uuid.uuid4()),
+                    id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{chunk['object_id']}:{i}:{chunk['heading']}",
+                        )
+                    ),
                     vector=vec,
                     payload={
                         "object_id": chunk["object_id"],
@@ -97,7 +102,7 @@ def reindex(space_id: str | None = None) -> dict:
                         "text": chunk["text"],
                     },
                 )
-                for chunk, vec in zip(chunks, vectors)
+                for i, (chunk, vec) in enumerate(zip(chunks, vectors))
             ]
 
             client.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
@@ -138,7 +143,12 @@ def reembed_object(space_id: str, object_id: str, obj: dict) -> dict:
 
     points = [
         PointStruct(
-            id=str(uuid.uuid4()),
+            id=str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{chunk['object_id']}:{i}:{chunk['heading']}",
+                )
+            ),
             vector=vec,
             payload={
                 "object_id": chunk["object_id"],
@@ -149,7 +159,7 @@ def reembed_object(space_id: str, object_id: str, obj: dict) -> dict:
                 "text": chunk["text"],
             },
         )
-        for chunk, vec in zip(chunks, vectors)
+        for i, (chunk, vec) in enumerate(zip(chunks, vectors))
     ]
 
     client.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
