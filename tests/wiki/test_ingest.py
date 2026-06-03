@@ -760,6 +760,12 @@ class TestCreateWikiObjectEmptyBody:
         wiki_ingest(source="https://example.com/new-paper", space_id=FAKE_SPACE_ID)
 
         wiki_type_keys = {"wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query"}
+        # Vacuous-loop guard (addendum item 3): the create path must actually fire,
+        # otherwise the empty-body assertion below would pass without executing.
+        assert any(p.get("type_key") in wiki_type_keys for p in create_payloads), (
+            "AC-P7: expected at least one wiki object create_object call — the create "
+            "path did not execute, so the empty-body assertion would pass vacuously"
+        )
         for payload in create_payloads:
             if payload.get("type_key") in wiki_type_keys:
                 assert not payload.get("body"), (
@@ -958,6 +964,104 @@ class TestWikiActionTagResolution:
             f"AC-T5: 'wiki_action_tag_not_found' must be in warnings when list_tags fails; "
             f"warnings: {warnings}"
         )
+
+
+def _write_valid_patch_decision(tmp_path):
+    """Write a patch-decision.md with the required keys and point ALDEIA_DIR at it."""
+    (tmp_path / "patch-decision.md").write_text(
+        "patch_body_updates: ignored\nimplementation_path: properties_only\n",
+        encoding="utf-8",
+    )
+
+
+class TestIngestEntryPathAcquiresLock:
+    """Addendum HARD GATE 2: wiki_ingest entry path MUST acquire space_ingest_lock.
+
+    CI-runnable (no multiprocessing) — mock at the space_ingest_lock boundary so
+    that acquisition raises, and assert wiki_ingest surfaces
+    [DATA ERROR] ingest_in_progress.
+    """
+
+    @respx.mock
+    def test_entry_path_rejects_when_lock_held(self, monkeypatch, tmp_path):
+        _write_valid_patch_decision(tmp_path)
+        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
+        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "x"}}))
+
+        import anytype_llm_wiki.wiki.ingest as _ingest
+
+        def fake_lock(space_id, source_ref=None):
+            raise RuntimeError(
+                "[DATA ERROR] ingest_in_progress: another ingest is running"
+            )
+
+        monkeypatch.setattr(_ingest, "space_ingest_lock", fake_lock)
+
+        result = _ingest.wiki_ingest(source="https://example.com/x", space_id=FAKE_SPACE_ID)
+        result_str = str(result)
+        assert "ingest_in_progress" in result_str and "[DATA ERROR]" in result_str, (
+            f"Entry path must acquire space_ingest_lock and surface ingest_in_progress; "
+            f"got: {result_str!r}"
+        )
+
+
+class TestIngestEntryPathConsentBeforeOffMachine:
+    """Addendum HARD GATE 1: the consent/ack check MUST sit on the real wiki_ingest
+    path AHEAD of the first off-machine transmission.
+
+    Spy on call ordering: the consent check must fire before any non-local HTTP
+    call when WIKI_EXTRACT_ENDPOINT is non-local and no ack file exists.
+    """
+
+    @respx.mock
+    def test_consent_fires_before_first_off_machine_call(self, monkeypatch, tmp_path):
+        _write_valid_patch_decision(tmp_path)
+        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
+        monkeypatch.setenv(
+            "WIKI_EXTRACT_ENDPOINT", "https://api.openai.com/v1/chat/completions"
+        )
+        # Ack dir with no ack file → consent must fire.
+        ack_dir = tmp_path / "acks"
+        ack_dir.mkdir()
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "src-001"}}))
+
+        import anytype_llm_wiki.wiki.ingest as _ingest
+
+        events: list[str] = []
+
+        def spy_consent(*args, **kwargs):
+            events.append("consent")
+            # Do not actually emit/transmit; just record ordering.
+
+        monkeypatch.setattr(_ingest, "check_remote_endpoint_consent", spy_consent)
+
+        def spy_extract(*args, **kwargs):
+            events.append("extract")  # the first off-machine transmission boundary
+            return {"entities": [], "concepts": []}
+
+        monkeypatch.setattr(_ingest, "extract", spy_extract)
+
+        import tempfile, os as _os
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, dir=str(tmp_path)
+        ) as f:
+            f.write("# Some Heading\n\nSome body content for extraction.\n")
+            md_file = f.name
+        try:
+            _ingest.wiki_ingest(source=md_file, space_id=FAKE_SPACE_ID)
+        finally:
+            _os.unlink(md_file)
+
+        assert "consent" in events, "consent check must run on the wiki_ingest path"
+        if "extract" in events:
+            assert events.index("consent") < events.index("extract"), (
+                f"consent must fire BEFORE the first off-machine transmission (extract); "
+                f"order: {events}"
+            )
 
 
 # ---------------------------------------------------------------------------

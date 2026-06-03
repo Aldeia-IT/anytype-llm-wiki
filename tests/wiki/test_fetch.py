@@ -222,6 +222,32 @@ class TestDNSRebindingTripwire:
         )
 
 
+class TestSSRFBypassEncodings:
+    """Addendum item 4 (CSO-ADV-2): resolved-IP categorical check must reject
+    bypass-encoded loopback/unspecified addresses, not just textual matches.
+    """
+
+    @pytest.mark.parametrize("url", [
+        "http://[::1]:31012/",       # IPv6 loopback on the Anytype port
+        "http://0.0.0.0/",            # unspecified / "this host"
+        "http://2130706433/",         # decimal-encoded 127.0.0.1
+        "http://0x7f.0.0.1/",         # hex-encoded loopback first octet
+    ])
+    def test_bypass_encoded_loopback_rejected(self, url):
+        """Each bypass-encoded loopback/unspecified address must yield a
+        [DATA ERROR] (ssrf_blocked when it resolves, otherwise a non-crashing
+        error string when the resolver cannot parse the numeric form)."""
+        from anytype_llm_wiki.wiki.fetch import fetch_url
+        try:
+            result = fetch_url(url)
+            result_str = str(result)
+        except Exception as exc:
+            result_str = str(exc)
+        assert "[DATA ERROR]" in result_str, (
+            f"Expected [DATA ERROR] for bypass-encoded address {url!r}, got: {result_str!r}"
+        )
+
+
 class TestMaxBytesLimit:
     """§9.1 / master spec: fetch must respect WIKI_FETCH_MAX_BYTES."""
 
