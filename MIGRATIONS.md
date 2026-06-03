@@ -57,8 +57,37 @@ uv run anytype-llm-wiki
 See the [README](README.md) for client registration (Claude Desktop, Cursor,
 Claude Code) and background/auto-reindex setup.
 
+## Upgrading to v0.3.0
+
+v0.3.0 bumps `WIKI_SCHEMA_VERSION` to `0.3.0`. The schema gains the five
+`wiki_action` select tag options and moves the authoritative
+`wiki_schema_version` marker onto the root Collection. **Re-run
+`wiki_bootstrap`** on each existing space before using `wiki_ingest`:
+
+```bash
+uv run anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
+```
+
+Bootstrap is idempotent and non-destructive — it adds the new `wiki_action`
+tags, stamps `wiki_schema_version=0.3.0` on the root Collection, and preserves
+all existing data. Running `wiki_ingest` against a space still on the `0.2.0`
+schema returns `[CONFIG ERROR] wiki_schema_outdated` directing you to re-run
+bootstrap. No data backfill is required.
+
+### New: content ingestion
+
+```bash
+uv run anytype-llm-wiki wiki-ingest --source <url-or-file> --space-id <your-space-id>
+```
+
+Extraction runs on local Ollama by default (`WIKI_EXTRACT_MODEL`, default
+`qwen2.5:7b`). If you set `WIKI_EXTRACT_ENDPOINT` to a non-local provider, source
+content is transmitted off-machine — a one-time consent banner is shown and an
+acknowledgement file is written under
+`~/.local/share/anytype-llm-wiki/extraction-endpoint-acknowledged-*`.
+
 ## Future versions
 
-Migration notes for v0.3.0 and later releases will be appended to this file as
+Migration notes for v0.4.0 and later releases will be appended to this file as
 those versions ship. When upgrading, check this guide for any steps that apply
 to the version you are moving to.

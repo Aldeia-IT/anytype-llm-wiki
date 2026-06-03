@@ -47,11 +47,12 @@ becomes a supported workflow.
     marker object itself; and
   - this diverges from the spec's "marker on the root Collection" wording.
 
-**Status:** acceptable for v0.2.0 in isolation — no shipped consumer reads the
-marker until v0.3.0+. **Must be reconciled before v0.3.0** by either (a)
-implementing the spec as written (stamp the long-lived root Collection and
-restore the upgrade-path PATCH) or (b) amending the spec/ACs with spec-writer
-sign-off. Tracked as a follow-up.
+**Status:** **Resolved in v0.3.0** (ticket #284) via option (a): `wiki_bootstrap`
+now PATCHes `wiki_schema_version` onto the long-lived root Collection
+(`_patch_schema_version_on_collection`), and `_read_schema_version` returns
+`max(collection_value, wikilog_max)` so a stale Collection marker cannot mask a
+newer WikiLog (SF7). The per-run WikiLog stamp is retained as an informational
+fallback; WikiLog accumulation is unchanged but no longer the authoritative marker.
 
 ## 3. `wiki_action` is not written on the bootstrap WikiLog entry
 
@@ -62,8 +63,11 @@ pre-existing tag (option) id; the bootstrap WikiLog write omits it rather than
 fail. The spec defines `wiki_action` as the primary WikiLog discriminator
 (grouped on by the v0.5.0 lint). No v0.2.0 consumer depends on it.
 
-**Status:** tracked for the version that first reads WikiLog (v0.5.0). Fix is to
-create the `wiki_action` "bootstrap" tag during bootstrap and reference its id.
+**Status:** **Resolved in v0.3.0** (ticket #284): `wiki_bootstrap` now creates all
+five `wiki_action` tag options (`ingest`/`query`/`lint`/`bootstrap`/`archive`,
+idempotent/union-only via `_ensure_wiki_action_tags`) and stamps the bootstrap
+WikiLog with `wiki_action = bootstrap`; `wiki_ingest` stamps `wiki_action = ingest`
+(degraded-but-written if tag resolution fails).
 
 ## 4. Anytype ignores PATCH of an object `body` (returns 2xx, does not persist)
 
