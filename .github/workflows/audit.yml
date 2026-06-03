@@ -28,7 +28,9 @@ jobs:
 
       # Full-tree audit (includes dev/test deps that run on CI runners), pinned tool.
       - name: Export full lockfile for audit
-        run: uv export --format requirements-txt --all-extras > /tmp/requirements-audit-full.txt
+        # --no-emit-project: exclude the local project (uv exports it as editable
+        # `-e .`, which pip-audit cannot install under --require-hashes).
+        run: uv export --format requirements-txt --all-extras --no-emit-project > /tmp/requirements-audit-full.txt
 
       - name: Audit dependencies
         run: uvx pip-audit@2.10.0 -r /tmp/requirements-audit-full.txt
