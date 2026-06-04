@@ -17,6 +17,12 @@ DEFAULT_WIKI_LOCK_DIR = os.path.expanduser("~/.local/share/anytype-llm-wiki/lock
 # Placeholder extraction model for the v0.3.0 extraction pipeline.
 DEFAULT_WIKI_EXTRACT_MODEL = "qwen2.5:7b"
 
+# Whether the extraction model emits reasoning ("thinking") tokens. Default False:
+# the standard setup runs a thinking-capable model (e.g. qwen3.5-mlx) in
+# non-thinking mode for extraction — reasoning tokens add latency and output bloat
+# without improving structured extraction. Harmless (no-op) for non-thinking models.
+DEFAULT_WIKI_EXTRACT_THINK = False
+
 # Default per-request read timeout (seconds) for the extraction model call.
 # 600s (10 min): large local models routinely take several minutes on a sizable
 # source on reference hardware; a lower value trips the read timeout mid-generation.
@@ -57,6 +63,19 @@ def extract_timeout() -> float:
     except (TypeError, ValueError):
         return DEFAULT_WIKI_EXTRACT_TIMEOUT
     return val if val > 0 else DEFAULT_WIKI_EXTRACT_TIMEOUT
+
+
+def extract_think() -> bool:
+    """Resolve WIKI_EXTRACT_THINK — whether the extraction model emits reasoning
+    ("thinking") tokens.
+
+    Defaults to False so a thinking-capable model (e.g. qwen3.5-mlx) runs terse
+    for extraction. Accepts 1/true/yes/on (case-insensitive) to enable.
+    """
+    raw = os.environ.get("WIKI_EXTRACT_THINK")
+    if raw is None:
+        return DEFAULT_WIKI_EXTRACT_THINK
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def log_level() -> str:

@@ -424,3 +424,36 @@ class TestExtractTimeoutConfig:
         monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "0")
         from anytype_llm_wiki.wiki import config
         assert config.extract_timeout() == 600.0
+
+
+class TestExtractionThink:
+    """Extraction must send think=false by default so a thinking-capable model
+    (qwen3.5-mlx) runs terse — otherwise it over-generates reasoning tokens and
+    extraction is slow. Harmless no-op for non-thinking models (verified live)."""
+
+    @respx.mock
+    def test_extract_sends_think_false_by_default(self, monkeypatch):
+        import json as _json
+        monkeypatch.delenv("WIKI_EXTRACT_THINK", raising=False)
+        captured = []
+        def on_post(request, **kwargs):
+            captured.append(_json.loads(request.content))
+            return httpx.Response(200, json={"response": _json.dumps({"entities": [], "concepts": []})})
+        respx.post().mock(side_effect=on_post)
+        from anytype_llm_wiki.wiki.extraction import extract
+        extract(markdown="# Topic\n\nSome text.", space_id=FAKE_SPACE_ID)
+        assert captured, "extraction must call the Ollama endpoint"
+        assert captured[0].get("think") is False, f"expected think=false; got {captured[0].get('think')!r}"
+
+    @respx.mock
+    def test_extract_respects_think_env(self, monkeypatch):
+        import json as _json
+        monkeypatch.setenv("WIKI_EXTRACT_THINK", "true")
+        captured = []
+        def on_post(request, **kwargs):
+            captured.append(_json.loads(request.content))
+            return httpx.Response(200, json={"response": _json.dumps({"entities": [], "concepts": []})})
+        respx.post().mock(side_effect=on_post)
+        from anytype_llm_wiki.wiki.extraction import extract
+        extract(markdown="# Topic\n\nSome text.", space_id=FAKE_SPACE_ID)
+        assert captured and captured[0].get("think") is True

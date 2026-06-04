@@ -87,6 +87,7 @@ def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response 
     """POST to {base}/api/generate then /api/chat. Returns (parsed_or_None, last_resp)."""
     prompt = _load_prompt().replace("{source}", markdown)
     model = config.extract_model()
+    think = config.extract_think()
     timeout = httpx.Timeout(connect=5, read=config.extract_timeout(), write=10, pool=5)
     last_resp: httpx.Response | None = None
 
@@ -98,6 +99,7 @@ def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response 
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",
+                "think": think,
                 "options": _DETERMINISTIC_OPTS,
             },
         )
@@ -116,6 +118,7 @@ def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response 
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
                 "format": "json",
+                "think": think,
                 "options": _DETERMINISTIC_OPTS,
             },
         )
