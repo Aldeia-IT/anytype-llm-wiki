@@ -1,6 +1,6 @@
 ---
 name: anytype-llm-wiki-wiki-remember-llm-assisted-agent
-status: DRAFT
+status: SPEC
 issue: 289
 repo: anytype-llm-wiki
 target_repo: anytype-llm-wiki
@@ -11,7 +11,7 @@ parent_spec: 284-anytype-llm-wiki-v0-3-0-wiki-ingest-compile-pipeli
 
 # anytype-llm-wiki v0.3.1 — `wiki_remember` LLM-Assisted Agent Memory Write
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-04
 **Author:** spec-writer agent
 **Review rounds:** 0
