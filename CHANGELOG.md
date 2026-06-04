@@ -7,11 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Roadmap
+### User-visible changes
 
-- **Coming in v0.3.0: automated content ingestion** — LLM-driven extraction of
-  entities and concepts from your sources into typed Anytype Objects with
-  bidirectional Relations, turning the v0.2.0 foundation into a full LLM wiki.
+- **`wiki-ingest` command / `wiki_ingest` MCP tool** — compile a source (URL or
+  local file) into curated, deduplicated, interlinked wiki Objects with
+  provenance. Fetches the source (with SSRF protections), derives entity
+  candidates, enriches them via local Ollama extraction (`WIKI_EXTRACT_MODEL`,
+  default `qwen2.5:7b`), resolves against existing objects, writes typed
+  bidirectional relations, records a WikiLog entry, and auto-reindexes so the
+  new knowledge is immediately retrievable via `semantic_search`.
+- **Curated wiki knowledge is now searchable** — the chunker embeds designated
+  wiki text properties (`wiki_facts`, `wiki_description`, `wiki_definition`, …),
+  closing the v0.2.0 gap where property-only objects produced zero chunks and
+  were invisible to `semantic_search`.
+- **Local-first by default** — extraction targets on-device Ollama; pointing
+  `WIKI_EXTRACT_ENDPOINT` at a non-local provider fires a one-time consent
+  banner before any source content leaves the machine.
+
+### Internal changes
+
+- Schema bumped to `0.3.0`; `wiki_bootstrap` now stamps `wiki_schema_version` on
+  the root Collection (authoritative, with WikiLog fallback) and creates the
+  five `wiki_action` select tags — reconciling known-limitations #2 and #3.
+- New modules: `wiki/fetch.py`, `wiki/extraction.py`, `wiki/ingest.py`,
+  `wiki/prompts/extraction.md`. New dependencies: `markdownify`, `pydantic`.
 
 ## [0.2.0] - 2026-05-30
 

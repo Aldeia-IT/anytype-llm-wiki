@@ -44,6 +44,12 @@ _ROOT_COLLECTION_TYPE_KEY = "collection"
 _ROOT_COLLECTION_NAME = "Wiki"
 _DOMAIN_TAGS_PROPERTY_KEY = types_schema.DOMAIN_TAGS_PROPERTY_KEY
 _SCHEMA_VERSION_PROPERTY_KEY = types_schema.SCHEMA_VERSION_PROPERTY_KEY
+_ACTION_PROPERTY_KEY = "wiki_action"
+
+# The five canonical wiki_action select values (Decision 3). Seeded as tags on
+# the wiki_action property so every wiki tool can stamp its WikiLog with the
+# action that produced it.
+_WIKI_ACTION_TAGS = ["ingest", "query", "lint", "bootstrap", "archive"]
 
 # Anytype property formats → the typed field name used in a PropertyLinkWithValue
 # entry when writing an object.
@@ -301,6 +307,16 @@ def _run_bootstrap(
         if key:
             prop_map[key] = p.get("id")
 
+    # Inline-created properties may not yet surface an id via list_properties on a
+    # first bootstrap. Anytype keys the tag endpoints by property key OR id, so
+    # fall back to the property key for any known wiki property whose id is
+    # unresolved — this keeps domain/action tag creation reachable.
+    for type_def in types_schema.WIKI_TYPES:
+        for prop in type_def.get("properties", []):
+            pk = prop["property_key"]
+            if not prop_map.get(pk):
+                prop_map[pk] = pk
+
     properties_added: list[str] = []
     seen_prop_keys: set[str] = set()
     for type_def in types_schema.WIKI_TYPES:
@@ -371,6 +387,9 @@ def _run_bootstrap(
             "id could not be resolved after type creation."
         )
 
+    # --- wiki_action select tags (Decision 3) --------------------------------
+    action_tag_map = _ensure_wiki_action_tags(client, space_id, prop_map, result)
+
     # --- Root Collection -----------------------------------------------------
     if root_collection is not None:
         collection_id = root_collection.get("id")
@@ -385,6 +404,18 @@ def _run_bootstrap(
     result["root_collection_id"] = collection_id
     if collection_id:
         result["root_collection_deeplink"] = _object_deeplink(space_id, collection_id)
+        # Primary schema marker (Decision 2, Option a): stamp the running version
+        # onto the root Collection. Best-effort — the WikiLog stamp below is the
+        # retained fallback. A patch failure must not fail bootstrap.
+        patched = _patch_schema_version_on_collection(
+            client, space_id, collection_id, types_schema.WIKI_SCHEMA_VERSION
+        )
+        if not patched:
+            logger.warning(
+                "wiki_schema_version marker PATCH on root Collection %s failed; "
+                "relying on WikiLog stamp fallback.",
+                collection_id,
+            )
 
     # --- schema_upgrade section ---------------------------------------------
     if is_upgrade:
@@ -407,15 +438,19 @@ def _run_bootstrap(
         + len(result["tags_created"])
     )
     try:
-        log_props = _build_props_list(
-            [
-                ("wiki_subject", "text", _ROOT_COLLECTION_NAME),
-                ("wiki_objects_created", "number", total_created),
-                ("wiki_timestamp", "date", _now_iso()),
-                ("wiki_notes", "text", f"schema_version={types_schema.WIKI_SCHEMA_VERSION}"),
-                (_SCHEMA_VERSION_PROPERTY_KEY, "text", types_schema.WIKI_SCHEMA_VERSION),
-            ]
-        )
+        log_entries: list[tuple[str, str, object]] = [
+            ("wiki_subject", "text", _ROOT_COLLECTION_NAME),
+            ("wiki_objects_created", "number", total_created),
+            ("wiki_timestamp", "date", _now_iso()),
+            ("wiki_notes", "text", f"schema_version={types_schema.WIKI_SCHEMA_VERSION}"),
+            (_SCHEMA_VERSION_PROPERTY_KEY, "text", types_schema.WIKI_SCHEMA_VERSION),
+        ]
+        # Stamp wiki_action=bootstrap when the tag id is resolvable (Decision 3,
+        # AC-T3). Tolerant: an unresolved tag simply omits the action prop.
+        bootstrap_tag_id = action_tag_map.get("bootstrap")
+        if bootstrap_tag_id:
+            log_entries.append((_ACTION_PROPERTY_KEY, "select", bootstrap_tag_id))
+        log_props = _build_props_list(log_entries)
         log_id = _create_object(
             client,
             space_id,
@@ -434,6 +469,90 @@ def _run_bootstrap(
         )
 
     return result
+
+
+def _read_schema_version(client, space_id: str) -> str | None:
+    """Read the live schema-version marker for a space (Decision 2, Option a).
+
+    Primary source: the root "Wiki" Collection's ``wiki_schema_version`` property
+    (G4 guard — BOTH name=='Wiki' AND type.key=='collection' required so a stray
+    object named "Wiki" cannot spoof the marker). Fallback: the maximum version
+    across all ``wiki_log`` objects. Returns ``max(collection, wikilog)`` so a
+    stale collection marker cannot mask a newer WikiLog (SF7); None if neither
+    carries a marker.
+    """
+    objects = client.list_objects(space_id)
+
+    collection_value: str | None = None
+    wikilog_max: str | None = None
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        type_key = obj.get("type", {}).get("key")
+        if obj.get("name") == _ROOT_COLLECTION_NAME and type_key == _ROOT_COLLECTION_TYPE_KEY:
+            collection_value = _found_schema_version(obj)
+        if type_key == "wiki_log":
+            wikilog_max = _max_version(wikilog_max, _found_schema_version(obj))
+
+    return _max_version(collection_value, wikilog_max)
+
+
+def _patch_schema_version_on_collection(
+    client, space_id: str, collection_id: str, version: str
+) -> bool:
+    """Best-effort PATCH of ``wiki_schema_version`` onto the root Collection.
+
+    Returns True on success, False on any exception. The caller treats failure
+    as non-fatal (the WikiLog stamp remains the fallback marker).
+    """
+    try:
+        client.update_object(
+            space_id,
+            collection_id,
+            {"properties": [{"key": _SCHEMA_VERSION_PROPERTY_KEY, "text": version}]},
+        )
+        return True
+    except Exception:  # noqa: BLE001 — best-effort marker write, must not fail bootstrap
+        return False
+
+
+def _ensure_wiki_action_tags(
+    client, space_id: str, prop_map: dict, result: dict
+) -> dict[str, str]:
+    """Seed the five wiki_action select tags idempotently (Decision 3).
+
+    Records created/skipped tags into ``result`` and returns a name→id map built
+    from a final ``list_tags`` read. Returns {} if the wiki_action property id is
+    unresolved.
+    """
+    action_pid = prop_map.get(_ACTION_PROPERTY_KEY)
+    if not action_pid:
+        return {}
+
+    existing = {t["name"] for t in client.list_tags(space_id, action_pid) if t.get("name")}
+    palette = types_schema.TAG_COLOR_PALETTE
+
+    for i, name in enumerate(_WIKI_ACTION_TAGS):
+        if name in existing:
+            result["tags_skipped"].append(
+                {
+                    "property_key": _ACTION_PROPERTY_KEY,
+                    "tag": name,
+                    "reason": "already_exists",
+                }
+            )
+            continue
+        color = palette[i % len(palette)]
+        tag_id = _create_tag(client, space_id, action_pid, name, color)
+        result["tags_created"].append(
+            {"property_key": _ACTION_PROPERTY_KEY, "tag": name, "tag_id": tag_id}
+        )
+
+    return {
+        t["name"]: t.get("id")
+        for t in client.list_tags(space_id, action_pid)
+        if t.get("name")
+    }
 
 
 def _build_props_list(entries: list[tuple[str, str, object]]) -> list[dict]:

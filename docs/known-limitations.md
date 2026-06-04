@@ -47,11 +47,12 @@ becomes a supported workflow.
     marker object itself; and
   - this diverges from the spec's "marker on the root Collection" wording.
 
-**Status:** acceptable for v0.2.0 in isolation — no shipped consumer reads the
-marker until v0.3.0+. **Must be reconciled before v0.3.0** by either (a)
-implementing the spec as written (stamp the long-lived root Collection and
-restore the upgrade-path PATCH) or (b) amending the spec/ACs with spec-writer
-sign-off. Tracked as a follow-up.
+**Status:** **Resolved in v0.3.0** (ticket #284) via option (a): `wiki_bootstrap`
+now PATCHes `wiki_schema_version` onto the long-lived root Collection
+(`_patch_schema_version_on_collection`), and `_read_schema_version` returns
+`max(collection_value, wikilog_max)` so a stale Collection marker cannot mask a
+newer WikiLog (SF7). The per-run WikiLog stamp is retained as an informational
+fallback; WikiLog accumulation is unchanged but no longer the authoritative marker.
 
 ## 3. `wiki_action` is not written on the bootstrap WikiLog entry
 
@@ -62,8 +63,11 @@ pre-existing tag (option) id; the bootstrap WikiLog write omits it rather than
 fail. The spec defines `wiki_action` as the primary WikiLog discriminator
 (grouped on by the v0.5.0 lint). No v0.2.0 consumer depends on it.
 
-**Status:** tracked for the version that first reads WikiLog (v0.5.0). Fix is to
-create the `wiki_action` "bootstrap" tag during bootstrap and reference its id.
+**Status:** **Resolved in v0.3.0** (ticket #284): `wiki_bootstrap` now creates all
+five `wiki_action` tag options (`ingest`/`query`/`lint`/`bootstrap`/`archive`,
+idempotent/union-only via `_ensure_wiki_action_tags`) and stamps the bootstrap
+WikiLog with `wiki_action = bootstrap`; `wiki_ingest` stamps `wiki_action = ingest`
+(degraded-but-written if tag resolution fails).
 
 ## 4. Anytype ignores PATCH of an object `body` (returns 2xx, does not persist)
 
@@ -92,3 +96,18 @@ endpoint. `WikiClient.search(... filter={"type_key": X})` should not be relied
 on for type scoping until the correct filter contract is confirmed.
 
 **Status:** tracked for the version that uses Anytype-native filtered search.
+
+## 6. Re-ingest idempotency depends on deterministic extraction
+
+`wiki_ingest` is idempotent on re-ingest of the **same** source — a second ingest
+creates 0 new objects and reuses the existing Source — **because extraction uses
+deterministic decoding** (`temperature: 0` + fixed seed), so the same source
+yields the same entity titles, which entity resolution (exact + fuzzy title
+match) then resolves to the existing objects. Verified live and pinned by
+`tests/wiki/test_ingest.py::TestReingestIdempotency`.
+
+Residual caveats:
+- If `WIKI_EXTRACT_ENDPOINT` points at a non-deterministic remote model, re-extraction may vary and produce near-duplicate entities on re-ingest.
+- Resolution is title-based (exact + fuzzy ≥ 0.92; the embedding sweep is not yet implemented), so genuinely different surface forms of the same concept across *different* sources can still create separate objects.
+
+Both are surfaced by the v0.5.0 lint potential-duplicate sweep (aldeia-box#286).

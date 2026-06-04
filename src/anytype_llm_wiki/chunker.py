@@ -2,24 +2,50 @@
 
 import re
 
+from .wiki.util import strip_control_chars
+
 
 MAX_CHUNK_CHARS = 1500  # ~375 tokens, well within bge-m3's 8192 token limit
 
+# Wiki text properties whose values are embedded when an object has no markdown
+# body (ingest-authored objects store prose in properties, not the body). Each
+# key maps to a synthetic heading so the chunk reads like a body section.
+WIKI_TEXT_PROPERTY_KEYS = frozenset({
+    "wiki_facts", "wiki_description", "wiki_definition", "wiki_open_questions",
+    "wiki_dimensions", "wiki_verdict", "wiki_question", "wiki_answer",
+})
+WIKI_PROPERTY_HEADING = {
+    "wiki_facts": "Facts", "wiki_description": "Description",
+    "wiki_definition": "Definition", "wiki_open_questions": "Open Questions",
+    "wiki_dimensions": "Dimensions", "wiki_verdict": "Verdict",
+    "wiki_question": "Question", "wiki_answer": "Answer",
+}
+
 
 def chunk_object(obj: dict) -> list[dict]:
-    """Split an Anytype object's markdown body into chunks with metadata.
+    """Split an Anytype object into chunks with metadata.
 
     Each chunk gets: object_id, space_id, object_name, type_key, heading, text.
-    """
-    markdown = obj.get("markdown", "") or ""
-    if not markdown.strip():
-        return []
 
-    object_id = obj["id"]
-    space_id = obj["space_id"]
+    When a markdown body is present it is the sole source of chunks. When the
+    body is empty/absent, allowlisted wiki text properties are embedded instead
+    (dedup guard: a body and its properties are never both emitted).
+    """
+    object_id = obj.get("id", "")
+    space_id = obj.get("space_id", "")
     object_name = obj.get("name", "")
     type_key = obj.get("type", {}).get("key", "unknown")
 
+    markdown = obj.get("markdown", "") or ""
+    if markdown.strip():
+        return _chunk_body(markdown, object_id, space_id, object_name, type_key)
+
+    return _chunk_properties(obj, object_id, space_id, object_name, type_key)
+
+
+def _chunk_body(
+    markdown: str, object_id: str, space_id: str, object_name: str, type_key: str
+) -> list[dict]:
     sections = _split_by_headings(markdown)
     chunks = []
 
@@ -29,6 +55,33 @@ def chunk_object(obj: dict) -> list[dict]:
             continue
         # Split oversized sections by paragraphs
         for sub_text in _split_large(text):
+            chunks.append({
+                "object_id": object_id,
+                "space_id": space_id,
+                "object_name": object_name,
+                "type_key": type_key,
+                "heading": heading,
+                "text": sub_text,
+            })
+
+    return chunks
+
+
+def _chunk_properties(
+    obj: dict, object_id: str, space_id: str, object_name: str, type_key: str
+) -> list[dict]:
+    chunks = []
+    for prop in obj.get("properties", []):
+        if not isinstance(prop, dict):
+            continue
+        key = prop.get("key")
+        if key not in WIKI_TEXT_PROPERTY_KEYS:
+            continue
+        text = strip_control_chars(prop.get("text") or "")
+        if not text.strip():
+            continue
+        heading = WIKI_PROPERTY_HEADING[key]
+        for sub_text in _split_large(text.strip()):
             chunks.append({
                 "object_id": object_id,
                 "space_id": space_id,

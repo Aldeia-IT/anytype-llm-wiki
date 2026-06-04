@@ -808,10 +808,6 @@ class TestBootstrapPatchDecisionScaffolding:
         from anytype_llm_wiki.wiki.util import read_patch_decision
         assert callable(read_patch_decision)
 
-    @pytest.mark.xfail(
-        reason="v0.3.0 wiki_ingest not yet implemented; pre-check activated at v0.3.0",
-        strict=False,
-    )
     def test_wiki_ingest_returns_error_on_missing_patch_decision(self, monkeypatch, tmp_path):
         """wiki_ingest must return [CONFIG ERROR] patch_decision_missing_or_invalid when patch-decision.md is absent."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
@@ -854,6 +850,601 @@ class TestBootstrapLiveAPI:
         result = wiki_bootstrap(space_id=space_id)
         assert result.get("status") in ("ok", "partial"), (
             f"Live bootstrap returned unexpected status: {result.get('status')}"
+        )
+
+
+# =============================================================================
+# v0.3.0 NEW TESTS — Schema Marker Read Order (§9.3, Decision 2)
+# These tests FAIL until bootstrap.py is extended with _read_schema_version
+# and the schema-marker PATCH on the root Collection (Option a, V4 PASS assumed).
+# =============================================================================
+
+
+class TestSchemaVersionBumped:
+    """Guard: WIKI_SCHEMA_VERSION must be '0.3.0' (B1, prerequisite of Decision 2)."""
+
+    def test_wiki_schema_version_is_030(self):
+        """B1: WIKI_SCHEMA_VERSION must be bumped from '0.2.0' to '0.3.0'.
+
+        This is a named prerequisite of Decision 2 (§4.2) — the entire marker
+        and migration design depends on the code version being '0.3.0'.
+        Covers: §10.1 checklist item, B1.
+        """
+        from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
+        assert WIKI_SCHEMA_VERSION == "0.3.0", (
+            f"WIKI_SCHEMA_VERSION must be '0.3.0' (B1 prerequisite of Decision 2); "
+            f"got: {WIKI_SCHEMA_VERSION!r}. Bump types_schema.py:25."
+        )
+
+
+class TestReadSchemaVersion:
+    """AC-M2/M3 (SF6/SF7): _read_schema_version helper — read order tests (§9.3)."""
+
+    def test_read_schema_version_from_collection(self):
+        """AC-M2: _read_schema_version returns version when root Collection carries
+        wiki_schema_version (primary read path, Decision 2 Option a).
+
+        Guards: name=='Wiki' AND type.key=='collection' (G4 type.key guard).
+        Covers: §9.3 test_read_schema_version_from_collection, AC-M2.
+        """
+        from anytype_llm_wiki.wiki.bootstrap import _read_schema_version
+
+        class FakeClient:
+            def list_objects(self, space_id):
+                return [
+                    {
+                        "id": "coll-001",
+                        "name": "Wiki",
+                        "type": {"key": "collection"},
+                        "properties": [{"key": "wiki_schema_version", "text": "0.3.0"}],
+                    }
+                ]
+
+        result = _read_schema_version(FakeClient(), "space-test")
+        assert result == "0.3.0", (
+            f"AC-M2: _read_schema_version must return '0.3.0' from root Collection; got: {result!r}"
+        )
+
+    def test_read_schema_version_ignores_nonwiki_named_wiki(self):
+        """AC-M2/G4: non-collection object named 'Wiki' carrying a fake marker is ignored.
+
+        The G4 type.key guard requires BOTH name=='Wiki' AND type.key=='collection'.
+        Covers: §9.3 test_read_schema_version_ignores_nonwiki_named_wiki.
+        """
+        from anytype_llm_wiki.wiki.bootstrap import _read_schema_version
+
+        class FakeClient:
+            def list_objects(self, space_id):
+                return [
+                    {
+                        "id": "not-a-collection",
+                        "name": "Wiki",
+                        "type": {"key": "note"},  # wrong type — must be ignored!
+                        "properties": [{"key": "wiki_schema_version", "text": "9.9.9"}],
+                    }
+                ]
+
+        result = _read_schema_version(FakeClient(), "space-test")
+        assert result != "9.9.9", (
+            f"G4: non-collection object named 'Wiki' must NOT be adopted as marker source; "
+            f"_read_schema_version returned: {result!r}"
+        )
+
+    def test_read_schema_version_fallback_to_wikilog(self):
+        """AC-M3 (SF6): no collection marker; wiki_log objects carry versions →
+        scan-loop _max_version returns highest (AC-M3).
+
+        Scan restricted to type.key=='wiki_log' objects.
+        Covers: §9.3 test_read_schema_version_fallback_to_wikilog.
+        """
+        from anytype_llm_wiki.wiki.bootstrap import _read_schema_version
+
+        class FakeClient:
+            def list_objects(self, space_id):
+                return [
+                    {
+                        "id": "coll-001",
+                        "name": "Wiki",
+                        "type": {"key": "collection"},
+                        "properties": [],  # no wiki_schema_version
+                    },
+                    {
+                        "id": "log-001",
+                        "type": {"key": "wiki_log"},
+                        "properties": [{"key": "wiki_schema_version", "text": "0.2.0"}],
+                    },
+                    {
+                        "id": "log-002",
+                        "type": {"key": "wiki_log"},
+                        "properties": [{"key": "wiki_schema_version", "text": "0.3.0"}],
+                    },
+                ]
+
+        result = _read_schema_version(FakeClient(), "space-test")
+        assert result == "0.3.0", (
+            f"AC-M3: _read_schema_version must return '0.3.0' (max of wiki_log versions); "
+            f"got: {result!r}"
+        )
+
+    def test_read_schema_version_max_of_collection_and_wikilog(self):
+        """AC-M3/SF7: stale collection marker (0.2.0) + newer WikiLog (0.3.0) →
+        returns '0.3.0' (max wins — stale collection cannot mask newer WikiLog).
+
+        Covers: §9.3 test_read_schema_version_max_of_collection_and_wikilog, SF7.
+        """
+        from anytype_llm_wiki.wiki.bootstrap import _read_schema_version
+
+        class FakeClient:
+            def list_objects(self, space_id):
+                return [
+                    {
+                        "id": "coll-001",
+                        "name": "Wiki",
+                        "type": {"key": "collection"},
+                        "properties": [{"key": "wiki_schema_version", "text": "0.2.0"}],  # stale
+                    },
+                    {
+                        "id": "log-001",
+                        "type": {"key": "wiki_log"},
+                        "properties": [{"key": "wiki_schema_version", "text": "0.3.0"}],  # newer
+                    },
+                ]
+
+        result = _read_schema_version(FakeClient(), "space-test")
+        assert result == "0.3.0", (
+            f"SF7: stale collection marker must not mask newer WikiLog; "
+            f"_read_schema_version returned: {result!r} (expected '0.3.0')"
+        )
+
+    def test_read_schema_version_none_when_absent(self):
+        """AC-M3: no collection marker AND no WikiLog markers → returns None.
+
+        Covers: §9.3 test_read_schema_version_none_when_absent.
+        """
+        from anytype_llm_wiki.wiki.bootstrap import _read_schema_version
+
+        class FakeClient:
+            def list_objects(self, space_id):
+                return [
+                    {
+                        "id": "coll-001",
+                        "name": "Wiki",
+                        "type": {"key": "collection"},
+                        "properties": [],  # no marker
+                    },
+                    {
+                        "id": "note-001",
+                        "type": {"key": "note"},
+                        "properties": [{"key": "name", "text": "Some note"}],
+                    },
+                ]
+
+        result = _read_schema_version(FakeClient(), "space-test")
+        assert result is None, (
+            f"_read_schema_version must return None when no marker exists; got: {result!r}"
+        )
+
+
+class TestBootstrapSchemaMarkerV030:
+    """AC-M1a (Option a, V4 PASS): bootstrap patches root Collection with wiki_schema_version=0.3.0.
+
+    NOTE (V4 sequencing, addendum item 5 / QA-ADV-3): these tests are authored for
+    Option (a) — root-Collection marker — as the V4-SELECTED PRIMARY design
+    ("ships as the primary design", spec §10.2 V4 PASS). If V4 FAILs in the live
+    pre-release probe, the implementation MUST pivot to Option (b-1) and REPLACE
+    these tests with the wiki:schema-marker WikiLog singleton tests.
+    Only ONE marker mechanism ships at release time (SF9 guard).
+    """
+
+    @respx.mock
+    def test_bootstrap_patches_collection_on_fresh_space(self, monkeypatch):
+        """AC-M1a (Option a — gated on V4 PASS): after wiki_bootstrap on a clean space,
+        update_object is called with wiki_schema_version='0.3.0' payload on the collection id.
+
+        Covers: §9.3 test_bootstrap_patches_collection_on_fresh_space, AC-M1a.
+        V4 PASS gate: if V4 fails, pivot to Option b-1 and swap this test.
+        """
+        import json as _json
+
+        schema_patch_calls: list[dict] = []
+
+        def capture_patch(request, **kwargs):
+            path = str(request.url)
+            try:
+                payload = _json.loads(request.content)
+                if "coll-" in path or "objects" in path:
+                    schema_patch_calls.append({"path": path, "payload": payload})
+            except Exception:
+                pass
+            return httpx.Response(200, json={"object": {"id": "coll-wiki-root-001", "name": "Wiki"}})
+
+        def mock_get(request, **kwargs):
+            path = str(request.url)
+            if "objects" in path:
+                return httpx.Response(200, json={
+                    "data": [
+                        {
+                            "id": "coll-wiki-root-001",
+                            "name": "Wiki",
+                            "type": {"key": "collection"},
+                            "properties": [],
+                        }
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "log-001", "name": "bootstrap"},
+        }))
+        respx.patch().mock(side_effect=capture_patch)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        # Assert update_object called with wiki_schema_version=0.3.0 payload on the collection
+        schema_patches = [
+            c for c in schema_patch_calls
+            if any(
+                p.get("key") == "wiki_schema_version" and p.get("text") == "0.3.0"
+                for p in c["payload"].get("properties", [])
+            )
+        ]
+        assert len(schema_patches) >= 1, (
+            f"AC-M1a: update_object must be called with wiki_schema_version='0.3.0' on the "
+            f"root Collection; patch calls: {schema_patch_calls}"
+        )
+
+    @respx.mock
+    def test_bootstrap_upgrade_from_v020(self, monkeypatch):
+        """AC-M5 / test_bootstrap_upgrade_from_v020: list_objects returns v0.2.0 WikiLog marker,
+        no collection marker → upgrade path runs, update_object called.
+        Requires WIKI_SCHEMA_VERSION=='0.3.0' (B1).
+
+        Covers: §9.3 test_bootstrap_upgrade_from_v020.
+        NOTE: V4 PASS — Option (a) test body. If V4 FAILs, pivot to Option b-1.
+        """
+        from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
+        assert WIKI_SCHEMA_VERSION == "0.3.0", (
+            f"B1: WIKI_SCHEMA_VERSION must be '0.3.0' to run upgrade-from-v0.2.0 test; "
+            f"got: {WIKI_SCHEMA_VERSION!r}"
+        )
+
+        update_called = {"yes": False}
+
+        def capture_patch(request, **kwargs):
+            import json as _json
+            try:
+                payload = _json.loads(request.content)
+                props = payload.get("properties", [])
+                if any(p.get("key") == "wiki_schema_version" for p in props):
+                    update_called["yes"] = True
+            except Exception:
+                pass
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        def mock_get(request, **kwargs):
+            return httpx.Response(200, json={
+                "data": [
+                    {
+                        "id": "coll-001",
+                        "name": "Wiki",
+                        "type": {"key": "collection"},
+                        "properties": [],  # no collection marker (v0.2.0 state)
+                    },
+                    {
+                        "id": "log-001",
+                        "type": {"key": "wiki_log"},
+                        "properties": [{"key": "wiki_schema_version", "text": "0.2.0"}],
+                    },
+                ],
+                "pagination": {"has_more": False},
+            })
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "log-002", "name": "bootstrap"},
+        }))
+        respx.patch().mock(side_effect=capture_patch)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        assert "schema_upgrade" in result, (
+            f"test_bootstrap_upgrade_from_v020: result must include schema_upgrade section; "
+            f"keys: {list(result.keys())}"
+        )
+        assert update_called["yes"], (
+            f"test_bootstrap_upgrade_from_v020: update_object must be called with "
+            f"wiki_schema_version during v0.2.0→v0.3.0 upgrade; patch calls not made"
+        )
+
+    @respx.mock
+    def test_post_upgrade_round_trip_reads_030(self, monkeypatch):
+        """QA-A2 / AC-M5: after v0.2.0→v0.3.0 upgrade PATCH, a subsequent _read_schema_version
+        round-trips '0.3.0' from the Collection's properties[] (Option a).
+
+        Covers: §9.3 test_post_upgrade_round_trip_reads_030, AC-M5, QA-A2.
+        NOTE: V4 PASS — Option (a) test body. If V4 FAILs, pivot to Option b-1.
+        """
+        from anytype_llm_wiki.wiki.bootstrap import _read_schema_version
+
+        # Simulate the state AFTER the upgrade PATCH has been applied:
+        # the root Collection now carries wiki_schema_version=0.3.0
+        class FakeClientPostUpgrade:
+            def list_objects(self, space_id):
+                return [
+                    {
+                        "id": "coll-001",
+                        "name": "Wiki",
+                        "type": {"key": "collection"},
+                        "properties": [{"key": "wiki_schema_version", "text": "0.3.0"}],
+                    }
+                ]
+
+        result = _read_schema_version(FakeClientPostUpgrade(), "space-test")
+        assert result == "0.3.0", (
+            f"AC-M5 round-trip: _read_schema_version must return '0.3.0' after upgrade PATCH "
+            f"on root Collection; got: {result!r}"
+        )
+
+
+class TestExactlyOneMarkerMechanism:
+    """QA-A5 (SF9 guard): exactly ONE marker mechanism ships in the codebase.
+
+    The V4-unselected option (Collection PATCH XOR wiki:schema-marker WikiLog singleton)
+    must be ABSENT. No dormant second design ships.
+    Covers: §9.3 test_exactly_one_marker_mechanism_ships, SF9.
+    """
+
+    def test_exactly_one_marker_mechanism_ships(self):
+        """SF9 guard: assert exactly ONE marker mechanism is present in shipped code.
+
+        Option (a) ships: the root Collection PATCH must be present.
+        Option (b-1) marker (wiki:schema-marker WikiLog singleton) must NOT ship dormant.
+
+        If V4 FAILs during pre-release and the implementation pivots to Option (b-1):
+        - Remove the Option (a) Collection PATCH code
+        - Add the wiki:schema-marker WikiLog singleton code
+        - Update this test to assert Option (b-1) is present and Option (a) is absent
+
+        Current state: V4 PASS assumed — Option (a) is the selected primary design.
+        """
+        import inspect
+        from anytype_llm_wiki.wiki import bootstrap as _b
+
+        bootstrap_source = inspect.getsource(_b)
+
+        # Option (a) presence: collection PATCH for wiki_schema_version must exist
+        # (bootstrap must call update_object with wiki_schema_version on a collection)
+        option_a_present = (
+            "wiki_schema_version" in bootstrap_source
+            and "update_object" in bootstrap_source
+        )
+
+        # Option (b-1) dormant check: the wiki:schema-marker sentinel name must NOT
+        # appear as a creation target (it would indicate both designs shipped dormant)
+        option_b1_dormant = "wiki:schema-marker" in bootstrap_source
+
+        assert option_a_present, (
+            "SF9: Option (a) collection PATCH for wiki_schema_version must be present in "
+            "bootstrap.py; it is the V4-selected marker mechanism. "
+            "Implement _patch_schema_version_on_collection (§7.2)."
+        )
+        assert not option_b1_dormant, (
+            "SF9: Option (b-1) 'wiki:schema-marker' must NOT appear in bootstrap.py — "
+            "the loser is deleted, not shipped dormant. If V4 failed, pivot properly and "
+            "update this test."
+        )
+
+
+class TestWikiIngestOutdatedSchemaReturnsConfigError:
+    """AC-M4: wiki_ingest schema-compat check returns wiki_schema_outdated when schema is old."""
+
+    @respx.mock
+    def test_wiki_ingest_outdated_schema_returns_config_error(self, monkeypatch):
+        """AC-M4: _read_schema_version returns '0.2.0', code is '0.3.0' →
+        [CONFIG ERROR] wiki_schema_outdated (AC-M4).
+
+        Covers: §9.3 test_wiki_ingest_outdated_schema_returns_config_error.
+        """
+        outdated_objects = {
+            "data": [
+                {
+                    "id": "log-001",
+                    "type": {"key": "wiki_log"},
+                    "properties": [{"key": "wiki_schema_version", "text": "0.2.0"}],
+                }
+            ],
+            "pagination": {"has_more": False},
+        }
+        respx.get().mock(return_value=httpx.Response(200, json=outdated_objects))
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "x"}}))
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source="https://example.com/paper", space_id=FAKE_SPACE_ID)
+        result_str = str(result)
+        assert "wiki_schema_outdated" in result_str or "[CONFIG ERROR]" in result_str, (
+            f"AC-M4: wiki_ingest must return [CONFIG ERROR] wiki_schema_outdated when schema is "
+            f"0.2.0 and code is 0.3.0; got: {result_str!r}"
+        )
+
+
+# =============================================================================
+# v0.3.0 NEW TESTS — wiki_action Tag Creation (§9.4, Decision 3)
+# These tests FAIL until bootstrap.py is extended with _ensure_wiki_action_tags.
+# =============================================================================
+
+
+class TestBootstrapWikiActionTagCreation:
+    """AC-T1/T2/T3: wiki_bootstrap creates all five wiki_action tags; idempotent; WikiLog carries action."""
+
+    @respx.mock
+    def test_bootstrap_creates_all_five_action_tags(self, monkeypatch):
+        """AC-T1: fresh space → create_tag called for each of 5 wiki_action values;
+        list_tags returns 5 tags after bootstrap.
+
+        Covers: §9.4 test_bootstrap_creates_all_five_action_tags, AC-T1.
+        """
+        import json as _json
+
+        tag_creation_calls: list[str] = []
+
+        def capture_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    if payload.get("name"):
+                        tag_creation_calls.append(payload["name"])
+                except Exception:
+                    pass
+                return httpx.Response(201, json={
+                    "tag": {"id": f"tag-{len(tag_creation_calls)}", "name": "x", "color": "blue"}
+                })
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": f"obj-{len(tag_creation_calls)}", "name": "Wiki"},
+            })
+
+        def mock_get(request, **kwargs):
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(side_effect=capture_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        expected_action_tags = {"ingest", "query", "lint", "bootstrap", "archive"}
+        created_action_tags = expected_action_tags.intersection(set(tag_creation_calls))
+        assert created_action_tags == expected_action_tags, (
+            f"AC-T1: wiki_bootstrap must create all 5 wiki_action tags "
+            f"(ingest/query/lint/bootstrap/archive); "
+            f"created: {set(tag_creation_calls)}"
+        )
+
+    @respx.mock
+    def test_bootstrap_action_tags_idempotent(self, monkeypatch):
+        """AC-T2: all 5 tags already exist → create_tag NOT called for any of them.
+        Additionally verifies that the bootstrap result reports tags_skipped for existing tags
+        (to ensure _ensure_wiki_action_tags is actually called and queries existing state).
+
+        Covers: §9.4 test_bootstrap_action_tags_idempotent, AC-T2.
+        """
+        import json as _json
+
+        tag_creation_calls: list[str] = []
+
+        def mock_get_with_existing_tags(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": f"tag-{t}", "name": t, "color": "blue"}
+                        for t in ["ingest", "query", "lint", "bootstrap", "archive"]
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def capture_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    tag_creation_calls.append(payload.get("name", ""))
+                except Exception:
+                    pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": "obj-1", "name": "Wiki"},
+            })
+
+        respx.get().mock(side_effect=mock_get_with_existing_tags)
+        respx.post().mock(side_effect=capture_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        action_tags = {"ingest", "query", "lint", "bootstrap", "archive"}
+        duplicate_creates = action_tags.intersection(set(tag_creation_calls))
+        assert duplicate_creates == set(), (
+            f"AC-T2: wiki_bootstrap must NOT create duplicate wiki_action tags when they already "
+            f"exist; create_tag was called for: {duplicate_creates}"
+        )
+        # Additionally: the bootstrap must report action tags as skipped (proves it ran
+        # the idempotency check, not just did nothing). This requires _ensure_wiki_action_tags.
+        all_skipped_tags = {t.get("tag") for t in result.get("tags_skipped", [])}
+        action_tags_in_skipped = action_tags.intersection(all_skipped_tags)
+        assert len(action_tags_in_skipped) == 5, (
+            f"AC-T2: wiki_bootstrap must report all 5 existing wiki_action tags in tags_skipped; "
+            f"found: {action_tags_in_skipped}. "
+            f"(Requires _ensure_wiki_action_tags to be implemented in bootstrap.py)"
+        )
+
+    @respx.mock
+    def test_bootstrap_wikilog_carries_bootstrap_action(self, monkeypatch):
+        """AC-T3: WikiLog written by wiki_bootstrap carries wiki_action=bootstrap
+        (the bootstrap tag id in the select field).
+
+        Covers: §9.4 test_bootstrap_wikilog_carries_bootstrap_action, AC-T3.
+        """
+        import json as _json
+
+        wikilog_payloads: list[dict] = []
+        bootstrap_tag_id = "tag-bootstrap-fixed-id"
+
+        def mock_get(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                return httpx.Response(200, json={
+                    "data": [{"id": bootstrap_tag_id, "name": "bootstrap", "color": "grey"}],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def capture_post(request, **kwargs):
+            path = str(request.url)
+            try:
+                payload = _json.loads(request.content)
+                if payload.get("type_key") == "wiki_log":
+                    wikilog_payloads.append(payload)
+            except Exception:
+                pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "tag": {"id": bootstrap_tag_id, "name": "bootstrap"},
+                "object": {"id": "log-001", "name": "bootstrap"},
+            })
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(side_effect=capture_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        assert len(wikilog_payloads) >= 1, "Expected at least one WikiLog create_object call"
+        all_props = []
+        for wl in wikilog_payloads:
+            all_props.extend(wl.get("properties", []))
+        bootstrap_action_props = [
+            p for p in all_props
+            if p.get("key") == "wiki_action" and p.get("select") == bootstrap_tag_id
+        ]
+        assert len(bootstrap_action_props) >= 1, (
+            f"AC-T3: WikiLog must carry wiki_action select={bootstrap_tag_id!r} (bootstrap tag); "
+            f"WikiLog properties: {all_props}"
         )
 
 

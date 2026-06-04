@@ -21,8 +21,8 @@ API-contract notes (verified against the Anytype local API, version
   ``color`` drawn from ``TAG_COLOR_PALETTE``.
 """
 
-# Semver x.y.z. v0.2.0 ships the foundation tranche; MUST be > "0.1.0".
-WIKI_SCHEMA_VERSION = "0.2.0"
+# Semver x.y.z. v0.3.0 ships the wiki_ingest compile pipeline; MUST be > "0.1.0".
+WIKI_SCHEMA_VERSION = "0.3.0"
 
 # Allowed tag colors per the Anytype API (CreateTagRequest.color enum). Tags are
 # assigned a color by cycling this palette deterministically at bootstrap time.

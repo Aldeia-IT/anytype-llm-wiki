@@ -6,7 +6,7 @@ MIT — open-source, permissive.
 
 ## Data Privacy
 
-- All data stays local. No cloud services, no telemetry.
+- Local-first by default: all data stays local, no telemetry. The one explicit opt-in exception is remote LLM extraction via `WIKI_EXTRACT_ENDPOINT` (off by default, on-device Ollama otherwise); when set to a non-local endpoint it transmits fetched source content off-machine, gated by a first-run consent banner.
 - Anytype content is E2E encrypted at rest; this tool reads via the local API after decryption.
 - Qdrant stores vector embeddings + metadata (object names, types, chunk text). No encryption at the Qdrant layer — acceptable for local-only deployment.
 - No PII handling beyond what users put in their Anytype notes.

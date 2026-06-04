@@ -57,6 +57,40 @@ def normalize_title(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# strip_control_chars — canonical sanitizer for the embedding chokepoint
+# ---------------------------------------------------------------------------
+
+# Codepoints stripped before text is embedded: C0 controls + DEL, zero-width and
+# bidirectional formatting marks, BOM, line/paragraph separators, and the Unicode
+# tag block. These are invisible or directional-spoofing characters that pollute
+# embeddings without contributing visible content.
+_CONTROL_CHAR_RE = re.compile(
+    # Codepoints written as \u escapes (not literal bidi/zero-width glyphs)
+    # so the source file carries no trojan-source characters (bandit B613).
+    "["
+    "\x00-\x08\x0b\x0c\x0e-\x1f\x7f"  # C0 controls + DEL, keeping \t \n \r
+    "\u200b-\u200f"  # zero-width space..RTL mark
+    "\u202a-\u202e"  # bidi embedding/override
+    "\u2066-\u2069"  # bidi isolates
+    "\ufeff"  # ZERO WIDTH NO-BREAK SPACE / BOM
+    "\u2028\u2029"  # line / paragraph separator
+    "\U000e0020-\U000e007f"  # tag block
+    "]"
+)
+
+
+def strip_control_chars(text: str) -> str:
+    """Remove invisible/control/bidi/tag codepoints from ``text``.
+
+    Applied at the embedding chokepoint (the chunker) so no chunk text carries
+    direction-spoofing or zero-width characters into the vector store.
+    """
+    if not text:
+        return text
+    return _CONTROL_CHAR_RE.sub("", text)
+
+
+# ---------------------------------------------------------------------------
 # scrub_credentials — strip secrets from URLs before logging (AC #15)
 # ---------------------------------------------------------------------------
 

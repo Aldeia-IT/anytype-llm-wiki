@@ -82,6 +82,12 @@ class WikiClient(_BaseAnytypeClient):
         resp.raise_for_status()
         return resp.json()["object"]
 
+    def delete_object(self, space_id: str, object_id: str) -> None:
+        """DELETE an object (used to roll back a half-written bidi relation)."""
+        c = self._client()
+        resp = c.delete(f"/v1/spaces/{space_id}/objects/{object_id}")
+        resp.raise_for_status()
+
     def search(self, space_id: str, query: str, filter: dict | None = None) -> list[dict]:
         """POST a search query. Returns the list of matching objects.
 

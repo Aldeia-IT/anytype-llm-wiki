@@ -86,7 +86,12 @@ def reindex(space_id: str | None = None) -> dict:
 
             points = [
                 PointStruct(
-                    id=str(uuid.uuid4()),
+                    id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{chunk['object_id']}:{i}:{chunk['heading']}",
+                        )
+                    ),
                     vector=vec,
                     payload={
                         "object_id": chunk["object_id"],
@@ -97,7 +102,7 @@ def reindex(space_id: str | None = None) -> dict:
                         "text": chunk["text"],
                     },
                 )
-                for chunk, vec in zip(chunks, vectors)
+                for i, (chunk, vec) in enumerate(zip(chunks, vectors))
             ]
 
             client.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
@@ -116,6 +121,49 @@ def reindex(space_id: str | None = None) -> dict:
 
     _save_state(state)
     return stats
+
+
+def reembed_object(space_id: str, object_id: str, obj: dict) -> dict:
+    """Force a re-embed of a single object (V2-fail bypass / update path).
+
+    Object-scoped: delete the object's existing Qdrant points by object_id,
+    then re-chunk + embed + upsert. O(1) in corpus size.
+    """
+    client = _qdrant()
+    _ensure_collection(client)
+
+    chunks = chunk_object(obj)
+    _delete_object_vectors(client, object_id)
+
+    if not chunks:
+        return {"object_id": object_id, "chunks": 0}
+
+    texts = [c["text"] for c in chunks]
+    vectors = embed(texts)
+
+    points = [
+        PointStruct(
+            id=str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{chunk['object_id']}:{i}:{chunk['heading']}",
+                )
+            ),
+            vector=vec,
+            payload={
+                "object_id": chunk["object_id"],
+                "space_id": chunk["space_id"],
+                "object_name": chunk["object_name"],
+                "type_key": chunk["type_key"],
+                "heading": chunk["heading"],
+                "text": chunk["text"],
+            },
+        )
+        for i, (chunk, vec) in enumerate(zip(chunks, vectors))
+    ]
+
+    client.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
+    return {"object_id": object_id, "chunks": len(points)}
 
 
 def _delete_object_vectors(client: QdrantClient, object_id: str) -> None:
