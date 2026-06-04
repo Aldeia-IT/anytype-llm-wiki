@@ -808,10 +808,6 @@ class TestBootstrapPatchDecisionScaffolding:
         from anytype_llm_wiki.wiki.util import read_patch_decision
         assert callable(read_patch_decision)
 
-    @pytest.mark.xfail(
-        reason="v0.3.0 wiki_ingest not yet implemented; pre-check activated at v0.3.0",
-        strict=False,
-    )
     def test_wiki_ingest_returns_error_on_missing_patch_decision(self, monkeypatch, tmp_path):
         """wiki_ingest must return [CONFIG ERROR] patch_decision_missing_or_invalid when patch-decision.md is absent."""
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
