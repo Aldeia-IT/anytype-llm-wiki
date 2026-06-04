@@ -220,7 +220,7 @@ class TestIdempotencyGate:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -276,7 +276,7 @@ class TestIdempotencyGate:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response(
                     name="TestEntity"
                 ))
@@ -340,7 +340,7 @@ class TestIdempotencyGate:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response(
                     name="TestEntity"
                 ))
@@ -429,7 +429,7 @@ class TestIdempotencyGate:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 side_effect=stateful_search
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -548,7 +548,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -600,7 +600,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -644,7 +644,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -680,7 +680,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -737,7 +737,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -774,7 +774,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -824,7 +824,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -905,7 +905,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response(
                     name="TestEntity",
                 ))
@@ -998,7 +998,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -1067,7 +1067,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -1117,7 +1117,7 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -1185,7 +1185,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1235,7 +1235,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -1286,7 +1286,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1341,7 +1341,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=wrong_type_response)
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1374,7 +1374,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1410,7 +1410,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1434,7 +1434,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v030_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1458,7 +1458,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v032_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1494,7 +1494,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1538,7 +1538,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1571,7 +1571,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1624,7 +1624,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1681,7 +1681,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1739,7 +1739,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1795,7 +1795,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1836,7 +1836,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1882,7 +1882,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1926,7 +1926,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1973,7 +1973,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2007,7 +2007,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2050,7 +2050,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -2115,7 +2115,7 @@ class TestCorePipeline:
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
             # Existing entity found → consolidation attempted (and degrades)
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2176,7 +2176,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2285,7 +2285,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 side_effect=search_side_effect
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2379,7 +2379,7 @@ class TestCorePipeline:
                     "pagination": {"has_more": False},
                 })
 
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 side_effect=search_side
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2425,7 +2425,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2479,7 +2479,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2531,7 +2531,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2575,7 +2575,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2605,7 +2605,7 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2650,7 +2650,7 @@ class TestHardGates:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2777,7 +2777,7 @@ class TestHardGates:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_empty_search_response())
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -2849,7 +2849,7 @@ class TestSupersede:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -2908,7 +2908,7 @@ class TestConflictSourcesOverwrite:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_v031_response())
             )
-            router.get("/v1/spaces/space-remember-test-001/search").mock(
+            router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response())
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
