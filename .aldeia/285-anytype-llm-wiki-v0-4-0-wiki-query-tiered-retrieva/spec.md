@@ -3,7 +3,7 @@
 **Status:** SPEC
 **Date:** 2026-06-04
 **Author:** spec-writer agent
-**Review rounds:** 1
+**Review rounds:** 2
 **Ticket:** #285 (Aldeia-IT/aldeia-box)
 **Master spec:** `.aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-any/spec.md` (status: SPEC)
 **Hard dependency:** #284 — `wiki_ingest` v0.3.0 incl. indexer property-embedding fix (merged)
@@ -61,10 +61,11 @@ Key findings that drove the four locked decisions below:
 
 `patch-decision.md` (anytype 2025-11-08): `filter_expression: no_op`.
 
-**Canonical path (only path):** enumerate candidates via `WikiClient.list_objects()` →
-`GET /v1/spaces/{space_id}/objects?offset=N&limit=N` (paginate while
-`pagination.has_more == True`), then client-side filter by `type_key` for the four wiki
-types (`wiki_entity`, `wiki_concept`, `wiki_comparison`, `wiki_query`).
+**Canonical path (only path):** enumerate candidates via `WikiClient.list_objects(space_id)`
+→ `GET /v1/spaces/{space_id}/objects` (the helper paginates internally and returns one flat
+`list[dict]`; the caller does NOT loop on `pagination.has_more`), then client-side filter by
+`type_key` for the four wiki types (`wiki_entity`, `wiki_concept`, `wiki_comparison`,
+`wiki_query`).
 
 Emit a warning in `QueryResult.warnings` when the pre-filter row count exceeds 500:
 
@@ -224,7 +225,8 @@ Per master spec lines 484–499:
 ```
 
 `error`/`error_category` extend the master schema to make the `[API ERROR]`/`[CONFIG ERROR]`
-returns testable, aligning with the existing tools' convention:
+returns testable, aligning with `wiki_bootstrap`'s `error_category` convention
+(`bootstrap.py` is the only tool that emits `error_category` today):
 
 | Condition | `error` | `error_category` |
 |-----------|---------|------------------|
@@ -262,7 +264,7 @@ Threshold constant: `WIKI_INDEX_THRESHOLD` (default 200). Mode flips at `count >
 
 **Tier 1 — index-navigation:**
 
-1. `WikiClient.list_objects(space_id, offset, limit)` → paginate while `pagination.has_more`.
+1. `WikiClient.list_objects(space_id)` → returns one flat `list[dict]` (paginates internally).
 2. Client-side filter: keep objects where `obj["type"]["key"] in {"wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query"}`.
 3. Emit `filterexpression_fallback` warning if pre-filter count > 500.
 4. Fetch full objects + 1-hop neighborhood (see below).
@@ -346,11 +348,14 @@ Given a clean answer, create a filed Query object when:
 
 Suppress when `file_back=False` (override) regardless of thresholds.
 
-File-back writes:
-1. `WikiClient.create_object(space_id, type_key="wiki_query", name=_safe_name(question), properties=[wiki_question, wiki_answer, wiki_asked_at])` → `POST /v1/spaces/{space_id}/objects`. `_safe_name` = `strip_control_chars(question)[:100]` and `wiki_question` = sanitized question (SF7 — name/wiki_question are sanitized, not raw).
-2. `WikiClient.update_object(space_id, query_obj_id, {"properties": [{"key": "wiki_drew_from", "objects": [ids...]}]})` → `PATCH /v1/spaces/{space_id}/objects/{object_id}`. **`ids` are the cached, actually-fetched `object_id`s of the contributing objects (SF11) — never LLM-emitted titles.** Titles in the answer are display-only; targets come from the cache, so the model cannot fabricate relation targets.
-3. **Cited-object-deleted-before-file-back (SF4):** before writing `wiki_drew_from`/reciprocals, drop any id no longer resolvable (a `get_object` 404 at write time); add `cited_object_gone: {id}` warning and downgrade `status` to `partial`. If all cited ids vanish, skip steps 2–3.
-4. Reuse `_write_bidirectional_relations` (ingest.py:296) for reciprocal relation writes IF the surviving cited objects are entities or concepts. That helper **appends** to the union of existing relation ids (does not overwrite); the reciprocal target's prior relation array is read first so the Query id is added, not replacing existing links. An AC pins the append (not overwrite) behavior.
+File-back writes exactly two relation surfaces: `wiki_drew_from` on the **new** Query
+object (forward), and a reciprocal back-reference onto each surviving **pre-existing** cited
+object (`wiki_relations` for entities, `wiki_related` for concepts).
+
+1. `WikiClient.create_object(space_id, type_key="wiki_query", name=_safe_name(question), properties=[wiki_question, wiki_answer, wiki_asked_at])` → `POST /v1/spaces/{space_id}/objects`. `_safe_name` (NEW inline helper) = `strip_control_chars(question)[:100]` and `wiki_question` = sanitized question (SF7 — name/wiki_question are sanitized, not raw).
+2. **Forward `wiki_drew_from` (safe overwrite, no read needed).** `WikiClient.update_object(space_id, query_obj_id, {"properties": [{"key": "wiki_drew_from", "objects": [ids...]}]})` → `PATCH /v1/spaces/{space_id}/objects/{object_id}`. The Query object is freshly created this run, so its `wiki_drew_from` array is empty — a plain overwrite with the full id list is correct; no read-merge required. **`ids` are the cached, actually-fetched `object_id`s of the contributing objects (SF11) — never LLM-emitted titles.** Titles in the answer are display-only; targets come from the cache, so the model cannot fabricate relation targets.
+3. **Cited-object-deleted-before-file-back (SF4):** before writing `wiki_drew_from`/reciprocals, drop any id no longer resolvable (a `get_object` 404 at write time); add `cited_object_gone: {id}` warning and downgrade `status` to `partial`. If all cited ids vanish, skip steps 2–4.
+4. **Reciprocal back-reference onto each pre-existing cited entity/concept — explicit READ-MERGE-WRITE (SF11/N1).** `_write_bidirectional_relations` (ingest.py:296) MUST NOT be reused here: it seeds prior relation arrays from an empty in-run `linked` dict and `_patch_relation` (ingest.py:287) issues a full overwrite — safe during ingest (objects created the same run) but on a pre-existing cited object it would **clobber** that object's persisted `wiki_relations`/`wiki_related` down to just `[query_id]` (data loss). Instead, for each surviving cited entity/concept perform an explicit read-merge-write: (a) `AnytypeReadClient.get_object(space_id, cited_id)`; (b) parse its current relation-property `objects` array with the SF5 dual-shape parser; (c) compute the union `prior ∪ [query_id]`; (d) `WikiClient.update_object(space_id, cited_id, {"properties": [{"key": rel_key, "objects": merged}]})` where `rel_key` is `wiki_relations` (entity) or `wiki_related` (concept). The forward `wiki_drew_from` write (step 2) is the only plain-overwrite; every back-reference onto an existing object goes through this merge. An AC pins the merge (prior ids preserved, not replaced).
 
 #### WikiLog
 
@@ -580,13 +585,15 @@ monkeypatching. Live tests are `@pytest.mark.live` + `pytest.skip` if
 | `test_synthesis_context_budget_trims_neighbors_first` | B5: oversize context → neighbors dropped before candidates, `synthesis_context_trimmed` warning, object cap honored |
 | `test_filed_query_retrievable_after_reindex` | B10 mocked backstop: file back a Query → feed its `wiki_answer` through a stubbed `semantic_search_core` index → subsequent `wiki_query` Tier-2 surfaces it in `sources_consulted` |
 | `test_drew_from_uses_cached_ids_not_titles` | SF11: `wiki_drew_from` PATCH carries the fetched candidate `object_id`s, not answer titles |
-| `test_reciprocal_relation_append_not_overwrite` | SF11: target entity with a prior `wiki_relations` array → PATCH carries prior ids ∪ Query id (append, not replace) |
+| `test_reciprocal_relation_read_merge_write` | SF11/N1: pre-seed a cited entity's `get_object` with an existing `wiki_relations` array (e.g. `["e1","e2"]`); file back; assert the reciprocal PATCH onto that entity carries `["e1","e2", query_id]` (the prior ids AND the Query id) — exercises the explicit read-merge-write, NOT a `_write_bidirectional_relations` overwrite |
 | `test_cited_object_deleted_before_file_back` | SF4: a cited id 404s at write time → dropped from `wiki_drew_from`, `cited_object_gone` warning, `status partial` |
 | `test_file_back_suppressed_on_synthesis_error` | SF1: synthesis returns a `[…ERROR]` sentinel → `filed_back False`, no POST to objects |
 | `test_sources_consulted_deduped_by_object_id` | SF2: a candidate shared as a neighbor appears once in `sources_consulted` and counts once toward the gate |
 | `test_relation_readback_accepts_both_shapes` | SF5: neighbor parser handles both `"id"` and `{"id": "id"}` elements |
 | `test_config_validators_reject_zero_and_negative` | SF10: `WIKI_INDEX_THRESHOLD=0`/`-1`, `MIN_SOURCES=0`, `MIN_WORDS=0` all fall back to defaults |
 | `test_no_outbound_http_except_anytype_and_ollama` | SSRF tripwire: assert no HTTP call targets a host other than the configured Anytype + localhost Ollama |
+| `test_wiki_query_registered_and_cli_routed` | AC#19: extend the `test_server_registration.py` pattern — assert `wiki_query` is in the MCP tool registry (and `semantic_search`/`reindex_anytype` not shadowed), and assert `"wiki-query"` is in `cli.SUBCOMMANDS` and routes to `_cmd_query`. No live services. |
+| `test_mocked_query_completes_under_5s` | AC#20: a fully-mocked `wiki_query` (respx Anytype + monkeypatched `semantic_search_core`/`synthesize`) asserts wall-clock < 5s |
 
 ### Live smoke test (additive, skip-gated)
 
@@ -627,11 +634,11 @@ Exclude from CI: `uv run pytest -m 'not live'`
 13. **`filterexpression_fallback` warning:** pre-filter count > 500 → warning string in `QueryResult.warnings` (CI-mocked).
 14. **Failure modes (B6/B7/B8):** Anytype-down → `anytype_unavailable`/`error`; partial neighborhood → `partial`; synthesis not-pulled → `ollama_model_not_pulled`/`config_error`; Ollama-down → `ollama_unavailable`/`api_error`; `status` matches the determination table (CI-mocked).
 15. **Zero-candidate (B11):** count==0 / empty Tier-2 → `index_navigation`, "No sources found…" answer, empty `sources_consulted`, `status ok`, no file-back, synthesis not called (CI-mocked).
-16. **Relation integrity (SF4/SF5/SF11):** `wiki_drew_from` carries cached fetched ids (not titles); reciprocal writes append (not overwrite); deleted cited object → dropped + `cited_object_gone` + `partial`; parser accepts both relation element shapes (CI-mocked).
+16. **Relation integrity (SF4/SF5/SF11/N1):** `wiki_drew_from` on the fresh Query object carries cached fetched ids (not titles); reciprocal back-references onto pre-existing cited entities/concepts go through explicit read-merge-write (`prior ∪ [query_id]`, prior links preserved — never the `_write_bidirectional_relations` overwrite); deleted cited object → dropped + `cited_object_gone` + `partial`; parser accepts both relation element shapes (CI-mocked).
 17. **Config validators (SF10):** 0/negative for threshold/min-sources/min-words fall back to defaults (CI-mocked).
 18. **SSRF tripwire:** no outbound HTTP except configured Anytype + localhost Ollama (CI-mocked).
-19. **CLI + server registration:** `wiki-query` in `SUBCOMMANDS`; `wiki_query` registered as MCP tool in `server.py`; full test suite green.
-20. **Performance sanity (CI):** mocked query completes within 5s. Maintainer-measured p95 < 5s on Mac Mini M4 at release time (master spec AC#7).
+19. **CLI + server registration:** `wiki-query` in `SUBCOMMANDS` (routes to `_cmd_query`); `wiki_query` registered as MCP tool in `server.py` without shadowing existing tools (CI-mocked, `test_wiki_query_registered_and_cli_routed`).
+20. **Performance sanity (CI):** mocked query completes within 5s (CI-mocked, `test_mocked_query_completes_under_5s`). Maintainer-measured p95 < 5s on Mac Mini M4 at release time (master spec AC#7).
 
 ---
 
@@ -663,7 +670,6 @@ Exclude from CI: `uv run pytest -m 'not live'`
 | `read_patch_decision()` | `wiki/util.py:229` | QA#30 patch-decision gate |
 | `_resolve_wiki_action_tag(client, space_id, "query")` | `wiki/ingest.py:212` | WikiLog action tag |
 | `_write_wikilog(client, space_id, ...)` | `wiki/ingest.py:241` | WikiLog write |
-| `_write_bidirectional_relations(client, space_id, ...)` | `wiki/ingest.py:296` | reciprocal relations |
 | `WikiClient.list_objects` | `wiki/wiki_client.py` | Tier 1 enumeration |
 | `WikiClient.create_object` | `wiki/wiki_client.py` | file-back create |
 | `WikiClient.update_object` | `wiki/wiki_client.py` | relation writes |
@@ -700,9 +706,11 @@ None. All four decision gaps are locked above.
 
 ---
 
-## R1 Review Resolution
+## Review Resolution (R1 + R2)
 
-All findings resolved (zero deferred). Finding → resolution + location:
+All findings resolved (zero deferred). Finding → resolution + location.
+
+### R1 (suggestions SUG1/SUG2 below are R1's)
 
 | ID | Resolution | Location |
 |----|-----------|----------|
@@ -727,6 +735,17 @@ All findings resolved (zero deferred). Finding → resolution + location:
 | SF8 | Error/warning/WikiLog strings pass `scrub_credentials()` | QueryResult; WikiLog; Security |
 | SF9 | WikiLog receipt on error path when Anytype reachable | WikiLog |
 | SF10 | `_positive_int` rejects 0/negative | Configuration; Test `test_config_validators_reject_zero_and_negative` |
-| SF11 | `wiki_drew_from` = cached fetched ids; reciprocal append-not-overwrite | File-Back Gate; AC #16; Tests |
+| SF11 | `wiki_drew_from` = cached fetched ids (fresh-object overwrite is safe); reciprocal back-references via explicit read-merge-write | File-Back Gate; AC #16; Tests |
 | SUG1 | SSRF tripwire test | Security; Test `test_no_outbound_http_except_anytype_and_ollama` |
 | SUG2 | launchd reindex cadence note | Resource Impact |
+
+### R2
+
+| ID | Sev | Resolution | Location |
+|----|-----|-----------|----------|
+| N1 | BLOCKING | False append claim corrected: `_write_bidirectional_relations` overwrites (in-run `linked` seed) and is NOT reused for file-back. Forward `wiki_drew_from` on the fresh Query object is a safe plain overwrite; reciprocal back-references onto pre-existing cited objects use explicit read-merge-write (`get_object` → SF5 parse → `prior ∪ [query_id]` → `update_object`). Helper dropped from Reused-Helpers table. | File-Back Gate step 4; AC #16; Test `test_reciprocal_relation_read_merge_write` |
+| N2 | SHOULD-FIX | AC#19 + AC#20 mapped to CI-runnable test rows (registration/CLI-routing and mocked <5s); ACs reworded to name the tests; every AC 1–20 now maps to ≥1 CI test | Test Plan; AC #19/#20 |
+| SUG1 | (R2) | Call-site pagination over-description trimmed — `list_objects(space_id)` paginates internally and returns a flat list; caller does not loop on `has_more` | Decision 1; Tier 1 step 1 |
+| SUG2 | (R2) | `_safe_name` flagged as NEW inline helper | File-Back Gate step 1 |
+| SUG3 | (R2) | B9 wording: "existing tools' convention" → `wiki_bootstrap`'s `error_category` (only tool that emits it) | QueryResult Schema |
+| SUG4 | (R2) | Size justified; no action beyond SUG1 | — |
