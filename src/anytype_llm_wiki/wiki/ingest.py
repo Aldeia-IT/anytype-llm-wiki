@@ -215,8 +215,8 @@ def _resolve_wiki_action_tag(
     """Resolve a wiki_action tag id by name. Returns (tag_id, degraded).
 
     ``action_name`` defaults to ``"ingest"`` so the v0.3.0 ingest call site is
-    unchanged (SF15 regression guard); ``remember.py`` resolves its own tags via
-    a space-level endpoint and does not use this resolver.
+    unchanged (SF15 regression guard); ``remember.py`` reuses this resolver with
+    ``action_name="remember"`` (D8).
     """
     try:
         props = client.list_properties(space_id)

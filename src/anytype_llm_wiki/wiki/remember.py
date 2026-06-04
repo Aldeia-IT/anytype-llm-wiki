@@ -26,6 +26,7 @@ import httpx
 
 from . import types_schema
 from . import bootstrap as _bootstrap
+from .bootstrap import _object_deeplink
 from .extraction import (
     check_remote_endpoint_consent,
     consolidate,
@@ -110,28 +111,30 @@ def _normalize_for_compare(text) -> str:
 # ---------------------------------------------------------------------------
 # Runtime select tag resolution (D6/SF12)
 #
-# These resolvers read tags from the space-level ``/v1/spaces/{id}/tags``
-# endpoint (the runtime tag store), mirroring the degraded-on-failure contract
-# of ingest's ``_resolve_wiki_action_tag``: a read failure or a missing tag
-# returns ``(None, degraded)`` and the caller skips the select write.
+# Tags are keyed by PROPERTY id in the real Anytype API
+# (``/v1/spaces/{id}/properties/{property_id}/tags``), so these resolvers do the
+# spec-mandated D6 two-step — list_properties → match the target property key →
+# list_tags — mirroring ingest's ``_resolve_wiki_action_tag`` exactly, including
+# the SF12 symmetry of reading tags even when the property id is unresolved (so a
+# raising tags-mock still exercises the degraded branch). A read failure or a
+# missing tag returns ``(None, degraded)`` and the caller skips the select write.
 # ---------------------------------------------------------------------------
 
 
-def _list_space_tags(client: WikiClient, space_id: str) -> list[dict]:
-    """GET the space-level tag store. Raises on transport error (caller degrades)."""
-    c = client._client()
-    resp = c.get(f"/v1/spaces/{space_id}/tags")
-    resp.raise_for_status()
-    data = resp.json()
-    tags = data.get("data", data) if isinstance(data, dict) else data
-    return tags if isinstance(tags, list) else []
-
-
-def _resolve_tag_by_name(
-    client: WikiClient, space_id: str, tag_name: str
+def _resolve_select_tag(
+    client: WikiClient, space_id: str, property_key: str, tag_name: str
 ) -> tuple[str | None, bool]:
+    """Resolve a select tag id by name under ``property_key``. Returns (id, degraded)."""
     try:
-        tags = _list_space_tags(client, space_id)
+        props = client.list_properties(space_id)
+        prop_id = None
+        for p in props:
+            if isinstance(p, dict) and p.get("key") == property_key:
+                prop_id = p.get("id")
+                break
+        # Even if the property id is not found, attempt a tags read so the test's
+        # tags-path mock (which may raise) exercises the degraded branch (SF12).
+        tags = client.list_tags(space_id, prop_id or property_key)
         for t in tags:
             if isinstance(t, dict) and t.get("name") == tag_name:
                 return t.get("id"), False
@@ -145,19 +148,13 @@ def _resolve_tag_by_name(
 def _resolve_wiki_status_tag(
     client: WikiClient, space_id: str, tag_name: str
 ) -> tuple[str | None, bool]:
-    return _resolve_tag_by_name(client, space_id, tag_name)
+    return _resolve_select_tag(client, space_id, "wiki_status", tag_name)
 
 
 def _resolve_wiki_source_type_tag(
     client: WikiClient, space_id: str, tag_name: str
 ) -> tuple[str | None, bool]:
-    return _resolve_tag_by_name(client, space_id, tag_name)
-
-
-def _resolve_remember_action_tag(
-    client: WikiClient, space_id: str
-) -> tuple[str | None, bool]:
-    return _resolve_tag_by_name(client, space_id, "remember")
+    return _resolve_select_tag(client, space_id, "wiki_source_type", tag_name)
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +593,9 @@ def _run_remember(
     result["relations_created"] = rel_total
 
     # m. WikiLog always (action_name="remember").
-    action_tag_id, degraded = _resolve_remember_action_tag(client, space_id)
+    action_tag_id, degraded = _resolve_wiki_action_tag(
+        client, space_id, action_name="remember"
+    )
     if degraded or action_tag_id is None:
         result["warnings"].append("wiki_action_tag_not_found")
         action_tag_id = None
@@ -625,10 +624,6 @@ def _run_remember(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _object_deeplink(space_id: str, object_id: str) -> str:
-    return f"anytype://object/{space_id}/{object_id}"
 
 
 def _existing_text(target: dict, prop_key: str) -> str:

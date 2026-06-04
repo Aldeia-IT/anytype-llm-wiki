@@ -861,25 +861,21 @@ class TestBootstrapLiveAPI:
 
 
 class TestSchemaVersionBumped:
-    """Guard: WIKI_SCHEMA_VERSION must be '0.3.0' (B1, prerequisite of Decision 2)."""
+    """Guard: WIKI_SCHEMA_VERSION must be '0.3.1' (D11, prerequisite of AC-R11)."""
 
-    @pytest.mark.skip(
-        reason="SKIPPED: spec assumption superseded — #289 (v0.3.1) bumps "
-        "WIKI_SCHEMA_VERSION to '0.3.1' (spec §5 D11). This parent-spec guard "
-        "pinned '0.3.0'; the v0.3.1 schema-outdated precheck (AC-R11) requires "
-        "code at '0.3.1' so a live 0.3.0 space reads as outdated. See debrief."
-    )
-    def test_wiki_schema_version_is_030(self):
-        """B1: WIKI_SCHEMA_VERSION must be bumped from '0.2.0' to '0.3.0'.
+    def test_wiki_schema_version_is_031(self):
+        """D11: WIKI_SCHEMA_VERSION must be pinned at '0.3.1' (spec §5 D11).
 
-        This is a named prerequisite of Decision 2 (§4.2) — the entire marker
-        and migration design depends on the code version being '0.3.0'.
-        Covers: §10.1 checklist item, B1.
+        #289 (v0.3.1) makes the code version load-bearing for the AC-R11
+        schema-outdated abort: a live 0.3.0 space must read as outdated against
+        code at '0.3.1'. A positive pin is a stronger regression guard than the
+        version-relative checks elsewhere in this module.
+        Covers: §10.1 checklist item, D11, AC-R11.
         """
         from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
-        assert WIKI_SCHEMA_VERSION == "0.3.0", (
-            f"WIKI_SCHEMA_VERSION must be '0.3.0' (B1 prerequisite of Decision 2); "
-            f"got: {WIKI_SCHEMA_VERSION!r}. Bump types_schema.py:25."
+        assert WIKI_SCHEMA_VERSION == "0.3.1", (
+            f"WIKI_SCHEMA_VERSION must be '0.3.1' (D11, prerequisite of AC-R11); "
+            f"got: {WIKI_SCHEMA_VERSION!r}. Bump types_schema.py."
         )
 
 

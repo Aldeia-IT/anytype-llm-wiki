@@ -558,7 +558,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review", "reviewed"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -609,7 +611,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -653,7 +657,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -689,7 +695,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -784,7 +792,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -833,7 +843,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -916,7 +928,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1007,7 +1021,9 @@ class TestConflictFlagging:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
@@ -1504,7 +1520,9 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_action"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["remember", "ingest"]))
             )
 
@@ -1581,7 +1599,9 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_action"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
             )
 
@@ -1636,7 +1656,9 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_source_type"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["agent", "conversation"]))
             )
 
@@ -1694,7 +1716,9 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_source_type"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
             )
 
@@ -1751,7 +1775,9 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_source_type"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["agent"]))
             )
 
@@ -2437,7 +2463,9 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_source_type"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["agent", "conversation", "document"]))
             )
 
@@ -2491,7 +2519,9 @@ class TestCorePipeline:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_source_type"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["agent", "conversation", "document"]))
             )
 
@@ -2917,7 +2947,9 @@ class TestConflictSourcesOverwrite:
             router.get("/v1/spaces/space-remember-test-001/properties").mock(
                 return_value=httpx.Response(200, json=_properties_response(["wiki_status"]))
             )
-            router.get("/v1/spaces/space-remember-test-001/tags").mock(
+            router.get(
+                url__regex=r".*/v1/spaces/space-remember-test-001/properties/[^/]+/tags(\?.*)?$"
+            ).mock(
                 return_value=httpx.Response(200, json=_tags_response(["needs-review"]))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
