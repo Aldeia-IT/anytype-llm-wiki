@@ -144,6 +144,7 @@ Once registered, your AI assistant gains these MCP tools:
 | `reindex_anytype` | Trigger an incremental reindex. Params: `space_id?` |
 | `wiki_bootstrap` | Provision the typed wiki schema in a space. Params: `space_id`, `domain_tags?` |
 | `wiki_ingest` | Compile a source (URL or local file) into curated, interlinked wiki Objects with provenance, then auto-reindex. Params: `source`, `space_id`, `domain_hint?` |
+| `wiki_remember` | Consolidate an agent's natural-language narration into typed wiki Objects (LLM-assisted merge/dedup/conflict-flag), then auto-reindex. Params: `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?` |
 
 `wiki_ingest` fetches the source (with SSRF protections), extracts entities and
 concepts via local Ollama (`WIKI_EXTRACT_MODEL`, default `qwen2.5:7b`), resolves
@@ -165,6 +166,78 @@ off-machine; switching to a different endpoint re-prompts. See
 [Privacy and data flow](#privacy-and-data-flow) for the full data-flow notice.
 
 Indexing is incremental and automatic: the first `semantic_search` triggers a reindex when the collection is empty, and only changed objects are re-embedded afterward. To index continuously in the background, see [Auto-reindex](#auto-reindex).
+
+## Remembering agent knowledge (`wiki_remember`)
+
+`wiki_remember` is the write path for **narrated, conversational knowledge** — an
+agent passing "I learned today that …" rather than a URL or file. Where
+`wiki_ingest` compiles documents, `wiki_remember` reconciles a fact-set into the
+wiki: it runs the same local extraction stack, resolves each subject against
+existing objects, then for an existing object calls a local LLM **consolidation**
+step (the v0.3.1 addition) before writing.
+
+The value prop is that the consolidation makes append semantically safe:
+
+- **Reworded duplicates merge** — an equivalent fact is not added a second time.
+- **Genuinely new facts are added** to the existing `wiki_facts`/`wiki_definition`.
+- **Superseding facts replace** the old text; the removed prior text is recorded
+  in the WikiLog `notes` so a destructive consolidation is recoverable from the
+  audit log.
+- **Contradictions are flagged, never silently overwritten** — both facts are
+  kept (the newer marked `[CONFLICT: …]`), `wiki_status` is set to
+  `needs-review`, and the conflict is recorded in the WikiLog and the result.
+- **Re-asserting the same knowledge converges to a no-op** — the load-bearing
+  guarantee is a normalized-text comparison, so a re-assertion that produces
+  cosmetically different text still skips the write.
+
+It reuses the same model, endpoint and timeout as extraction
+(`WIKI_EXTRACT_MODEL`, `WIKI_EXTRACT_ENDPOINT`, `WIKI_EXTRACT_TIMEOUT`) — there is
+**no second resident generation model** and steady-state memory is unchanged from
+v0.3.0. As with ingest, objects carry knowledge in *properties*, not the body.
+
+```bash
+uv run anytype-llm-wiki wiki-remember \
+  --space-id <id> \
+  --knowledge "Qdrant 1.12 added native multi-tenancy via payload partitioning." \
+  --subject-hint "Qdrant" --kind entity \
+  --source "agent task: infra research"
+```
+
+### Operating notes for sustained agent writes
+
+`wiki_remember` is the first write path driven *repeatedly* by autonomous agents.
+A few operational characteristics matter for self-hosting operators:
+
+- **Per-space re-bootstrap is required on upgrade.** v0.3.1 bumps the schema to
+  `0.3.1` and seeds three new tag sets (the `remember` action tag, the
+  `wiki_status` tags `needs-review`/`reviewed`/`archived`, and the
+  `wiki_source_type` tags `document`/`conversation`/`agent`). Run
+  `uv run anytype-llm-wiki wiki-bootstrap --space-id <id>` **once per space**.
+  Re-bootstrap is **idempotent and union-only** — existing tags/properties are
+  preserved, only missing ones are created. A space left at `0.3.0` returns
+  `[CONFIG ERROR] wiki_schema_outdated` from `wiki_remember` until re-bootstrapped.
+  **Rollback is clean and additive:** the new tags are harmless under reverted
+  v0.3.0 code (which simply ignores them) — no destructive migration, and
+  reverting the code does not require removing tags.
+- **Auto-reindex cost scales with total space size, not the write delta.** Each
+  write triggers an incremental reindex whose cost grows with the whole space, so
+  a high write rate can make reindexing the dominant cost. To decouple write
+  latency from index cost, set `WIKI_AUTO_REINDEX=false` and run a single
+  **scheduled, batched reindex** (see [Auto-reindex](#auto-reindex)) instead.
+- **The WikiLog grows monotonically.** Every `wiki_remember` (and `wiki_ingest`)
+  call appends a WikiLog object; under sustained agent writes the WikiLog grows
+  without bound and benefits from **periodic pruning** of old entries.
+- **`ingest_in_progress` is expected, retryable back-pressure.** `wiki_remember`
+  and `wiki_ingest` share one per-space lock, so a write while another is in
+  flight on the *same* space fails fast with `[DATA ERROR] ingest_in_progress` —
+  this is fail-fast back-pressure to retry, not an error to debug. The lock does
+  **not** block across spaces, and the worst-case hold time is bounded at
+  `8 × WIKI_EXTRACT_TIMEOUT` (the subject cap × the per-consolidation timeout).
+- **Narrated `knowledge` is stored as-is.** Only URL credentials in the optional
+  `source` note are scrubbed; arbitrary secrets embedded in `knowledge` are **not**
+  redacted — do not narrate secrets you would not want stored in the wiki. When
+  `WIKI_EXTRACT_ENDPOINT` is non-local, the off-machine consent banner is
+  **notify-once and non-blocking** (it self-acknowledges and proceeds).
 
 ## Auto-reindex
 
