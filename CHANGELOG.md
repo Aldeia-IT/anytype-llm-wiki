@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-04
+
 ### User-visible changes
 
 - **`wiki-ingest` command / `wiki_ingest` MCP tool** — compile a source (URL or
@@ -67,5 +69,6 @@ This release builds on the existing semantic-search foundation:
   re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
   `semantic_search` also prompts a reindex when the collection is empty).
 
-[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/releases/tag/v0.2.0
