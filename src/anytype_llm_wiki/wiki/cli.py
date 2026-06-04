@@ -18,7 +18,7 @@ from .bootstrap import wiki_bootstrap
 from .doctor import run_doctor
 
 # Subcommands that server.main() routes here instead of starting the MCP server.
-SUBCOMMANDS = ("wiki-bootstrap", "wiki-ingest", "doctor")
+SUBCOMMANDS = ("wiki-bootstrap", "wiki-ingest", "wiki-remember", "doctor")
 
 
 def _parse_domain_tags(raw: str | None) -> list[str] | None:
@@ -117,6 +117,46 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in ("ok", "partial") else 1
 
 
+def _cmd_remember(args: argparse.Namespace) -> int:
+    from .remember import wiki_remember
+
+    domain_tags = (
+        [t.strip() for t in args.domain_tags.split(",") if t.strip()]
+        if args.domain_tags
+        else None
+    )
+    result = wiki_remember(
+        space_id=args.space_id,
+        knowledge=args.knowledge,
+        subject_hint=args.subject_hint,
+        kind=args.kind,
+        domain_tags=domain_tags,
+        source=args.source,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        status = result.get("status")
+        print(f"[wiki-remember] space {args.space_id}: status={status}")
+        print(f"  source:     {result.get('source_object_id')}")
+        objects = result.get("objects", [])
+        print(f"  objects:    {len(objects)}")
+        for obj in objects:
+            print(
+                f"    - {obj.get('action')}: {obj.get('title')} "
+                f"({obj.get('kind')}) {obj.get('object_id') or ''}"
+            )
+        print(f"  relations:  {result.get('relations_created', 0)}")
+        print(f"  conflicts:  {result.get('conflicts_flagged', 0)}")
+        if result.get("wiki_log_id"):
+            print(f"  wiki_log:   {result['wiki_log_id']}")
+        if result.get("error"):
+            print(f"  error:      {result['error']}")
+        for warning in result.get("warnings", []):
+            print(f"  warn:       {warning}")
+    return 0 if result.get("status") in ("ok", "partial") else 1
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     report = run_doctor()
     if args.json:
@@ -167,6 +207,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     ingest_p.set_defaults(func=_cmd_ingest)
+
+    remember_p = sub.add_parser(
+        "wiki-remember",
+        help="Consolidate narrated knowledge into typed wiki objects.",
+    )
+    remember_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
+    remember_p.add_argument(
+        "--knowledge", required=True, help="Natural-language narration to remember."
+    )
+    remember_p.add_argument(
+        "--subject-hint", default=None, help="Optional entity/concept title nudge."
+    )
+    remember_p.add_argument(
+        "--kind", default=None, choices=["entity", "concept"],
+        help="Optional kind hint for the subject_hint fallback.",
+    )
+    remember_p.add_argument(
+        "--source", default=None, help="Optional descriptive provenance note."
+    )
+    remember_p.add_argument(
+        "--domain-tags", default=None,
+        help="Comma-separated domain tags (each must exist in the taxonomy).",
+    )
+    remember_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    remember_p.set_defaults(func=_cmd_remember)
 
     doctor_p = sub.add_parser("doctor", help="Run preflight checks.")
     doctor_p.add_argument(
