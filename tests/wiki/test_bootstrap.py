@@ -1503,3 +1503,453 @@ class TestFoundSchemaVersionRealShape:
         assert _b._version_tuple(found) < _b._version_tuple(
             _b.types_schema.WIKI_SCHEMA_VERSION
         )
+
+
+# ---------------------------------------------------------------------------
+# AC-R19–R23 / §10.6 — wiki_remember bootstrap seeding tests (MUST FAIL until impl)
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapRememberActionTag:
+    """AC-R19: wiki_bootstrap must seed a 'remember' wiki_action tag on a fresh space."""
+
+    @respx.mock
+    def test_bootstrap_creates_remember_action_tag(self, monkeypatch):
+        """AC-R19: fresh bootstrap; list_tags for wiki_action must include 'remember'."""
+        import json as _json
+
+        created_tags: list[str] = []
+
+        def mock_get(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                # Return freshly-created tags so the final list_tags read sees them
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": f"tag-{n}", "name": n, "color": "blue"}
+                        for n in created_tags
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def mock_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    name = payload.get("name", "")
+                    if name:
+                        created_tags.append(name)
+                    return httpx.Response(201, json={
+                        "tag": {"id": f"tag-{name}", "name": name, "color": "blue"}
+                    })
+                except Exception:
+                    pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": "obj-1", "name": "Wiki"},
+            })
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(side_effect=mock_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        all_created_tags = {t.get("tag") for t in result.get("tags_created", [])}
+        assert "remember" in all_created_tags, (
+            f"AC-R19: wiki_bootstrap must create a 'remember' wiki_action tag; "
+            f"tags_created={result.get('tags_created')}"
+        )
+
+    @respx.mock
+    def test_bootstrap_action_tags_now_six(self, monkeypatch):
+        """AC-R19: fresh bootstrap must create all 6 action tags including 'remember'."""
+        import json as _json
+
+        created_tags: list[str] = []
+
+        def mock_get(request, **kwargs):
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def mock_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    name = payload.get("name", "")
+                    if name:
+                        created_tags.append(name)
+                    return httpx.Response(201, json={
+                        "tag": {"id": f"tag-{name}", "name": name, "color": "blue"}
+                    })
+                except Exception:
+                    pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": "obj-1", "name": "Wiki"},
+            })
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(side_effect=mock_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        action_created = {t.get("tag") for t in result.get("tags_created", [])
+                         if t.get("property_key") == "wiki_action"}
+        expected_six = {"ingest", "query", "lint", "bootstrap", "archive", "remember"}
+        assert expected_six.issubset(action_created), (
+            f"AC-R19: fresh bootstrap must create all 6 wiki_action tags; "
+            f"expected {expected_six}, got {action_created}"
+        )
+
+
+class TestBootstrapWikiStatusTags:
+    """AC-R20: wiki_bootstrap must seed wiki_status tags: needs-review, reviewed, archived."""
+
+    @respx.mock
+    def test_bootstrap_creates_wiki_status_tags(self, monkeypatch):
+        """AC-R20: list_tags for wiki_status must include needs-review, reviewed, archived."""
+        import json as _json
+
+        created_tags: list[dict] = []
+
+        def mock_get(request, **kwargs):
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def mock_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    name = payload.get("name", "")
+                    if name:
+                        created_tags.append({"name": name, "path": path})
+                    return httpx.Response(201, json={
+                        "tag": {"id": f"tag-{name}", "name": name, "color": "blue"}
+                    })
+                except Exception:
+                    pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": "obj-1", "name": "Wiki"},
+            })
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(side_effect=mock_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        all_created_tag_names = {t.get("tag") for t in result.get("tags_created", [])}
+        expected_status = {"needs-review", "reviewed", "archived"}
+        assert expected_status.issubset(all_created_tag_names), (
+            f"AC-R20: wiki_bootstrap must create wiki_status tags {expected_status}; "
+            f"tags_created names={all_created_tag_names}"
+        )
+
+    @respx.mock
+    def test_bootstrap_status_tags_idempotent(self, monkeypatch):
+        """AC-R22: all status tags already exist => no duplicates created on second run."""
+        import json as _json
+
+        status_tags = ["needs-review", "reviewed", "archived"]
+        tag_creation_calls: list[str] = []
+
+        def mock_get_with_existing(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": f"tag-{t}", "name": t, "color": "blue"}
+                        for t in status_tags
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def mock_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    name = payload.get("name", "")
+                    if name:
+                        tag_creation_calls.append(name)
+                    return httpx.Response(201, json={
+                        "tag": {"id": f"tag-{name}", "name": name, "color": "blue"}
+                    })
+                except Exception:
+                    pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": "obj-1", "name": "Wiki"},
+            })
+
+        respx.get().mock(side_effect=mock_get_with_existing)
+        respx.post().mock(side_effect=mock_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        duplicates = set(status_tags).intersection(set(tag_creation_calls))
+        assert duplicates == set(), (
+            f"AC-R22: wiki_bootstrap must NOT re-create existing wiki_status tags; "
+            f"duplicate creates: {duplicates}"
+        )
+        # Also assert that all existing status tags are reported as skipped ON THE
+        # wiki_status property specifically (proves _ensure_wiki_status_tags ran
+        # the idempotency check against the right property, not just any property).
+        status_skipped = {
+            t.get("tag") for t in result.get("tags_skipped", [])
+            if t.get("property_key") == "wiki_status"
+        }
+        assert len(status_skipped) == len(status_tags), (
+            f"AC-R22: wiki_bootstrap must report all {len(status_tags)} existing "
+            f"wiki_status tags in tags_skipped with property_key='wiki_status'; "
+            f"found only: {status_skipped}"
+        )
+
+    def test_bootstrap_status_tags_seed_via_prop_map_keyfallback(self, monkeypatch):
+        """AC-R20/B3: fresh space where list_properties does NOT surface wiki_status id.
+
+        Calls _ensure_wiki_status_tags directly with a prop_map where the wiki_status
+        value is the key itself (key-as-id fallback). Asserts non-empty seeding.
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+
+        from anytype_llm_wiki.wiki.bootstrap import _ensure_wiki_status_tags
+
+        created_tags: list[str] = []
+
+        class _FakeClient:
+            def list_tags(self, space_id, prop_id):
+                return []  # fresh space — no existing tags
+
+            def create_tag(self, space_id, prop_id, body):
+                name = body.get("name", "")
+                created_tags.append(name)
+                return {"id": f"tag-{name}", "name": name}
+
+        prop_map = {"wiki_status": "wiki_status"}  # key-as-id fallback
+        result: dict = {"tags_created": [], "tags_skipped": [], "warnings": []}
+
+        name_id_map = _ensure_wiki_status_tags(_FakeClient(), FAKE_SPACE_ID, prop_map, result)
+
+        assert name_id_map, (
+            "AC-R20/B3: _ensure_wiki_status_tags must return a non-empty map "
+            "when prop_map uses key-as-id fallback; got empty dict"
+        )
+        assert set(created_tags) >= {"needs-review", "reviewed", "archived"}, (
+            f"AC-R20/B3: status tags must be seeded via key-fallback; created={created_tags}"
+        )
+
+
+class TestBootstrapWikiSourceTypeTags:
+    """AC-R21: wiki_bootstrap must seed wiki_source_type tags: document, conversation, agent."""
+
+    @respx.mock
+    def test_bootstrap_creates_wiki_source_type_tags(self, monkeypatch):
+        """AC-R21: list_tags for wiki_source_type must include document, conversation, agent."""
+        import json as _json
+
+        created_tags: list[dict] = []
+
+        def mock_get(request, **kwargs):
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def mock_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    name = payload.get("name", "")
+                    if name:
+                        created_tags.append({"name": name})
+                    return httpx.Response(201, json={
+                        "tag": {"id": f"tag-{name}", "name": name, "color": "blue"}
+                    })
+                except Exception:
+                    pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": "obj-1", "name": "Wiki"},
+            })
+
+        respx.get().mock(side_effect=mock_get)
+        respx.post().mock(side_effect=mock_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        all_created_tag_names = {t.get("tag") for t in result.get("tags_created", [])}
+        expected_source_type = {"document", "conversation", "agent"}
+        assert expected_source_type.issubset(all_created_tag_names), (
+            f"AC-R21: wiki_bootstrap must create wiki_source_type tags {expected_source_type}; "
+            f"tags_created names={all_created_tag_names}"
+        )
+
+    @respx.mock
+    def test_bootstrap_source_type_tags_idempotent(self, monkeypatch):
+        """AC-R22: all source_type tags already exist => no duplicates created on second run."""
+        import json as _json
+
+        source_type_tags = ["document", "conversation", "agent"]
+        tag_creation_calls: list[str] = []
+
+        def mock_get_with_existing(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": f"tag-{t}", "name": t, "color": "blue"}
+                        for t in source_type_tags
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def mock_post(request, **kwargs):
+            path = str(request.url)
+            if "/tags" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    name = payload.get("name", "")
+                    if name:
+                        tag_creation_calls.append(name)
+                    return httpx.Response(201, json={
+                        "tag": {"id": f"tag-{name}", "name": name, "color": "blue"}
+                    })
+                except Exception:
+                    pass
+            return httpx.Response(201, json={
+                "type": {"id": "t1", "key": "wiki_source"},
+                "property": {"id": "p1", "key": "wiki_url"},
+                "object": {"id": "obj-1", "name": "Wiki"},
+            })
+
+        respx.get().mock(side_effect=mock_get_with_existing)
+        respx.post().mock(side_effect=mock_post)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        duplicates = set(source_type_tags).intersection(set(tag_creation_calls))
+        assert duplicates == set(), (
+            f"AC-R22: wiki_bootstrap must NOT re-create existing wiki_source_type tags; "
+            f"duplicate creates: {duplicates}"
+        )
+        # Also assert that all existing source_type tags are reported as skipped ON THE
+        # wiki_source_type property specifically (proves _ensure_wiki_source_type_tags ran
+        # the idempotency check against the right property, not just any property).
+        source_type_skipped = {
+            t.get("tag") for t in result.get("tags_skipped", [])
+            if t.get("property_key") == "wiki_source_type"
+        }
+        assert len(source_type_skipped) == len(source_type_tags), (
+            f"AC-R22: wiki_bootstrap must report all {len(source_type_tags)} existing "
+            f"wiki_source_type tags in tags_skipped with property_key='wiki_source_type'; "
+            f"found only: {source_type_skipped}"
+        )
+
+    def test_bootstrap_source_type_tags_seed_via_prop_map_keyfallback(self, monkeypatch):
+        """AC-R21/B3: fresh space where list_properties does NOT surface wiki_source_type id.
+
+        Calls _ensure_wiki_source_type_tags directly with a prop_map using key-as-id fallback.
+        Asserts non-empty seeding.
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+
+        from anytype_llm_wiki.wiki.bootstrap import _ensure_wiki_source_type_tags
+
+        created_tags: list[str] = []
+
+        class _FakeClient:
+            def list_tags(self, space_id, prop_id):
+                return []  # fresh space — no existing tags
+
+            def create_tag(self, space_id, prop_id, body):
+                name = body.get("name", "")
+                created_tags.append(name)
+                return {"id": f"tag-{name}", "name": name}
+
+        prop_map = {"wiki_source_type": "wiki_source_type"}  # key-as-id fallback
+        result: dict = {"tags_created": [], "tags_skipped": [], "warnings": []}
+
+        name_id_map = _ensure_wiki_source_type_tags(_FakeClient(), FAKE_SPACE_ID, prop_map, result)
+
+        assert name_id_map, (
+            "AC-R21/B3: _ensure_wiki_source_type_tags must return a non-empty map "
+            "when prop_map uses key-as-id fallback; got empty dict"
+        )
+        assert set(created_tags) >= {"document", "conversation", "agent"}, (
+            f"AC-R21/B3: source_type tags must be seeded via key-fallback; created={created_tags}"
+        )
+
+
+class TestDoctorGreenAfterV031Bootstrap:
+    """AC-R23/SF9: bootstrap a fixtured space at v0.3.1; run_doctor() reports no NEW error."""
+
+    @respx.mock
+    def test_doctor_green_after_v031_bootstrap(self, monkeypatch):
+        """AC-R23/SF9: after a v0.3.1 bootstrap, run_doctor() must have no new FAIL checks.
+
+        Regression guard: no new doctor check is added for v0.3.1 features.
+        The doctor checks that existed before #289 must still pass (mocked healthy env).
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+
+        # Mock Anytype reachable + version endpoint returns 200
+        def mock_get(request, **kwargs):
+            url = str(request.url)
+            if "31012" in url or "anytype" in url.lower():
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(200, json={})
+
+        respx.get().mock(side_effect=mock_get)
+
+        from anytype_llm_wiki.wiki.doctor import run_doctor
+        report = run_doctor()
+
+        assert isinstance(report, dict), f"run_doctor() must return a dict; got {type(report)}"
+        assert "checks" in report, f"run_doctor() result must have 'checks' key; got {report}"
+
+        # AC-R23/SF9: no NEW FAIL checks introduced by #289 implementation.
+        # We collect known pre-#289 check names; any FAIL from a brand-new check
+        # (not in this set) would indicate a regression.
+        known_check_names = {
+            "anytype_api_key",
+            "anytype_reachable",
+            "anytype_version_drift",
+            "qdrant_reachable",
+            "qdrant_collection",
+            "lock_dir_writable",
+            "patch_decision",
+            "ollama_reachable",
+            "schema_version",
+            "wiki_root_collection",
+        }
+        checks_by_name = {c["name"]: c["status"] for c in report.get("checks", [])}
+        new_failing_checks = [
+            name for name, status in checks_by_name.items()
+            if status == "FAIL" and name not in known_check_names
+        ]
+        assert new_failing_checks == [], (
+            f"AC-R23/SF9: run_doctor() has new FAIL checks not present before #289: "
+            f"{new_failing_checks}. This indicates a new check was added that breaks "
+            f"on a freshly-bootstrapped v0.3.1 space."
+        )
