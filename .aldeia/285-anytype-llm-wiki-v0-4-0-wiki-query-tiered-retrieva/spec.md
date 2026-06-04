@@ -1,6 +1,6 @@
 # wiki_query v0.4.0 — Tiered Retrieval and Synthesis
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-04
 **Author:** spec-writer agent
 **Review rounds:** 0
