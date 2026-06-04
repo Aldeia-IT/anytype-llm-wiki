@@ -14,7 +14,7 @@ parent_spec: 284-anytype-llm-wiki-v0-3-0-wiki-ingest-compile-pipeli
 **Status:** SPEC
 **Date:** 2026-06-04
 **Author:** spec-writer agent
-**Review rounds:** 1
+**Review rounds:** 2
 
 ---
 
@@ -485,7 +485,7 @@ Order: `scrub_credentials(source_note)` → `sanitize_property_value(...)` → t
 default name when `source_note` is None is
 `f"agent {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"`.
 
-Note: the `space_ingest_lock(space_id, source=knowledge[:50])` source_ref (which embeds a slice of
+Note: the `space_ingest_lock(space_id, source_ref=knowledge[:50])` source_ref (which embeds a slice of
 `knowledge`) is already scrubbed by the lock primitive itself (`scrub_credentials(source_ref)`,
 util.py:204) — the entry path relies on that and does NOT bypass it.
 
@@ -560,9 +560,9 @@ The consolidation call goes to the same endpoint, so the consent banner (`check_
 covers both calls.
 
 **SF16 — model name.** The generation model is **operator-configured** via `WIKI_EXTRACT_MODEL`;
-the spec does not pin a specific model. `config.py:18` defaults
+the spec does not pin a specific model. `src/anytype_llm_wiki/wiki/config.py:18` defaults
 `DEFAULT_WIKI_EXTRACT_MODEL = "qwen2.5:7b"` (verified); operator notes elsewhere reference
-`qwen3.5-mlx` as the thinking-capable option. Any example in §7 aligns with the `config.py`
+`qwen3.5-mlx` as the thinking-capable option. Any example in §7 aligns with the `wiki/config.py`
 default rather than inventing a value, and whichever model resolves MUST be `ollama pull`-ed —
 AC-R14 covers the not-pulled abort (`extract()` returns `[CONFIG ERROR] ollama_model_not_pulled`).
 
@@ -921,7 +921,7 @@ In `server.py`, a new `@mcp.tool()` decorated function `wiki_remember` with the 
 output) — well within the configured model's context window, and the `knowledge` input is hard-capped
 at `_KNOWLEDGE_MAX_CHARS = 32_000` chars (AC-L4) so the prompt cannot grow unbounded. The
 generation model is whatever `WIKI_EXTRACT_MODEL` resolves to (default `qwen2.5:7b` per
-`config.py:18`; operators may set `qwen3.5-mlx`); this spec does not pin it (SF16).
+`src/anytype_llm_wiki/wiki/config.py:18`; operators may set `qwen3.5-mlx`); this spec does not pin it (SF16).
 
 The one resource fact that must be disclosed rather than waved away: during the **auto-reindex**
 phase, the generation model (`WIKI_EXTRACT_MODEL`) and the `bge-m3` embedder MAY be **co-resident**
@@ -987,7 +987,7 @@ and runs the only agent. Documented here so the behavior is not mistaken for an 
 
 ### 8.3 Per-Space Lock (HARD GATE — carried from #284)
 
-`space_ingest_lock(space_id, source=knowledge[:50])` MUST be acquired on the `wiki_remember`
+`space_ingest_lock(space_id, source_ref=knowledge[:50])` MUST be acquired on the `wiki_remember`
 entry path. This is AC-R-S2. The lock is space-scoped; two concurrent `wiki_remember` calls on
 the same space serialize correctly. Two concurrent calls on different spaces do not block each
 other (G6: this different-space non-blocking property is inherited from #284's lock primitive and
