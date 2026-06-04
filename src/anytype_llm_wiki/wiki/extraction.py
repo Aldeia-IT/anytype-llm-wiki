@@ -25,6 +25,7 @@ from .util import scrub_credentials, strip_control_chars
 logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction.md"
+_CONSOLIDATE_PROMPT_PATH = Path(__file__).parent / "prompts" / "consolidate.md"
 
 # Prompt-like name prefixes that must never be written as object names (AC#12).
 _NAME_POLICY_PREFIXES = ("system:", "assistant:", "ignore", "<|", "[inst]")
@@ -46,6 +47,18 @@ def _load_prompt() -> str:
         return _PROMPT_PATH.read_text(encoding="utf-8")
     except OSError:
         return "Extract entities and concepts from:\n<source>\n{source}\n</source>"
+
+
+def _load_consolidate_prompt() -> str:
+    try:
+        return _CONSOLIDATE_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "You are a wiki knowledge consolidator. Reconcile new_knowledge into "
+            "existing_facts for a wiki {kind} stored in {property_name}.\n"
+            "<existing_facts>\n{existing_facts}\n</existing_facts>\n"
+            "<new_knowledge>\n{new_knowledge}\n</new_knowledge>"
+        )
 
 
 def _ollama_url() -> str:
@@ -83,9 +96,15 @@ def _is_model_not_pulled(resp: httpx.Response) -> bool:
     return "not found" in body or "pull it first" in body or "model" in body
 
 
-def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response | None]:
-    """POST to {base}/api/generate then /api/chat. Returns (parsed_or_None, last_resp)."""
-    prompt = _load_prompt().replace("{source}", markdown)
+def _call_ollama_prompt(
+    base: str, prompt: str
+) -> tuple[dict | None, httpx.Response | None]:
+    """POST a pre-built ``prompt`` to {base}/api/generate then /api/chat.
+
+    Identical generate→chat→model-not-pulled wire behavior as ``_call_ollama``,
+    but takes a ready prompt string (no ``{source}`` substitution). Returns
+    ``(parsed_or_None, last_resp)``.
+    """
     model = config.extract_model()
     think = config.extract_think()
     timeout = httpx.Timeout(connect=5, read=config.extract_timeout(), write=10, pool=5)
@@ -133,6 +152,16 @@ def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response 
     return None, last_resp
 
 
+def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response | None]:
+    """POST to {base}/api/generate then /api/chat. Returns (parsed_or_None, last_resp).
+
+    Delegates to ``_call_ollama_prompt`` after the ``{source}`` substitution so
+    the extraction wire behavior is byte-identical to the pre-refactor path.
+    """
+    prompt = _load_prompt().replace("{source}", markdown)
+    return _call_ollama_prompt(base, prompt)
+
+
 def extract(markdown: str, space_id: str, **kw) -> dict:
     """Run LLM extraction. Best-effort; degrades to empty entities/concepts.
 
@@ -176,6 +205,99 @@ def extract(markdown: str, space_id: str, **kw) -> dict:
 
     # Still malformed after repair → graceful empty result.
     return {"entities": [], "concepts": [], "error": "extraction_degraded: malformed_json"}
+
+
+def _degraded_consolidation(existing_text: str, reason: str) -> dict:
+    return {
+        "consolidated_text": existing_text,
+        "changed": False,
+        "fact_actions": [],
+        "conflicts": [],
+        "error": f"consolidation_degraded: {reason}",
+    }
+
+
+def consolidate(
+    existing_text: str,
+    new_facts: str,
+    kind: str,
+    space_id: str,
+    **kw,
+) -> dict:
+    """Run LLM consolidation for one resolved subject (#289 D1/D2).
+
+    Loads ``consolidate.md``, substitutes the kind/property/text placeholders,
+    POSTs via ``_call_ollama_prompt`` with ``_DETERMINISTIC_OPTS``, and parses the
+    ``{consolidated_text, changed, fact_actions, conflicts}`` JSON. Makes ONE
+    repair retry on malformed JSON. On a not-pulled model OR malformed-after-retry
+    returns a degraded result whose ``error`` contains ``consolidation_degraded``
+    (and ``ollama_model_not_pulled`` on the not-pulled path).
+    """
+    base = os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()
+    base = base.rstrip("/")
+
+    property_name = "wiki_definition" if kind == "concept" else "wiki_facts"
+    prompt = (
+        _load_consolidate_prompt()
+        .replace("{kind}", str(kind))
+        .replace("{property_name}", property_name)
+        .replace("{existing_facts}", existing_text or "")
+        .replace("{new_knowledge}", new_facts or "")
+    )
+
+    try:
+        parsed, resp = _call_ollama_prompt(base, prompt)
+    except httpx.HTTPError as exc:
+        return _degraded_consolidation(existing_text, str(exc))
+
+    if resp is not None and _is_model_not_pulled(resp):
+        return _degraded_consolidation(
+            existing_text,
+            f"ollama_model_not_pulled: the consolidation model "
+            f"'{config.extract_model()}' is not available — pull it first",
+        )
+
+    if not _is_consolidation_shape(parsed):
+        # Malformed JSON (or a parseable-but-wrong-shape payload, e.g. an empty
+        # object lacking consolidated_text) → one repair attempt.
+        try:
+            parsed, resp = _call_ollama_prompt(base, prompt)
+        except httpx.HTTPError as exc:
+            return _degraded_consolidation(existing_text, str(exc))
+        if resp is not None and _is_model_not_pulled(resp):
+            return _degraded_consolidation(
+                existing_text, "ollama_model_not_pulled"
+            )
+        if not _is_consolidation_shape(parsed):
+            return _degraded_consolidation(existing_text, "malformed_json")
+
+    return _normalize_consolidation(parsed, existing_text)
+
+
+def _is_consolidation_shape(parsed) -> bool:
+    """A usable consolidation payload is a dict carrying ``consolidated_text``."""
+    return isinstance(parsed, dict) and "consolidated_text" in parsed
+
+
+def _normalize_consolidation(parsed: dict, existing_text: str) -> dict:
+    """Coerce a parsed consolidation payload into the stable result shape."""
+    if not isinstance(parsed, dict):
+        return _degraded_consolidation(existing_text, "malformed_json")
+    consolidated_text = parsed.get("consolidated_text")
+    if not isinstance(consolidated_text, str):
+        consolidated_text = existing_text
+    fact_actions = parsed.get("fact_actions")
+    if not isinstance(fact_actions, list):
+        fact_actions = []
+    conflicts = parsed.get("conflicts")
+    if not isinstance(conflicts, list):
+        conflicts = []
+    return {
+        "consolidated_text": consolidated_text,
+        "changed": bool(parsed.get("changed")),
+        "fact_actions": fact_actions,
+        "conflicts": conflicts,
+    }
 
 
 def sanitize_name(name: str) -> str | None:
