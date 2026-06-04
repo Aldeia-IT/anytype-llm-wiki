@@ -1237,3 +1237,91 @@ class TestIngestUpdateEndToEnd:
             f"Entity id={created_id!r}, name={ENTITY_NAME!r}. "
             f"Top-K result ids: {result_ids[:10]!r}, names: {result_names[:10]!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Re-ingest idempotency (regression for the interactive live-review finding).
+# Root causes fixed: (1) extraction now uses deterministic decoding so the same
+# source yields the same entity titles; (2) Source objects are de-duplicated.
+# Spec AC (v0.3.0 §functional ACs): "ingesting the same source twice → 0 created,
+# >=1 updated". No end-to-end test covered this before; the prior live behavior
+# produced a duplicate Source + near-duplicate entities.
+# ---------------------------------------------------------------------------
+
+
+class TestReingestIdempotency:
+    @respx.mock
+    def test_reingest_same_source_creates_zero_and_reuses_source(self, monkeypatch):
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")  # keep the test offline/fast
+        src = "https://example.com/idempotent-paper"
+        store: dict = {}  # (normalized_name, type_key) -> {"id","name"}
+        counter = {"n": 0}
+
+        def on_get(request, **kwargs):
+            # Both the schema read (list_objects) and the source fetch resolve here.
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            import json as _json
+            from anytype_llm_wiki.wiki.util import normalize_title
+            url = str(request.url)
+            if "/search" in url:
+                q = normalize_title(_json.loads(request.content).get("query", ""))
+                data = [
+                    {"id": o["id"], "name": o["name"], "type": {"key": tk}, "properties": []}
+                    for (n, tk), o in store.items() if n == q
+                ]
+                return httpx.Response(200, json={"data": data, "pagination": {"has_more": False}})
+            if "/objects" in url:
+                payload = _json.loads(request.content)
+                name = payload.get("name", "")
+                tk = payload.get("type_key", "")
+                counter["n"] += 1
+                oid = f"obj-{counter['n']}"
+                store[(normalize_title(name), tk)] = {"id": oid, "name": name}
+                return httpx.Response(201, json={"object": {"id": oid, "name": name}})
+            # Ollama extraction endpoints → degrade (forces deterministic
+            # heading-derived candidates only; no live model needed).
+            return httpx.Response(200, json={"response": "not-json"})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        r1 = wiki_ingest(source=src, space_id=FAKE_SPACE_ID)
+        r2 = wiki_ingest(source=src, space_id=FAKE_SPACE_ID)
+
+        assert r1["status"] == "ok", r1
+        assert r1["objects_created"], "run 1 must create >=1 object (non-vacuous guard)"
+        assert len(r2["objects_created"]) == 0, (
+            f"re-ingest of the same source must create 0 objects; got {r2['objects_created']}"
+        )
+        assert r1["source_object_id"] and r1["source_object_id"] == r2["source_object_id"], (
+            "re-ingest must reuse the same Source object (Source dedup)"
+        )
+
+
+class TestExtractionDeterministicOptions:
+    @respx.mock
+    def test_extract_sends_temperature_zero(self):
+        import json as _json
+        captured: list = []
+
+        def on_post(request, **kwargs):
+            captured.append(_json.loads(request.content))
+            return httpx.Response(
+                200, json={"response": _json.dumps({"entities": [], "concepts": []})}
+            )
+
+        respx.post().mock(side_effect=on_post)
+        from anytype_llm_wiki.wiki.extraction import extract
+        extract(markdown="# Topic\n\nSome text.", space_id=FAKE_SPACE_ID)
+        assert captured, "extraction must call the Ollama endpoint"
+        opts = captured[0].get("options") or {}
+        assert opts.get("temperature") == 0, (
+            f"extraction must use deterministic decoding (temperature 0); got options={opts!r}"
+        )

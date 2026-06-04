@@ -96,3 +96,18 @@ endpoint. `WikiClient.search(... filter={"type_key": X})` should not be relied
 on for type scoping until the correct filter contract is confirmed.
 
 **Status:** tracked for the version that uses Anytype-native filtered search.
+
+## 6. Re-ingest idempotency depends on deterministic extraction
+
+`wiki_ingest` is idempotent on re-ingest of the **same** source — a second ingest
+creates 0 new objects and reuses the existing Source — **because extraction uses
+deterministic decoding** (`temperature: 0` + fixed seed), so the same source
+yields the same entity titles, which entity resolution (exact + fuzzy title
+match) then resolves to the existing objects. Verified live and pinned by
+`tests/wiki/test_ingest.py::TestReingestIdempotency`.
+
+Residual caveats:
+- If `WIKI_EXTRACT_ENDPOINT` points at a non-deterministic remote model, re-extraction may vary and produce near-duplicate entities on re-ingest.
+- Resolution is title-based (exact + fuzzy ≥ 0.92; the embedding sweep is not yet implemented), so genuinely different surface forms of the same concept across *different* sources can still create separate objects.
+
+Both are surfaced by the v0.5.0 lint potential-duplicate sweep (aldeia-box#286).

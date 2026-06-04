@@ -33,6 +33,13 @@ _NAME_MAX_LEN = 200
 _DEFAULT_ACK_DIR = os.path.expanduser("~/.local/share/anytype-llm-wiki")
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"}  # nosec B104 — membership test, not a bind address
 
+# Deterministic decoding for extraction. Without this Ollama defaults to
+# temperature 0.8, so re-extracting the same source yields different entity
+# titles, which breaks entity resolution (exact-title match) and produces
+# duplicate objects on re-ingest. Greedy decoding (temperature 0 + fixed seed)
+# makes extraction reproducible so re-ingest is idempotent.
+_DETERMINISTIC_OPTS = {"temperature": 0, "seed": 0, "top_p": 1}
+
 
 def _load_prompt() -> str:
     try:
@@ -86,7 +93,13 @@ def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response 
     with httpx.Client(timeout=timeout) as client:
         gen_resp = client.post(
             f"{base}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False, "format": "json"},
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": _DETERMINISTIC_OPTS,
+            },
         )
         last_resp = gen_resp
         if _is_model_not_pulled(gen_resp):
@@ -103,6 +116,7 @@ def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response 
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
                 "format": "json",
+                "options": _DETERMINISTIC_OPTS,
             },
         )
         last_resp = chat_resp

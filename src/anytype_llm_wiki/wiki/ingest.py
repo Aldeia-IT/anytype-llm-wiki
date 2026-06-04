@@ -616,6 +616,24 @@ def _create_source(
         props.insert(0, {"key": "wiki_url", "url": source})
     else:
         props.insert(0, {"key": "wiki_file_path", "text": source})
+
+    # Source dedup (idempotent re-ingest): reuse an existing wiki_source for the
+    # same url/file_path (matched on its source-derived name) rather than create
+    # a duplicate Source on every ingest. On reuse, refresh excerpt + ingested_at
+    # via a properties-only PATCH (never a body key — AC-L1).
+    try:
+        existing = resolve_entity(client, space_id, "wiki_source", _source_name(source))
+        if existing.get("action") == "update":
+            sid = existing["target"].get("id")
+            if sid:
+                try:
+                    client.update_object(space_id, sid, {"properties": props})
+                except (httpx.HTTPError, KeyError, ValueError, TypeError):
+                    pass
+                return sid
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        pass
+
     try:
         obj = client.create_object(
             space_id,
