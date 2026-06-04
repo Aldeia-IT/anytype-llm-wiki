@@ -87,7 +87,7 @@ def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response 
     """POST to {base}/api/generate then /api/chat. Returns (parsed_or_None, last_resp)."""
     prompt = _load_prompt().replace("{source}", markdown)
     model = config.extract_model()
-    timeout = httpx.Timeout(connect=5, read=120, write=10, pool=5)
+    timeout = httpx.Timeout(connect=5, read=config.extract_timeout(), write=10, pool=5)
     last_resp: httpx.Response | None = None
 
     with httpx.Client(timeout=timeout) as client:

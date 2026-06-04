@@ -398,3 +398,29 @@ class TestRemoteEndpointConsentBannerFires:
         assert banner_emitted["called"], (
             "AC-S2.2: consent banner must re-fire for a different endpoint (new hash → new ack file)"
         )
+
+
+class TestExtractTimeoutConfig:
+    """WIKI_EXTRACT_TIMEOUT makes the extraction read timeout configurable so a
+    slow/large local model degrades into *waiting* rather than silently timing
+    out into heading-only extraction."""
+
+    def test_default_is_120(self, monkeypatch):
+        monkeypatch.delenv("WIKI_EXTRACT_TIMEOUT", raising=False)
+        from anytype_llm_wiki.wiki import config
+        assert config.extract_timeout() == 120.0
+
+    def test_override(self, monkeypatch):
+        monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "600")
+        from anytype_llm_wiki.wiki import config
+        assert config.extract_timeout() == 600.0
+
+    def test_invalid_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "not-a-number")
+        from anytype_llm_wiki.wiki import config
+        assert config.extract_timeout() == 120.0
+
+    def test_nonpositive_falls_back(self, monkeypatch):
+        monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "0")
+        from anytype_llm_wiki.wiki import config
+        assert config.extract_timeout() == 120.0
