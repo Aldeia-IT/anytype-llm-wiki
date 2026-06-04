@@ -45,11 +45,19 @@ _ROOT_COLLECTION_NAME = "Wiki"
 _DOMAIN_TAGS_PROPERTY_KEY = types_schema.DOMAIN_TAGS_PROPERTY_KEY
 _SCHEMA_VERSION_PROPERTY_KEY = types_schema.SCHEMA_VERSION_PROPERTY_KEY
 _ACTION_PROPERTY_KEY = "wiki_action"
+_STATUS_PROPERTY_KEY = "wiki_status"
+_SOURCE_TYPE_PROPERTY_KEY = "wiki_source_type"
 
-# The five canonical wiki_action select values (Decision 3). Seeded as tags on
-# the wiki_action property so every wiki tool can stamp its WikiLog with the
-# action that produced it.
-_WIKI_ACTION_TAGS = ["ingest", "query", "lint", "bootstrap", "archive"]
+# The six canonical wiki_action select values (Decision 3 + #289 D5). Seeded as
+# tags on the wiki_action property so every wiki tool can stamp its WikiLog with
+# the action that produced it. v0.3.1 adds "remember".
+_WIKI_ACTION_TAGS = ["ingest", "query", "lint", "bootstrap", "archive", "remember"]
+
+# wiki_status select values (#289 D5 Change 2): conflict review lifecycle.
+_WIKI_STATUS_TAGS = ["needs-review", "reviewed", "archived"]
+
+# wiki_source_type select values (#289 D5 Change 3): provenance classification.
+_WIKI_SOURCE_TYPE_TAGS = ["document", "conversation", "agent"]
 
 # Anytype property formats → the typed field name used in a PropertyLinkWithValue
 # entry when writing an object.
@@ -390,6 +398,10 @@ def _run_bootstrap(
     # --- wiki_action select tags (Decision 3) --------------------------------
     action_tag_map = _ensure_wiki_action_tags(client, space_id, prop_map, result)
 
+    # --- wiki_status / wiki_source_type select tags (#289 D5) ----------------
+    status_tag_map = _ensure_wiki_status_tags(client, space_id, prop_map, result)
+    source_type_tag_map = _ensure_wiki_source_type_tags(client, space_id, prop_map, result)
+
     # --- Root Collection -----------------------------------------------------
     if root_collection is not None:
         collection_id = root_collection.get("id")
@@ -553,6 +565,88 @@ def _ensure_wiki_action_tags(
         for t in client.list_tags(space_id, action_pid)
         if t.get("name")
     }
+
+
+def _ensure_select_tags(
+    client,
+    space_id: str,
+    prop_map: dict,
+    result: dict,
+    property_key: str,
+    tag_names: list[str],
+) -> dict[str, str]:
+    """Seed a select property's tags idempotently (union-only), mirroring
+    ``_ensure_wiki_action_tags`` exactly.
+
+    Resolves the property id via ``prop_map`` (NOT an independent
+    ``list_properties`` lookup — B3), so a fresh space's key-as-id fallback
+    keeps tag creation reachable. Records created/skipped tags into ``result``
+    with the right ``property_key`` and returns a name→id map from a final
+    ``list_tags`` read. Returns {} if the property id is unresolved.
+    """
+    pid = prop_map.get(property_key)
+    if not pid:
+        return {}
+
+    existing_tags = client.list_tags(space_id, pid)
+    existing = {t["name"] for t in existing_tags if t.get("name")}
+    palette = types_schema.TAG_COLOR_PALETTE
+
+    name_to_id: dict[str, str] = {
+        t["name"]: t.get("id") for t in existing_tags if t.get("name")
+    }
+
+    for i, name in enumerate(tag_names):
+        if name in existing:
+            result["tags_skipped"].append(
+                {
+                    "property_key": property_key,
+                    "tag": name,
+                    "reason": "already_exists",
+                }
+            )
+            continue
+        color = palette[i % len(palette)]
+        tag_id = _create_tag(client, space_id, pid, name, color)
+        result["tags_created"].append(
+            {"property_key": property_key, "tag": name, "tag_id": tag_id}
+        )
+        if tag_id is not None:
+            name_to_id[name] = tag_id
+
+    # Merge a final read so a backend that reflects newly-created tags supplies
+    # any ids the create responses omitted; created ids above cover backends
+    # whose list_tags does not yet surface fresh tags (fresh-space key fallback).
+    for t in client.list_tags(space_id, pid):
+        if t.get("name"):
+            name_to_id.setdefault(t["name"], t.get("id"))
+
+    return name_to_id
+
+
+def _ensure_wiki_status_tags(
+    client, space_id: str, prop_map: dict, result: dict
+) -> dict[str, str]:
+    """Seed wiki_status select tags idempotently (union-only — #289 D5 Change 2).
+
+    Returns name→id map. Returns {} if the property id is unresolved.
+    """
+    return _ensure_select_tags(
+        client, space_id, prop_map, result, _STATUS_PROPERTY_KEY, _WIKI_STATUS_TAGS
+    )
+
+
+def _ensure_wiki_source_type_tags(
+    client, space_id: str, prop_map: dict, result: dict
+) -> dict[str, str]:
+    """Seed wiki_source_type select tags idempotently (union-only — #289 D5 Change 3).
+
+    Returns name→id map. Returns {} if the property id is unresolved.
+    """
+    return _ensure_select_tags(
+        client, space_id, prop_map, result, _SOURCE_TYPE_PROPERTY_KEY,
+        _WIKI_SOURCE_TYPE_TAGS,
+    )
 
 
 def _build_props_list(entries: list[tuple[str, str, object]]) -> list[dict]:

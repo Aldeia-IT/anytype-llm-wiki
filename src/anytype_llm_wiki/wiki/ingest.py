@@ -209,8 +209,15 @@ def resolve_entity(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_wiki_action_tag(client: WikiClient, space_id: str) -> tuple[str | None, bool]:
-    """Resolve the ``ingest`` wiki_action tag id. Returns (tag_id, degraded)."""
+def _resolve_wiki_action_tag(
+    client: WikiClient, space_id: str, action_name: str = "ingest"
+) -> tuple[str | None, bool]:
+    """Resolve a wiki_action tag id by name. Returns (tag_id, degraded).
+
+    ``action_name`` defaults to ``"ingest"`` so the v0.3.0 ingest call site is
+    unchanged (SF15 regression guard); ``remember.py`` reuses this resolver with
+    ``action_name="remember"`` (D8).
+    """
     try:
         props = client.list_properties(space_id)
         prop_id = None
@@ -222,7 +229,7 @@ def _resolve_wiki_action_tag(client: WikiClient, space_id: str) -> tuple[str | N
         # "tags"-path mock (which raises) exercises the degraded branch.
         tags = client.list_tags(space_id, prop_id or "wiki_action")
         for t in tags:
-            if isinstance(t, dict) and t.get("name") == "ingest":
+            if isinstance(t, dict) and t.get("name") == action_name:
                 return t.get("id"), False
         return None, False
     except httpx.HTTPError:
@@ -240,6 +247,7 @@ def _write_wikilog(
     updated: int,
     notes: str,
     action_tag_id: str | None,
+    action_name: str = "ingest",
 ) -> str | None:
     props = [
         {"key": "wiki_subject", "text": subject},
@@ -253,7 +261,7 @@ def _write_wikilog(
         props.append({"key": "wiki_action", "select": action_tag_id})
     try:
         obj = client.create_object(
-            space_id, type_key="wiki_log", name=f"ingest {subject}", properties=props
+            space_id, type_key="wiki_log", name=f"{action_name} {subject}", properties=props
         )
         return obj.get("id")
     except (httpx.HTTPError, KeyError, ValueError, TypeError):

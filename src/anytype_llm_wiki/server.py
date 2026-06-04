@@ -129,6 +129,55 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
     return _wiki_ingest(source=source, space_id=space_id, domain_hint=domain_hint)
 
 
+@mcp.tool()
+def wiki_remember(
+    space_id: str,
+    knowledge: str,
+    subject_hint: str | None = None,
+    kind: str | None = None,
+    relations: list[dict] | None = None,
+    domain_tags: list[str] | None = None,
+    source: str | None = None,
+) -> dict:
+    """Consolidate narrated, conversational knowledge into typed wiki objects.
+
+    Unlike wiki_ingest (which fetches a URL/file), wiki_remember takes an agent's
+    natural-language narration and runs the extract -> resolve -> LLM-consolidate
+    -> relations -> WikiLog -> reindex pipeline. The consolidation step merges new
+    facts into an existing entity/concept's wiki_facts/wiki_definition rather than
+    overwriting them: equivalent facts are deduplicated, genuinely new facts are
+    added, superseding facts replace old ones (audited in the WikiLog), and
+    contradictions are flagged (wiki_status=needs-review, never silently
+    overwritten). Re-asserting the same knowledge converges to a no-op.
+
+    Args:
+        space_id: Target Anytype space ID (must be bootstrapped at schema >= 0.3.1).
+        knowledge: Natural-language narration (non-empty; <= 32000 characters).
+        subject_hint: Optional title to seed entity resolution if extraction is empty.
+        kind: Optional "entity" or "concept" hint for the subject_hint fallback.
+        relations: Optional [{"from", "to", "label"}] links between named subjects.
+        domain_tags: Optional domain tags; each must exist in the space taxonomy.
+        source: Optional provenance note; "conversation" in it selects the
+            conversation source type, otherwise the agent source type is used.
+
+    Returns:
+        A dict with source_object_id, per-object results (objects[]),
+        relations_created, conflicts_flagged, wiki_log_id, warnings, and a status
+        of "ok" | "partial" | "error".
+    """
+    from .wiki.remember import wiki_remember as _wiki_remember
+
+    return _wiki_remember(
+        space_id=space_id,
+        knowledge=knowledge,
+        subject_hint=subject_hint,
+        kind=kind,
+        relations=relations,
+        domain_tags=domain_tags,
+        source=source,
+    )
+
+
 def main():
     # Route known CLI subcommands to the wiki CLI; otherwise run the MCP server.
     from .wiki import cli as wiki_cli

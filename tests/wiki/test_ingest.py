@@ -52,7 +52,12 @@ def set_anytype_env(monkeypatch):
 
 
 def _make_schema_ok_response():
-    """Return a mock list_objects response with a valid v0.3.0 schema marker."""
+    """Return a mock list_objects response with a valid current-schema marker.
+
+    Stamps the live ``WIKI_SCHEMA_VERSION`` (bumped to 0.3.1 by #289) so the
+    schema-compat precheck reads the space as up-to-date rather than outdated.
+    """
+    from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
     return {
         "data": [
             {
@@ -60,7 +65,7 @@ def _make_schema_ok_response():
                 "name": "Wiki",
                 "type": {"key": "collection"},
                 "properties": [
-                    {"key": "wiki_schema_version", "text": "0.3.0"}
+                    {"key": "wiki_schema_version", "text": WIKI_SCHEMA_VERSION}
                 ],
             }
         ],
@@ -1302,6 +1307,103 @@ class TestReingestIdempotency:
         )
         assert r1["source_object_id"] and r1["source_object_id"] == r2["source_object_id"], (
             "re-ingest must reuse the same Source object (Source dedup)"
+        )
+
+
+class TestWriteWikilogRegressionGuards:
+    """AC-R12b/B6, SF15 — regression guards for #284 shipped behavior (MUST PASS now)."""
+
+    @respx.mock
+    def test_write_wikilog_default_name_is_ingest(self, monkeypatch):
+        """AC-R12b/B6: _write_wikilog with no action_name kwarg names object 'ingest {subject}'.
+
+        Guards the current default behavior: name must be f"ingest {subject}".
+        Must pass against the current source AND after the planned generalization
+        that adds a defaulted action_name="ingest" parameter.
+        """
+        import json as _json
+
+        captured_creates: list[dict] = []
+        subject = "https://example.com/my-paper"
+
+        def mock_post(request, **kwargs):
+            try:
+                payload = _json.loads(request.content)
+                captured_creates.append(payload)
+            except Exception:
+                pass
+            return httpx.Response(201, json={"object": {"id": "log-001", "name": f"ingest {subject}"}})
+
+        respx.post().mock(side_effect=mock_post)
+
+        from anytype_llm_wiki.wiki.ingest import _write_wikilog
+        from anytype_llm_wiki.wiki.wiki_client import WikiClient
+
+        client = WikiClient(base_url=ANYTYPE_BASE)
+        _write_wikilog(
+            client,
+            FAKE_SPACE_ID,
+            subject=subject,
+            created=3,
+            updated=1,
+            notes="test notes",
+            action_tag_id=None,
+        )
+
+        assert captured_creates, "_write_wikilog must call create_object (no POST captured)"
+        names = [c.get("name", "") for c in captured_creates]
+        assert any(n == f"ingest {subject}" for n in names), (
+            f"AC-R12b/B6: _write_wikilog without action_name must name the object "
+            f"'ingest {{subject}}'; captured names={names}"
+        )
+
+    @respx.mock
+    def test_resolve_action_tag_default_is_ingest(self, monkeypatch):
+        """SF15: _resolve_wiki_action_tag(client, space_id) with no action_name kwarg resolves
+        the 'ingest' tag id from a mocked list_properties/list_tags response.
+
+        Guards the shipped #284 path. Must pass now AND after the planned generalization
+        that adds a defaulted action_name="ingest" param.
+        """
+        ingest_tag_id = "tag-ingest-fixed-001"
+
+        def mock_get(request, **kwargs):
+            path = str(request.url)
+            # Check /tags before /properties: the tags URL is
+            # /v1/spaces/{id}/properties/{prop_id}/tags — it contains both.
+            if "/tags" in path:
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": ingest_tag_id, "name": "ingest", "color": "blue"},
+                        {"id": "tag-query-001", "name": "query", "color": "green"},
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            if "/properties" in path:
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": "prop-wiki-action", "key": "wiki_action",
+                         "name": "Action", "format": "select"},
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        respx.get().mock(side_effect=mock_get)
+
+        from anytype_llm_wiki.wiki.ingest import _resolve_wiki_action_tag
+        from anytype_llm_wiki.wiki.wiki_client import WikiClient
+
+        client = WikiClient(base_url=ANYTYPE_BASE)
+        tag_id, degraded = _resolve_wiki_action_tag(client, FAKE_SPACE_ID)
+
+        assert not degraded, (
+            "SF15: _resolve_wiki_action_tag must not degrade when tags are reachable; "
+            f"degraded={degraded}"
+        )
+        assert tag_id == ingest_tag_id, (
+            f"SF15: _resolve_wiki_action_tag with no action_name must resolve the 'ingest' tag; "
+            f"expected tag_id={ingest_tag_id!r}, got {tag_id!r}"
         )
 
 

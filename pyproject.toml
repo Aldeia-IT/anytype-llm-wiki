@@ -1,6 +1,6 @@
 [project]
 name = "anytype-llm-wiki"
-version = "0.3.0"
+version = "0.3.1"
 description = "An Anytype-native LLM wiki combining Karpathy's pattern with Anytype's typed knowledge graph (Objects, Types, Relations)."
 readme = "README.md"
 license = "MIT"
