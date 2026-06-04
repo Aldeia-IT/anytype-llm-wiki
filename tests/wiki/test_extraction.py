@@ -405,22 +405,22 @@ class TestExtractTimeoutConfig:
     slow/large local model degrades into *waiting* rather than silently timing
     out into heading-only extraction."""
 
-    def test_default_is_120(self, monkeypatch):
+    def test_default_is_600(self, monkeypatch):
         monkeypatch.delenv("WIKI_EXTRACT_TIMEOUT", raising=False)
         from anytype_llm_wiki.wiki import config
-        assert config.extract_timeout() == 120.0
+        assert config.extract_timeout() == 600.0
 
     def test_override(self, monkeypatch):
-        monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "600")
+        monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "900")
         from anytype_llm_wiki.wiki import config
-        assert config.extract_timeout() == 600.0
+        assert config.extract_timeout() == 900.0
 
     def test_invalid_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "not-a-number")
         from anytype_llm_wiki.wiki import config
-        assert config.extract_timeout() == 120.0
+        assert config.extract_timeout() == 600.0
 
     def test_nonpositive_falls_back(self, monkeypatch):
         monkeypatch.setenv("WIKI_EXTRACT_TIMEOUT", "0")
         from anytype_llm_wiki.wiki import config
-        assert config.extract_timeout() == 120.0
+        assert config.extract_timeout() == 600.0

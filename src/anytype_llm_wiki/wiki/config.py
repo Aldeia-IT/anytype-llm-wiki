@@ -18,7 +18,9 @@ DEFAULT_WIKI_LOCK_DIR = os.path.expanduser("~/.local/share/anytype-llm-wiki/lock
 DEFAULT_WIKI_EXTRACT_MODEL = "qwen2.5:7b"
 
 # Default per-request read timeout (seconds) for the extraction model call.
-DEFAULT_WIKI_EXTRACT_TIMEOUT = 120.0
+# 600s (10 min): large local models routinely take several minutes on a sizable
+# source on reference hardware; a lower value trips the read timeout mid-generation.
+DEFAULT_WIKI_EXTRACT_TIMEOUT = 600.0
 
 # Default log level for wiki operations.
 DEFAULT_WIKI_LOG_LEVEL = "info"
@@ -41,10 +43,11 @@ def extract_timeout() -> float:
     """Resolve WIKI_EXTRACT_TIMEOUT — the per-request read timeout (seconds) for
     the extraction model call.
 
-    Defaults to 120s. Raise it for slow/large local models: a ~20GB model can
-    exceed 120s on a sizable source, which would otherwise trip the read timeout
-    and silently degrade extraction to heading-derived candidates only.
-    Non-numeric or non-positive values fall back to the default.
+    Defaults to 600s (10 min) — large local models (e.g. a ~20GB model) routinely
+    take several minutes on a sizable source; a lower timeout would trip the read
+    timeout mid-generation and silently degrade extraction to heading-derived
+    candidates only. Lower it for a fast model if you want quicker failure on a
+    hung endpoint. Non-numeric or non-positive values fall back to the default.
     """
     raw = os.environ.get("WIKI_EXTRACT_TIMEOUT")
     if raw is None:
