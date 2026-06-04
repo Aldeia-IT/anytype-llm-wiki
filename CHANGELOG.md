@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### User-visible changes
 
-- **`wiki-remember` command / `wiki_remember` MCP tool** (v0.3.1) — consolidate an
+- **`wiki-remember` command / `wiki_remember` MCP tool** — consolidate an
   agent's natural-language narration into typed wiki Objects. Runs the local
   extraction stack, resolves each subject, then for existing objects calls a local
   LLM **consolidation** step that merges equivalent facts (no duplicate line),
@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sustained agent writes" for the auto-reindex cost model, monotonic WikiLog
   growth/pruning, the shared-lock `ingest_in_progress` back-pressure semantics, and
   the as-is `knowledge` storage / notify-once consent caveats.
+
+### Internal changes
+
+- Schema bumped to `0.3.1`; `wiki_bootstrap` now seeds the `remember` action tag
+  (six total), the three `wiki_status` tags (`needs-review`/`reviewed`/`archived`)
+  and the three `wiki_source_type` tags (`document`/`conversation`/`agent`).
+- New modules: `wiki/remember.py`, `wiki/prompts/consolidate.md`.
+- `extraction.py` gains `consolidate()` and a `_call_ollama_prompt` helper;
+  `_call_ollama` now delegates to it with byte-identical wire behavior.
+
+## [0.3.0] - 2026-06-04
+
+### User-visible changes
+
 - **`wiki-ingest` command / `wiki_ingest` MCP tool** — compile a source (URL or
   local file) into curated, deduplicated, interlinked wiki Objects with
   provenance. Fetches the source (with SSRF protections), derives entity
@@ -43,17 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal changes
 
-- Schema bumped to `0.3.1`; `wiki_bootstrap` now seeds the `remember` action tag
-  (six total), the three `wiki_status` tags (`needs-review`/`reviewed`/`archived`)
-  and the three `wiki_source_type` tags (`document`/`conversation`/`agent`).
 - Schema bumped to `0.3.0`; `wiki_bootstrap` now stamps `wiki_schema_version` on
   the root Collection (authoritative, with WikiLog fallback) and creates the
   `wiki_action` select tags — reconciling known-limitations #2 and #3.
-- New modules: `wiki/remember.py`, `wiki/prompts/consolidate.md` (v0.3.1);
-  `wiki/fetch.py`, `wiki/extraction.py`, `wiki/ingest.py`,
+- New modules: `wiki/fetch.py`, `wiki/extraction.py`, `wiki/ingest.py`,
   `wiki/prompts/extraction.md`. New dependencies: `markdownify`, `pydantic`.
-- `extraction.py` gains `consolidate()` and a `_call_ollama_prompt` helper;
-  `_call_ollama` now delegates to it with byte-identical wire behavior.
 
 ## [0.2.0] - 2026-05-30
 
@@ -92,4 +100,5 @@ This release builds on the existing semantic-search foundation:
 
 [Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.1...HEAD
 [0.3.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/releases/tag/v0.2.0
