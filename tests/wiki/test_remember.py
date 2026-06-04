@@ -2204,6 +2204,11 @@ class TestCorePipeline:
     def test_ambiguous_subject_skips_and_warns(self, monkeypatch, tmp_path):
         """AC-R29/B9 — >1 same-name same-type candidates → action=error; no update_object; status=partial;
         co-resident unambiguous subject still writes.
+
+        The search mock is SUBJECT-AWARE: AmbigEntity returns 2 same-type same-name
+        rows (ambiguous), while ClearEntity returns exactly 1 distinct row (unambiguous).
+        This proves both that the ambiguous subject is skipped AND that the unambiguous
+        co-resident subject is still processed (writes its update/create).
         """
         _patch_decision_ok(monkeypatch, tmp_path)
         mock_extract = MagicMock(return_value={
@@ -2213,7 +2218,8 @@ class TestCorePipeline:
             ],
             "concepts": [],
         })
-        mock_consolidate = MagicMock(return_value=_canned_consolidate_result(changed=False))
+        # changed=True so the impl will issue a PATCH for ClearEntity, proving the write
+        mock_consolidate = MagicMock(return_value=_canned_consolidate_result(changed=True))
         mock_lock = MagicMock()
         mock_lock.return_value.__enter__ = MagicMock(return_value=None)
         mock_lock.return_value.__exit__ = MagicMock(return_value=False)
@@ -2221,23 +2227,51 @@ class TestCorePipeline:
         monkeypatch.setattr("anytype_llm_wiki.wiki.remember.consolidate", mock_consolidate, raising=False)
         monkeypatch.setattr("anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False)
 
-        update_calls = []
+        # Separate capture lists: ambiguous candidates vs the unambiguous ClearEntity
+        ambig_update_calls = []
+        clear_update_calls = []
 
         def search_side_effect(request, **kwargs):
-            # AmbigEntity → return 2 same-type same-name matches
-            # ClearEntity → return 1 match or empty (new)
-            url = str(request.url)
-            # Return ambiguous results for all — we check via the name in query if present
-            # Simpler: return ambiguous for any entity search
-            return httpx.Response(200, json={
-                "data": [
-                    {"id": "ambig-1", "name": "AmbigEntity", "type": {"key": "wiki_entity"},
-                     "properties": [{"key": "wiki_facts", "text": "Facts."}]},
-                    {"id": "ambig-2", "name": "AmbigEntity", "type": {"key": "wiki_entity"},
-                     "properties": [{"key": "wiki_facts", "text": "Facts v2."}]},
-                ],
-                "pagination": {"has_more": False},
-            })
+            """Subject-aware search mock.
+
+            Inspects the request body (POST) or URL query params (GET) for the
+            subject name being resolved, so each subject sees a distinct result set:
+            - "AmbigEntity" → 2 same-name same-type rows (triggers ambiguity handling)
+            - "ClearEntity"  → 1 distinct row (unambiguous; proceeds to consolidate)
+            - anything else  → empty (new object)
+            """
+            # Support both POST body ({"query": "..."}) and GET query param (?query=...)
+            query_text = ""
+            try:
+                body = json.loads(request.content)
+                query_text = body.get("query", "")
+            except Exception:
+                pass
+            if not query_text:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(str(request.url))
+                params = parse_qs(parsed.query)
+                query_text = params.get("query", [""])[0]
+
+            if "AmbigEntity" in query_text:
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": "ambig-1", "name": "AmbigEntity", "type": {"key": "wiki_entity"},
+                         "properties": [{"key": "wiki_facts", "text": "Facts."}]},
+                        {"id": "ambig-2", "name": "AmbigEntity", "type": {"key": "wiki_entity"},
+                         "properties": [{"key": "wiki_facts", "text": "Facts v2."}]},
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            if "ClearEntity" in query_text:
+                return httpx.Response(200, json={
+                    "data": [
+                        {"id": "clear-001", "name": "ClearEntity", "type": {"key": "wiki_entity"},
+                         "properties": [{"key": "wiki_facts", "text": "Old clear facts."}]},
+                    ],
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
 
         def capture_post(request, **kwargs):
             payload = json.loads(request.content)
@@ -2257,13 +2291,19 @@ class TestCorePipeline:
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
                 side_effect=capture_post
             )
+            # Ambiguous-candidate patches — must NOT be called
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/ambig-1").mock(
-                side_effect=lambda req, **kw: update_calls.append(json.loads(req.content))
+                side_effect=lambda req, **kw: ambig_update_calls.append(json.loads(req.content))
                 or httpx.Response(200, json={"object": {"id": "ambig-1"}})
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/ambig-2").mock(
-                side_effect=lambda req, **kw: update_calls.append(json.loads(req.content))
+                side_effect=lambda req, **kw: ambig_update_calls.append(json.loads(req.content))
                 or httpx.Response(200, json={"object": {"id": "ambig-2"}})
+            )
+            # Unambiguous ClearEntity patch — MUST be called exactly once
+            router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/clear-001").mock(
+                side_effect=lambda req, **kw: clear_update_calls.append(json.loads(req.content))
+                or httpx.Response(200, json={"object": {"id": "clear-001"}})
             )
 
             from anytype_llm_wiki.wiki.remember import wiki_remember
@@ -2273,8 +2313,14 @@ class TestCorePipeline:
             )
 
         # Ambiguous subject must NOT be updated
-        assert not update_calls, (
-            f"Ambiguous subject must NOT trigger update_object; update_calls: {update_calls}"
+        assert not ambig_update_calls, (
+            f"Ambiguous subject must NOT trigger update_object; ambig_update_calls: {ambig_update_calls}"
+        )
+
+        # Unambiguous co-resident subject (ClearEntity) MUST produce exactly one write
+        assert len(clear_update_calls) == 1, (
+            f"Unambiguous co-resident ClearEntity must produce exactly 1 write (update_object); "
+            f"got {len(clear_update_calls)} write(s): {clear_update_calls}"
         )
 
         objects = result.get("objects", [])
