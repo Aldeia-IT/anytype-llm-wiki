@@ -863,6 +863,12 @@ class TestBootstrapLiveAPI:
 class TestSchemaVersionBumped:
     """Guard: WIKI_SCHEMA_VERSION must be '0.3.0' (B1, prerequisite of Decision 2)."""
 
+    @pytest.mark.skip(
+        reason="SKIPPED: spec assumption superseded — #289 (v0.3.1) bumps "
+        "WIKI_SCHEMA_VERSION to '0.3.1' (spec §5 D11). This parent-spec guard "
+        "pinned '0.3.0'; the v0.3.1 schema-outdated precheck (AC-R11) requires "
+        "code at '0.3.1' so a live 0.3.0 space reads as outdated. See debrief."
+    )
     def test_wiki_schema_version_is_030(self):
         """B1: WIKI_SCHEMA_VERSION must be bumped from '0.2.0' to '0.3.0'.
 
@@ -1084,19 +1090,22 @@ class TestBootstrapSchemaMarkerV030:
         respx.patch().mock(side_effect=capture_patch)
 
         from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
         result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
 
-        # Assert update_object called with wiki_schema_version=0.3.0 payload on the collection
+        # Assert update_object called with the current wiki_schema_version payload
+        # on the collection. (#289 bumped the version to 0.3.1; the test asserts
+        # the running version is stamped, not a stale literal.)
         schema_patches = [
             c for c in schema_patch_calls
             if any(
-                p.get("key") == "wiki_schema_version" and p.get("text") == "0.3.0"
+                p.get("key") == "wiki_schema_version" and p.get("text") == WIKI_SCHEMA_VERSION
                 for p in c["payload"].get("properties", [])
             )
         ]
         assert len(schema_patches) >= 1, (
-            f"AC-M1a: update_object must be called with wiki_schema_version='0.3.0' on the "
-            f"root Collection; patch calls: {schema_patch_calls}"
+            f"AC-M1a: update_object must be called with wiki_schema_version="
+            f"'{WIKI_SCHEMA_VERSION}' on the root Collection; patch calls: {schema_patch_calls}"
         )
 
     @respx.mock
@@ -1109,8 +1118,11 @@ class TestBootstrapSchemaMarkerV030:
         NOTE: V4 PASS — Option (a) test body. If V4 FAILs, pivot to Option b-1.
         """
         from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
-        assert WIKI_SCHEMA_VERSION == "0.3.0", (
-            f"B1: WIKI_SCHEMA_VERSION must be '0.3.0' to run upgrade-from-v0.2.0 test; "
+        # #289 bumped the code version to 0.3.1; this upgrade test only requires
+        # that the code version be strictly newer than the v0.2.0 fixture below.
+        from anytype_llm_wiki.wiki.bootstrap import _version_tuple
+        assert _version_tuple(WIKI_SCHEMA_VERSION) > _version_tuple("0.2.0"), (
+            f"WIKI_SCHEMA_VERSION must be > '0.2.0' to run upgrade-from-v0.2.0 test; "
             f"got: {WIKI_SCHEMA_VERSION!r}"
         )
 

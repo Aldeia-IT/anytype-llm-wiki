@@ -52,7 +52,12 @@ def set_anytype_env(monkeypatch):
 
 
 def _make_schema_ok_response():
-    """Return a mock list_objects response with a valid v0.3.0 schema marker."""
+    """Return a mock list_objects response with a valid current-schema marker.
+
+    Stamps the live ``WIKI_SCHEMA_VERSION`` (bumped to 0.3.1 by #289) so the
+    schema-compat precheck reads the space as up-to-date rather than outdated.
+    """
+    from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
     return {
         "data": [
             {
@@ -60,7 +65,7 @@ def _make_schema_ok_response():
                 "name": "Wiki",
                 "type": {"key": "collection"},
                 "properties": [
-                    {"key": "wiki_schema_version", "text": "0.3.0"}
+                    {"key": "wiki_schema_version", "text": WIKI_SCHEMA_VERSION}
                 ],
             }
         ],
