@@ -18,7 +18,7 @@ from .bootstrap import wiki_bootstrap
 from .doctor import run_doctor
 
 # Subcommands that server.main() routes here instead of starting the MCP server.
-SUBCOMMANDS = ("wiki-bootstrap", "wiki-ingest", "wiki-remember", "doctor")
+SUBCOMMANDS = ("wiki-bootstrap", "wiki-ingest", "wiki-remember", "wiki-query", "doctor")
 
 
 def _parse_domain_tags(raw: str | None) -> list[str] | None:
@@ -157,6 +157,38 @@ def _cmd_remember(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in ("ok", "partial") else 1
 
 
+def _cmd_query(args: argparse.Namespace) -> int:
+    from .query import wiki_query
+
+    result = wiki_query(
+        question=args.question,
+        space_id=args.space_id,
+        file_back=True if args.file_back else None,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        status = result.get("status")
+        print(f"[wiki-query] space {args.space_id}: status={status}")
+        print(f"  mode:       {result.get('retrieval_mode')} "
+              f"(count={result.get('object_count_at_decision')})")
+        print(f"  answer:     {result.get('answer')}")
+        sources = result.get("sources_consulted", [])
+        print(f"  sources:    {len(sources)}")
+        for src in sources:
+            print(f"    - {src.get('title')} ({src.get('type')}) {src.get('deeplink')}")
+        print(f"  filed_back: {result.get('filed_back')}")
+        if result.get("query_object_deeplink"):
+            print(f"  query_obj:  {result['query_object_deeplink']}")
+        if result.get("wiki_log_id"):
+            print(f"  wiki_log:   {result['wiki_log_id']}")
+        if result.get("error"):
+            print(f"  error:      {result['error']}")
+        for warning in result.get("warnings", []):
+            print(f"  warn:       {warning}")
+    return 0 if result.get("status") in ("ok", "partial") else 1
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     report = run_doctor()
     if args.json:
@@ -232,6 +264,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remember_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     remember_p.set_defaults(func=_cmd_remember)
+
+    query_p = sub.add_parser(
+        "wiki-query", help="Query the wiki and synthesize an answer."
+    )
+    query_p.add_argument("--question", required=True, help="Natural-language question.")
+    query_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
+    query_p.add_argument(
+        "--file-back",
+        action="store_true",
+        help="Force filing the answer back as a typed Query object.",
+    )
+    query_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    query_p.set_defaults(func=_cmd_query)
 
     doctor_p = sub.add_parser("doctor", help="Run preflight checks.")
     doctor_p.add_argument(

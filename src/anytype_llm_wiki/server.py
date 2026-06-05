@@ -5,9 +5,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from fastmcp import FastMCP
 
-from . import config
-from .embedder import embed_query
-from .indexer import reindex
+from .indexer import reindex, semantic_search_core
 from .wiki.bootstrap import wiki_bootstrap as _wiki_bootstrap
 
 try:
@@ -38,41 +36,7 @@ def semantic_search(
     Returns:
         List of matching chunks with object name, type, heading, text snippet, and score.
     """
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
-
-    vector = embed_query(query)
-    client = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY or None)
-
-    # Build filter
-    conditions = []
-    if space_id:
-        conditions.append(FieldCondition(key="space_id", match=MatchValue(value=space_id)))
-    if types:
-        for t in types:
-            conditions.append(FieldCondition(key="type_key", match=MatchValue(value=t)))
-
-    search_filter = Filter(must=conditions) if conditions else None
-
-    results = client.query_points(
-        collection_name=config.QDRANT_COLLECTION,
-        query=vector,
-        query_filter=search_filter,
-        limit=limit,
-        with_payload=True,
-    )
-
-    return [
-        {
-            "object_name": r.payload.get("object_name", ""),
-            "object_id": r.payload.get("object_id", ""),
-            "type": r.payload.get("type_key", ""),
-            "heading": r.payload.get("heading", ""),
-            "text": r.payload.get("text", "")[:500],
-            "score": round(r.score, 4),
-        }
-        for r in results.points
-    ]
+    return semantic_search_core(query=query, space_id=space_id, types=types, limit=limit)
 
 
 @mcp.tool()
@@ -176,6 +140,37 @@ def wiki_remember(
         domain_tags=domain_tags,
         source=source,
     )
+
+
+@mcp.tool()
+def wiki_query(
+    question: str,
+    space_id: str,
+    file_back: bool | None = None,
+) -> dict:
+    """Query the typed wiki and return a synthesized answer (tiered retrieval).
+
+    Enumerates the wiki and picks a retrieval tier by object count (Tier 1
+    index-navigation below WIKI_INDEX_THRESHOLD, Tier 2 vector-augmented at/above
+    it), fetches the candidate objects plus their 1-hop neighborhood, synthesizes
+    a prose answer from the bounded context, and — when the answer is clean and
+    meets the file-back gate (or file_back=True) — files the question/answer back
+    as a typed Query object so the next reindex makes it retrievable (compounding).
+
+    Args:
+        question: Natural-language question.
+        space_id: Target Anytype space ID (must be bootstrapped at the current schema).
+        file_back: True forces filing; False suppresses; None uses the default gate
+            (>= 3 cited sources AND >= 100-word answer).
+
+    Returns:
+        A QueryResult dict (answer, sources_consulted, filed_back, retrieval_mode,
+        object_count_at_decision, query/wiki_log ids + deeplinks, warnings, status,
+        error, error_category).
+    """
+    from .wiki.query import wiki_query as _wiki_query
+
+    return _wiki_query(question=question, space_id=space_id, file_back=file_back)
 
 
 def main():

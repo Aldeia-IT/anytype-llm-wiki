@@ -31,6 +31,77 @@ DEFAULT_WIKI_EXTRACT_TIMEOUT = 600.0
 # Default log level for wiki operations.
 DEFAULT_WIKI_LOG_LEVEL = "info"
 
+# Default cap on extraction/synthesis input tokens (token estimate: len // 4).
+DEFAULT_WIKI_EXTRACT_MAX_INPUT_TOKENS = 8192
+
+# v0.4.0 wiki_query tiered-retrieval / synthesis defaults.
+DEFAULT_WIKI_INDEX_THRESHOLD = 200
+DEFAULT_WIKI_FILE_BACK_MIN_SOURCES = 3
+DEFAULT_WIKI_FILE_BACK_MIN_WORDS = 100
+DEFAULT_WIKI_SYNTH_MAX_OBJECTS = 24
+DEFAULT_WIKI_SYNTH_MAX_OBJECT_TOKENS = 1024
+
+
+def _positive_int(env: str, default: int) -> int:
+    """Resolve an int env var at call time; reject 0/negative → default (SF10).
+
+    Non-numeric / unset values also fall back to ``default``.
+    """
+    raw = os.environ.get(env)
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (ValueError, TypeError):
+        return default
+    return val if val > 0 else default
+
+
+def extract_max_input_tokens() -> int:
+    """Resolve WIKI_EXTRACT_MAX_INPUT_TOKENS (default 8192)."""
+    return _positive_int(
+        "WIKI_EXTRACT_MAX_INPUT_TOKENS", DEFAULT_WIKI_EXTRACT_MAX_INPUT_TOKENS
+    )
+
+
+def index_threshold() -> int:
+    """Resolve WIKI_INDEX_THRESHOLD — Tier-1/Tier-2 object-count flip (default 200)."""
+    return _positive_int("WIKI_INDEX_THRESHOLD", DEFAULT_WIKI_INDEX_THRESHOLD)
+
+
+def file_back_min_sources() -> int:
+    """Resolve WIKI_FILE_BACK_MIN_SOURCES — file-back source-count gate (default 3)."""
+    return _positive_int(
+        "WIKI_FILE_BACK_MIN_SOURCES", DEFAULT_WIKI_FILE_BACK_MIN_SOURCES
+    )
+
+
+def file_back_min_words() -> int:
+    """Resolve WIKI_FILE_BACK_MIN_WORDS — file-back answer-length gate (default 100)."""
+    return _positive_int(
+        "WIKI_FILE_BACK_MIN_WORDS", DEFAULT_WIKI_FILE_BACK_MIN_WORDS
+    )
+
+
+def synth_max_input_tokens() -> int:
+    """Resolve WIKI_SYNTH_MAX_INPUT_TOKENS — total synthesis context cap.
+
+    Defaults to ``extract_max_input_tokens()`` (8192) when unset/invalid.
+    """
+    return _positive_int("WIKI_SYNTH_MAX_INPUT_TOKENS", extract_max_input_tokens())
+
+
+def synth_max_objects() -> int:
+    """Resolve WIKI_SYNTH_MAX_OBJECTS — max objects in synthesis context (default 24)."""
+    return _positive_int("WIKI_SYNTH_MAX_OBJECTS", DEFAULT_WIKI_SYNTH_MAX_OBJECTS)
+
+
+def synth_max_object_tokens() -> int:
+    """Resolve WIKI_SYNTH_MAX_OBJECT_TOKENS — per-object token cap (default 1024)."""
+    return _positive_int(
+        "WIKI_SYNTH_MAX_OBJECT_TOKENS", DEFAULT_WIKI_SYNTH_MAX_OBJECT_TOKENS
+    )
+
 
 def lock_dir() -> str:
     """Resolve WIKI_LOCK_DIR from the environment at call time.
