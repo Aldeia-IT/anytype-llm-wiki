@@ -26,6 +26,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
@@ -205,8 +206,6 @@ def _build_synthesis_prompt(question: str, context_objects: list[dict]) -> str:
     ALL object names and text-property content are placed INSIDE the fence so the
     real injection vector (content) is treated as data, never instructions.
     """
-    from pathlib import Path
-
     blocks: list[str] = []
     for obj in context_objects:
         name = obj.get("name", "")
@@ -256,10 +255,6 @@ def synthesize(question: str, context_objects: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _object_deeplink(space_id: str, object_id: str) -> str:
-    return f"anytype://object/{space_id}/{object_id}"
-
-
 def _sanitize_question(question: str) -> str:
     """SF7: strip control chars and cap at 200 chars before any use."""
     cleaned = strip_control_chars(question or "")
@@ -276,30 +271,6 @@ def _type_of(obj: dict) -> str:
     if isinstance(t, dict):
         return t.get("key", "")
     return t or ""
-
-
-def _schema_version_from_objects(objects: list[dict]) -> str | None:
-    """Derive the live schema version from an already-fetched object list.
-
-    Mirrors ``bootstrap._read_schema_version`` (Wiki collection marker, else max
-    wiki_log marker) without a second enumeration.
-    """
-    collection_value = None
-    wikilog_max = None
-    for obj in objects:
-        if not isinstance(obj, dict):
-            continue
-        type_key = _type_of(obj)
-        if (
-            obj.get("name") == _bootstrap._ROOT_COLLECTION_NAME
-            and type_key == _bootstrap._ROOT_COLLECTION_TYPE_KEY
-        ):
-            collection_value = _bootstrap._found_schema_version(obj)
-        if type_key == "wiki_log":
-            wikilog_max = _bootstrap._max_version(
-                wikilog_max, _bootstrap._found_schema_version(obj)
-            )
-    return _bootstrap._max_version(collection_value, wikilog_max)
 
 
 def _short_type(type_key: str) -> str:
@@ -447,7 +418,7 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
             return _log_error(result)
 
         # --- Pre-check QA#25: schema version ---
-        live_version = _schema_version_from_objects(all_objects)
+        live_version = _bootstrap._schema_version_from_objects(all_objects)
         code_version = types_schema.WIKI_SCHEMA_VERSION
         schema_warnings: list[str] = []
         if live_version is None:
@@ -524,22 +495,19 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
                         "type": r.get("type") or r.get("type_key", ""),
                         "score": r.get("score", 0.0),
                     })
-            except Exception as exc:  # noqa: BLE001 — Qdrant down
-                if count < threshold:
-                    # (Unreachable: tier2 implies count>=threshold, but keep guard.)
-                    result["retrieval_mode"] = "index_navigation"
-                    tier2 = False
-                else:
-                    result["status"] = "error"
-                    result["error"] = f"{_API_ERROR_PREFIX} qdrant_unavailable"
-                    result["error_category"] = "api_error"
-                    result["wiki_log_id"] = _wikilog(
-                        write_client, space_id, safe_question, 0,
-                        "vector_augmented", False,
-                        notes_override="query: error qdrant_unavailable, vector_augmented",
-                    )
-                    _attach_log_deeplink(result, space_id)
-                    return _log_error(result)
+            except Exception:  # noqa: BLE001 — Qdrant down at/above threshold
+                # tier2 implies count >= threshold, so there is no Tier-2→Tier-1
+                # fallback here: a Qdrant outage at scale is an error return.
+                result["status"] = "error"
+                result["error"] = f"{_API_ERROR_PREFIX} qdrant_unavailable"
+                result["error_category"] = "api_error"
+                result["wiki_log_id"] = _wikilog(
+                    write_client, space_id, safe_question, 0,
+                    "vector_augmented", False,
+                    notes_override="query: error qdrant_unavailable, vector_augmented",
+                )
+                _attach_log_deeplink(result, space_id)
+                return _log_error(result)
 
         if not tier2:
             result["retrieval_mode"] = "index_navigation"
@@ -634,13 +602,17 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
                 "title": obj.get("name", ""),
                 "type": _short_type(_type_of(obj)),
                 "object_id": oid,
-                "deeplink": _object_deeplink(space_id, oid),
+                "deeplink": _bootstrap._object_deeplink(space_id, oid),
             })
         result["sources_consulted"] = sources_consulted
 
         # --- Detect synthesis error sentinels ---
         synth_error = _classify_synthesis_error(answer)
         if synth_error is not None:
+            # Spec contract (spec.md:240): on any error return, answer is "" and
+            # sources_consulted is []. The sentinel lives in error (scrubbed).
+            result["answer"] = ""
+            result["sources_consulted"] = []
             result["error"] = scrub_credentials(answer)
             result["error_category"] = synth_error
             result["status"] = "error"
@@ -662,7 +634,7 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
         result["filed_back"] = filed_back
         if query_obj_id:
             result["query_object_id"] = query_obj_id
-            result["query_object_deeplink"] = _object_deeplink(space_id, query_obj_id)
+            result["query_object_deeplink"] = _bootstrap._object_deeplink(space_id, query_obj_id)
         if fb_status == "partial":
             status = "partial"
 
@@ -690,7 +662,7 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
 
 def _attach_log_deeplink(result: dict, space_id: str) -> None:
     if result.get("wiki_log_id"):
-        result["wiki_log_deeplink"] = _object_deeplink(space_id, result["wiki_log_id"])
+        result["wiki_log_deeplink"] = _bootstrap._object_deeplink(space_id, result["wiki_log_id"])
 
 
 def _log_error(result: dict) -> dict:
@@ -897,7 +869,7 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
         )
         query_id = created.get("id")
     except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-        warnings.append(f"file_back_failed: {exc}")
+        warnings.append(scrub_credentials(f"file_back_failed: {exc}"))
         return False, None, "partial", warnings
 
     if not query_id:
@@ -915,7 +887,7 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
             {"properties": [{"key": "wiki_drew_from", "objects": cited_ids}]},
         )
     except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-        warnings.append(f"drew_from_write_failed: {exc}")
+        warnings.append(scrub_credentials(f"drew_from_write_failed: {exc}"))
         status = "partial"
 
     # Reciprocal back-reference onto each pre-existing cited entity/concept via
@@ -939,7 +911,7 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
                 {"properties": [{"key": rel_key, "objects": merged}]},
             )
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-            warnings.append(f"reciprocal_write_failed: {oid}: {exc}")
+            warnings.append(scrub_credentials(f"reciprocal_write_failed: {oid}: {exc}"))
             status = "partial"
 
     return True, query_id, status, warnings
