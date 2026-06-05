@@ -1,6 +1,6 @@
 ---
 name: anytype-llm-wiki-v0-6-0-automated-contradiction-detection
-status: DRAFT
+status: SPEC
 issue: 287
 repo: anytype-llm-wiki
 target_repo: anytype-llm-wiki
@@ -11,7 +11,7 @@ parent_spec: 284-anytype-llm-wiki-v0-3-0-wiki-ingest-compile-pipeli
 
 # anytype-llm-wiki v0.6.0 — Automated Cross-Object Contradiction Detection
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-05
 **Author:** spec-writer agent
 **Ticket:** Aldeia-IT/aldeia-box#287
