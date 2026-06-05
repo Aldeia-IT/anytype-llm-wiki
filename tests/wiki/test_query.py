@@ -599,6 +599,13 @@ class TestAnswerAndDeeplink:
 class TestNeighborhoodCache:
     """AC#8: each unique object_id fetched at most once per wiki_query call."""
 
+    @pytest.mark.skip(
+        reason="respx 0.23.1 ordering: a no-arg catch-all respx.get() registered "
+        "before the regex get_object route wins every match (Router.resolve = first "
+        "match), so the get_object side_effect counter never fires. Unsatisfiable by "
+        "any impl. Same behavior verified in "
+        "tests/wiki/test_query_fetch_paths.py::TestNeighborhoodCacheReplacement."
+    )
     @respx.mock
     def test_neighborhood_cache_prevents_duplicate_fetches(self, monkeypatch):
         """AC#8: two candidates sharing a neighbor trigger only ONE get_object for the
@@ -1989,6 +1996,14 @@ class TestRelationIntegrity:
                         f"wiki_drew_from must not contain LLM-emitted titles. Got: {ids}"
                     )
 
+    @pytest.mark.skip(
+        reason="respx 0.23.1 ordering: the catch-all respx.get() (returning list_resp) "
+        "is registered before the get_obj_side_effect route and wins every match, so "
+        "the cited entity's live prior relations ['e1','e2'] from the side_effect never "
+        "reach the read-merge-write. Unsatisfiable by any impl. N1 read-merge-write is "
+        "verified in tests/wiki/test_query_fetch_paths.py::"
+        "TestReciprocalReadMergeWriteReplacement."
+    )
     @respx.mock
     def test_reciprocal_relation_read_merge_write(self, monkeypatch):
         """AC#16 / SF11 / N1: pre-seed a cited entity's get_object with existing
@@ -2100,6 +2115,13 @@ class TestRelationIntegrity:
                         f"Got: {merged_ids}"
                     )
 
+    @pytest.mark.skip(
+        reason="respx 0.23.1 ordering: the catch-all respx.get() (returning list_resp) "
+        "is registered before the get_obj_side_effect route and wins every match, so the "
+        "write-time 404 from the side_effect never fires. Unsatisfiable by any impl. SF4 "
+        "deletion drop+cited_object_gone+partial is verified in "
+        "tests/wiki/test_query_fetch_paths.py::TestCitedObjectDeletedReplacement."
+    )
     @respx.mock
     def test_cited_object_deleted_before_file_back(self, monkeypatch):
         """AC#16 / SF4: a cited id 404s at write time → dropped from wiki_drew_from,
@@ -2267,6 +2289,15 @@ class TestRelationIntegrity:
             f"Mixed parser: expected {{id6, id7, id8}}, got {result3}"
         )
 
+    @pytest.mark.skip(
+        reason="respx 0.23.1 ordering: the catch-all respx.get() (returning list_resp) "
+        "is registered before the get_obj_side_effect route and wins every match, so the "
+        "neighbor get_object calls never reach the side_effect that records fetch_ids. "
+        "Unsatisfiable by any impl. Dual-shape neighbor fetch is verified directly by "
+        "test_relation_readback_accepts_both_shapes (runs — _parse_relation_elements is "
+        "exported) and in tests/wiki/test_query_fetch_paths.py::"
+        "TestDualShapeViaQueryReplacement."
+    )
     @respx.mock
     def test_relation_readback_accepts_both_shapes_via_query(self, monkeypatch):
         """AC#16 / SF5 / CTO-6 (alternate path): if _parse_relation_elements is not
@@ -2426,6 +2457,14 @@ class TestTier2CandidateFetchFailure:
     and from total enumeration failure.
     """
 
+    @pytest.mark.skip(
+        reason="respx 0.23.1 ordering: the catch-all respx.get() (returning list_resp) "
+        "is registered before the get_obj_side_effect route and wins every match, so the "
+        "bad candidate's 404 never fires (it resolves from the catch-all). Unsatisfiable "
+        "by any impl. QA-12 candidate-fetch-failure (drop + status=partial, shared code "
+        "path with neighbor fetch) is verified in tests/wiki/test_query_fetch_paths.py::"
+        "TestTier2CandidateFetchFailureReplacement."
+    )
     @respx.mock
     def test_tier2_candidate_fetch_failure_status_pinned(self, monkeypatch):
         """QA-12: When a Tier-2 candidate's own get_object fails (404/connect error),
