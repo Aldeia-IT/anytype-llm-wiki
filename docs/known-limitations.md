@@ -111,3 +111,47 @@ Residual caveats:
 - Resolution is title-based (exact + fuzzy ≥ 0.92; the embedding sweep is not yet implemented), so genuinely different surface forms of the same concept across *different* sources can still create separate objects.
 
 Both are surfaced by the v0.5.0 lint potential-duplicate sweep (aldeia-box#286).
+
+## 7. Filed `wiki_query` answers surface only after the next reindex (compounding latency)
+
+(v0.4.0, ticket #285 — `wiki_query` file-back.)
+
+`wiki_query` can file a synthesized answer back as a typed **Query Object**
+(`file_back=True`, or the default gate of ≥ 3 cited sources AND ≥ 100 words on a
+clean answer). This closes the compounding loop: a filed answer becomes a
+retrieval candidate for future queries. However, it does **not** become
+retrievable immediately.
+
+- A filed Query Object is written to the Anytype vault synchronously, but its
+  `wiki_answer` is embedded into the Qdrant index only on the **next**
+  `reindex_anytype` run. Until that reindex, Tier-2 (vector-augmented) retrieval
+  cannot surface the filed answer.
+- If you rely on the scheduled background reindex (`WIKI_AUTO_REINDEX` / launchd
+  cadence), the compounding latency is bounded by that cadence. A slow cadence
+  delays when a filed answer starts helping future queries; it does **not** add
+  per-query latency (the count/enumerate/synthesis path is unaffected).
+- Meaningful Tier-2 compounding also depends on the v0.3.0+ indexer
+  property-embedding behavior (#284): wiki content stored in text properties
+  (`wiki_answer`, `wiki_question`, …) must be embedded for filed Query Objects to
+  appear as candidates.
+
+**Status:** accepted for v0.4.0. A filed answer is durable in the vault
+immediately; only its *vector retrievability* waits for the next reindex.
+Verified by the mocked CI backstop
+`tests/wiki/test_query.py::TestCompoundingBackstop::test_filed_query_retrievable_after_reindex`.
+
+## 8. `wiki_query` candidate/neighbor objects are sourced from the enumeration snapshot when a permissive mock or partial fetch occurs
+
+(v0.4.0, ticket #285.)
+
+`wiki_query` fetches each candidate and 1-hop neighbor via
+`AnytypeReadClient.get_object` (one fetch per unique id, via a per-run cache).
+When a `get_object` call returns a non-object response (a list envelope from a
+permissive test mock) rather than the `{"object": …}` shape, the implementation
+falls back to the object as it appeared in the initial `list_objects`
+enumeration snapshot. A genuine HTTP error (404 / connection failure) is treated
+as a real fetch failure (the object is dropped and the result is downgraded to
+`partial`), not masked by the snapshot. This fallback exists for resilience and
+is exercised by the CI suite; live behavior (where `get_object` returns the real
+object shape) is pinned by the skip-gated live smoke test
+(`tests/wiki/test_query.py::TestQueryLive`).
