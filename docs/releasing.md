@@ -167,6 +167,83 @@ variable is the on/off switch.
 
 ---
 
+## Pre-tag live smoke (required before every `v*` tag)
+
+CI runs only mocked tests — the real Anytype wire is never exercised in CI. So
+**every `v*` tag must be preceded by a live smoke** against a real Anytype space.
+Run it after the release-prep commit is on `main` and before cutting the tag.
+
+### Credentials — export the key; the binary does NOT load `.env`
+
+The wiki clients resolve `ANYTYPE_API_KEY` from `os.environ` at call time
+(`wiki/_base_client.py::_resolve_api_key`) — there is **no `load_dotenv`**. A key
+that merely sits in `.env` is invisible to the installed binary; a missing/empty
+key surfaces as `Illegal header value b'Bearer '`. `uv run` does not load `.env`
+either. Always export first:
+
+```bash
+cd /Users/Shared/development/anytype-llm-wiki
+set -a; source ./.env; set +a      # exports ANYTYPE_API_KEY into the environment
+```
+
+The canonical credential is the **aldeia-bot** API token in SOPS (`anytype.api_key`,
+via `aldeia-box/scripts/secrets.sh get anytype.api_key`); the repo `.env` carries a
+rendered copy. aldeia-bot is an **editor** on the live spaces and the local Anytype
+daemon runs at `127.0.0.1:31012`. Full credential model:
+`aldeia-box/docs/anytype-setup.md`.
+
+### Target space
+
+Use a **throwaway, populated, Jan-vault space** — `llm-wiki-2`
+(`bafyreiacvp2vditsib3qv2h4wqqpdnjloix4if6s4jzcffeuaro4n3znre.h81a2ip0xaff`) or
+`llm-wiki-test-2`. Always resolve **by space ID** and prefer the `.h81a2ip0xaff`
+(Jan's vault) network — never the empty aldeia-bot-owned orphan spaces on
+`meysp1f5qul1` (see `anytype-setup.md` → "Known orphan spaces").
+
+### Steps
+
+1. **Reinstall the runtime at the new version** so the installed binary matches the
+   tag you are about to cut (the root-owned `/usr/local/bin` symlink error is
+   harmless — the symlink already points at the updated uv-tools install):
+
+   ```bash
+   UV_TOOL_DIR=/usr/local/lib/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin /opt/homebrew/bin/uv tool install --force \
+     --no-cache --with 'idna>=3.15' --with 'pyjwt>=2.13.0' --with 'urllib3>=2.7.0' \
+     --with 'starlette>=1.0.1' --with 'cryptography>=46.0.7' /Users/Shared/development/anytype-llm-wiki
+   /usr/local/bin/anytype-llm-wiki wiki-lint --help    # confirms new subcommands exist
+   ```
+
+2. **Exercise the shipped tool(s) live** against the throwaway space; expect a
+   non-error status and a written WikiLog receipt. For v0.5.0:
+
+   ```bash
+   /usr/local/bin/anytype-llm-wiki wiki-lint --space-id <llm-wiki-2 id> --json
+   # expect: "status": "ok" | "partial", "wiki_log_id": non-null
+   ```
+
+   Run the new/changed command(s) for the release and eyeball the live output for
+   the behavior the change introduced.
+
+3. **Schema-affecting releases only:** round-trip through the Anytype desktop
+   export → import and diff via the API (this caught the #303 display-name
+   collision). Skip when `WIKI_SCHEMA_VERSION` is unchanged.
+
+4. **Skip-gated live pytest** (optional — for surfaces CI can't reach, e.g. the D1
+   `backlinks` field shape):
+
+   ```bash
+   set -a; source ./.env; set +a
+   ANYTYPE_SPACE_ID=<id> ANYTYPE_BACKLINKED_OBJECT_ID=<object with inbound relations> \
+     uv run pytest -m live tests/wiki/test_lint.py::TestLintLive -q
+   ```
+
+   A space with no inter-object relations cannot exercise backlink *element* shape —
+   pick a populated space with real relations when the change depends on it.
+
+Proceed to [Cutting a release](#cutting-a-release) only once the live smoke is clean.
+
+---
+
 ## Cutting a release
 
 ### 1. Match the version and the tag exactly (tagging contract)
