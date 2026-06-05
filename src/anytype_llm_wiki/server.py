@@ -173,6 +173,49 @@ def wiki_query(
     return _wiki_query(question=question, space_id=space_id, file_back=file_back)
 
 
+@mcp.tool()
+def wiki_lint(
+    space_id: str,
+    severity_threshold: str = "all",
+    include_duplicates: bool = False,
+) -> dict:
+    """Run a read-only structural health check over a bootstrapped wiki space.
+
+    Enumerates the wiki once and runs a battery of ten structural checks
+    (asymmetric relations, orphans, pipeline orphans, unresolved contradictions,
+    staleness, oversized descriptions, empty types, unreviewed/stale needs-review,
+    and — opt-in — potential duplicates), assembles a severity-ranked LintReport,
+    and files a single WikiLog receipt. wiki_lint mutates nothing else.
+
+    The duplicate sweep is OPT-IN: it runs only when ``include_duplicates=True``.
+    The advertised ≤60s / ≤500-object performance budget describes the DEFAULT
+    (sweep-off) path; the opt-in sweep embeds the wiki and can exceed that budget
+    (and is hard-skipped above WIKI_LINT_MAX_OBJECTS).
+
+    The ``contradiction_unresolved`` check is PASSIVE until v0.6.0/#287 —
+    ``wiki_contradictions`` is not yet auto-populated, so a green contradiction
+    result is NOT a guarantee that no contradictions exist.
+
+    Args:
+        space_id: Target Anytype space ID (must be bootstrapped at the current schema).
+        severity_threshold: Minimum severity retained in findings[] — one of
+            "all" | "low" | "medium" | "high" | "critical" ("all" includes
+            informational; "low" excludes it). Does not affect potential_duplicates[].
+        include_duplicates: When True, run the opt-in Qdrant duplicate sweep.
+
+    Returns:
+        A LintReport dict (object_counts, findings, potential_duplicates, summary,
+        elapsed_ms, wiki_log_id, deeplink, warnings, status, error, error_category).
+    """
+    from .wiki.lint import wiki_lint as _wiki_lint
+
+    return _wiki_lint(
+        space_id=space_id,
+        severity_threshold=severity_threshold,
+        include_duplicates=include_duplicates,
+    )
+
+
 def main():
     # Route known CLI subcommands to the wiki CLI; otherwise run the MCP server.
     from .wiki import cli as wiki_cli
