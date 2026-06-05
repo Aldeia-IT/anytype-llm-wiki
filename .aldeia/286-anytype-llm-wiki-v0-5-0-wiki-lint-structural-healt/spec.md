@@ -93,7 +93,11 @@ Research findings are in `.aldeia/286-anytype-llm-wiki-v0-5-0-wiki-lint-structur
 | `_qdrant()` | indexer.py:16 | Qdrant client factory |
 | `semantic_search_core(query, space_id, types, limit)` | indexer.py:20 | potential-duplicates sweep |
 
-`semantic_search_core` is called for the potential-duplicates sweep with `types=["wiki_entity","wiki_concept","wiki_comparison","wiki_query"]`. Results filtered to the `0.70–config.index_threshold()` band (the `score` field is 0.0–1.0 cosine similarity). `config.index_threshold()` (config.py:67) provides the upper bound, consistent with D5.
+`semantic_search_core` is called for the potential-duplicates sweep with `types=["wiki_entity","wiki_concept","wiki_comparison","wiki_query"]`. The `score` field is a 0.0–1.0 cosine similarity (`indexer.py:79`). Results are filtered to the literal band **`[0.70, 0.85)`**: 0.70 is the master spec duplicate-surfacing floor (§424d/§600); 0.85 is the embedding auto-upsert threshold (master spec §424c) — at/above 0.85 the ingest pipeline would have auto-upserted rather than created a duplicate, so those pairs are not "potential duplicates." The upper bound is the new `config.lint_duplicate_max_score()` knob (`WIKI_LINT_DUPLICATE_MAX_SCORE`, default 0.85), NOT `index_threshold()` (which returns a Tier-1/Tier-2 object **count**, default 200 — `config.py:67` — and is not a similarity score at all). The band is half-open: score `s` qualifies iff `0.70 <= s < lint_duplicate_max_score()`.
+
+Each `semantic_search_core` call embeds the query text via bge-m3 (`embed_query`, indexer.py:47) THEN runs one Qdrant query — so the sweep costs **N embeddings + N Qdrant queries** for N objects. This is the dominant cost of a lint run; see Performance Budget and Resource Impact for why it runs only on the default `severity_threshold="all"` pass and is bounded by `WIKI_LINT_MAX_OBJECTS`.
+
+**Sweep mechanics (SF8):** for each source object O, the sweep query uses O's title/description text and `limit=5`; candidates are filtered by (a) the band above, and (b) `candidate_id != O.object_id` (self-match exclusion). Each surviving pair is canonicalized to a sorted `(id_a, id_b)` tuple and inserted into a `set`, so a reciprocal pair (A→B and B→A) is emitted **once** in `potential_duplicates[]`.
 
 #### D5 — Schema v0.4.1; wire contracts pinned
 
@@ -126,35 +130,70 @@ The authoritative check table, severity grades, and data-flow diagram are in mas
 | Check enum | Severity | Delta vs master |
 |------------|----------|-----------------|
 | `asymmetric_relation` | Critical | No change to detection; **D1 makes `backlinks` the primary inbound-count source** |
-| `pipeline_orphan` | High | No run-id linkage exists (research §F). Detection is a timestamp-proximity heuristic: enumerate WikiLog objects with `wiki_action=ingest` whose `wiki_notes` contains a failure marker (e.g. `"relation_rollback"`); objects with zero `wiki_relations` AND no inbound backlinks created near the partial-failure WikiLog's `wiki_timestamp` are flagged. Spec acknowledges this as heuristic — no false-negative guarantee |
-| `orphan` | High | No change; 7-day grace via `wiki_ingested_at`; **D1 primary path** |
-| `contradiction_unresolved` | High | PASSIVE until v0.6.0 (#287) — zero findings on pipeline wikis; fires only when `wiki_contradictions` manually populated |
-| `stale` | Medium | No change; `last_modified < linked source wiki_ingested_at − 90d` |
+| `pipeline_orphan` | High | No run-id linkage exists (research §F). Detection is a timestamp-proximity heuristic: enumerate WikiLog objects with `wiki_action=ingest` whose `wiki_notes` contains a failure marker (e.g. `"relation_rollback"`); a zero-relation, zero-backlink object is flagged when its source-derived ingest timestamp falls within **± `WIKI_LINT_PIPELINE_WINDOW_SECONDS` (default 300s)** of the failure WikiLog's `wiki_timestamp` (G3 — pinned tolerance makes `test_pipeline_orphan_check_fires` deterministic). Heuristic — no false-negative guarantee |
+| `orphan` | High | No change; 7-day grace via the object's source-derived ingest age (see Age-derivation note); **D1 primary path** |
+| `contradiction_unresolved` | High | PASSIVE until v0.6.0 (#287) — zero findings on pipeline wikis; fires only when `wiki_contradictions` manually populated. Applies to `wiki_entity` only (SF9 — `wiki_last_reviewed` is not on `wiki_concept`) |
+| `stale` | Medium | No change; `last_modified < linked source wiki_ingested_at − 90d` (Age-derivation note) |
 | `unreviewed_needs_review` | High | NEW (D3): `wiki_status == "needs-review"`, any age — applies to `wiki_entity`/`wiki_concept` only |
-| `stale_needs_review` | Medium | REPLACES `stale_stub` (D2): `wiki_status == "needs-review"` AND `wiki_ingested_at < now − 30d` — applies to `wiki_entity`/`wiki_concept` only |
+| `stale_needs_review` | Medium | REPLACES `stale_stub` (D2): `wiki_status == "needs-review"` AND source-derived ingest age `> 30d` — applies to `wiki_entity`/`wiki_concept` only |
 | `oversized` | Low | No change; >~2000 chars (`WIKI_LINT_OVERSIZED_CHARS`, default 2000) |
 | `empty_type` | Informational | No change |
-| `potential_duplicate` | Informational | No change; Qdrant 0.70–`config.index_threshold()` band (D4) |
+| `potential_duplicate` | Informational | Qdrant `[0.70, 0.85)` band (D4); only computed on the `severity_threshold="all"` pass (B2) |
 
-**LintReport schema:** master spec lines 548–586 (normative). `check` enum is extended with `unreviewed_needs_review` and `stale_needs_review`; `stale_stub` is dropped. No other schema field changes.
+**Age-derivation note (SF5):** `wiki_ingested_at` is a property of `wiki_source` objects only (`types_schema.py:79`; written by `ingest.py:621` / `remember.py:189`). `wiki_entity`/`wiki_concept` carry NO top-level `wiki_ingested_at` — they reference sources via the `wiki_sources` relation (`types_schema.py:93`/`109`). Every age-based check (`orphan` grace, `stale`, `stale_needs_review`) therefore dereferences the object's `wiki_sources`, `_fetch_cached`-loads each linked source, and takes the **most-recent** linked `wiki_ingested_at` as the object's effective ingest timestamp. An object with no resolvable source timestamp is treated as ungated (its age cannot be established → age-conditioned checks do not fire; `stale_needs_review` collapses to the always-firing `unreviewed_needs_review`). These extra source fetches are budgeted in Resource Impact.
 
-**Tool signature:** master spec lines 540–546 (normative, reproduced by reference only).
+**LintReport schema:** master spec lines 548–586 (normative). `check` enum is extended with `unreviewed_needs_review` and `stale_needs_review`; `stale_stub` is dropped. Errors additionally carry `error_category` (`config_error`/`api_error`/`data_error`) per master §614/§617 — `lint.py` sets it on every error path exactly as `query.py:430/442` does (G5). No other schema field changes.
+
+**Tool signature:** master spec lines 540–546 (normative, reproduced by reference only). The `check` enum now has **10** members (the master's 9 minus `stale_stub` plus the D2/D3 split into `stale_needs_review` + `unreviewed_needs_review`).
+
+**Severity ordering + threshold gating (SF7):** the total order is `critical > high > medium > low > informational`. `severity_threshold` accepts `critical|high|medium|low|all`; a threshold `T` keeps findings with severity `>= T`. `low` therefore **excludes** informational (`empty_type`, `potential_duplicate`); only `all` includes informational. The separate `potential_duplicates[]` array is likewise gated: it is populated only when `severity_threshold == "all"` (this is also the B2 cost gate — see Performance Budget). A non-default threshold (e.g. `"high"`) skips the entire Qdrant sweep and its per-object embedding cost.
+
+**`status` lifecycle (SF6):** `ok` = every check ran on every enumerated object; `partial` = ≥1 `get_object`/`semantic_search_core` failure caused an object (or the sweep) to be skipped — the object id is recorded in `warnings[]` and lint continues; `error` = enumeration or a pre-check (QA#25/QA#30) aborted the run before findings could be produced (no WikiLog written). A `partial` run still writes its WikiLog receipt.
+
+**Missing `wiki_status` (G4):** an entity/concept with no `wiki_status` value (pre-schema object) is treated as not-needs-review — neither `unreviewed_needs_review` nor `stale_needs_review` fires.
 
 ---
 
 ### Pre-Checks
 
-Both pre-checks fire before any Anytype write or Qdrant call, in this order:
+Both pre-checks fire before any Anytype write or Qdrant call. The object enumeration read (`list_objects`) runs **between** QA#30 and QA#25 — intentional, because QA#25 needs the enumerated objects to derive the live schema version; a read is not a write, so the "before any write or Qdrant call" guarantee holds (G9). Order:
 
-1. **QA#30 — `patch_decision_missing_or_invalid`** (pure filesystem read, no network): `util.read_patch_decision()` (util.py:229). Gate: result non-None AND contains both `patch_body_updates` AND `implementation_path` keys. Exact error string: `"[CONFIG ERROR] patch_decision_missing_or_invalid: a valid patch-decision.md with patch_body_updates and implementation_path is required"`. Mirrors query.py:395–398.
+1. **QA#30 — `patch_decision_missing_or_invalid`** (pure filesystem read, no network): `util.read_patch_decision()` (util.py:229). Gate: result non-None AND contains both `patch_body_updates` AND `implementation_path` keys. Exact error string: `"[CONFIG ERROR] patch_decision_missing_or_invalid: a valid patch-decision.md with patch_body_updates and implementation_path is required"`. Mirrors query.py:395–398. Sets `error_category="config_error"`.
 
-2. **QA#25 — `wiki_schema_outdated`**: enumerate objects first (one `list_objects` call), then call `bootstrap._schema_version_from_objects(all_objects)` (bootstrap.py:486) + `ingest._cmp_versions(live, code)` (ingest.py:447). Fires if live version < `WIKI_SCHEMA_VERSION = "0.4.1"`. Exact error string: `"[CONFIG ERROR] wiki_schema_outdated: space schema {live} < code {code}; run wiki_bootstrap to upgrade"`. Mirrors query.py:421 pattern. WikiLog write is skipped on either pre-check failure.
+2. **Enumerate** objects (one paginated `list_objects` sequence) → `all_objects`.
+
+3. **QA#25 — schema gate** (mirrors `query.py:421–448` exactly): `live = bootstrap._schema_version_from_objects(all_objects)` (bootstrap.py:486); `cmp = ingest._cmp_versions(live, code)` with `code = "0.4.1"` (ingest.py:447). Three branches (SF4 — verified against `query.py:424–448`):
+   - `live is None` (never-bootstrapped / empty space): abort, `status="error"`, `error_category="config_error"`, error `"[CONFIG ERROR] wiki_schema_missing: run wiki_bootstrap on this space first"`. No WikiLog written.
+   - `cmp < 0` (live < code): abort, `status="error"`, `error_category="config_error"`, error `"[CONFIG ERROR] wiki_schema_outdated: space schema {live} < code {code}; run wiki_bootstrap to upgrade"`. No WikiLog written.
+   - `cmp > 0` (live > code, newer-than-code): **warn-and-continue** — append `"wiki_schema_newer: space schema {live} > code {code}; continuing"` to `warnings[]` and proceed with the lint (scope brief §65).
+
+WikiLog write is skipped on either aborting pre-check failure (`error` status).
 
 ---
 
 ### Performance Budget
 
-Budget: ≤60s for ≤500 objects. Above 500 objects, emit in `LintReport.warnings`:
+Budget: ≤60s for ≤500 objects. All phases are **sequential** (no concurrency is specified for v0.5.0). Per-phase worst-case arithmetic for N=500 (SF1), p50 ~100ms Anytype latency:
+
+| Phase | Cost @ N=500 | Notes |
+|-------|-------------|-------|
+| Enumeration | ~5 GETs (batched 100/page) | ~0.5s |
+| `get_object` fan-out | N × ~100ms ≈ **50s** | `_fetch_cached` ensures each object fetched at most once across all checks |
+| Source fetches (age checks) | ≤(#sources) × ~100ms, cached | sources are few relative to entities; reuses the same cache |
+| WikiLog cross-ref | 1 `search` POST | ~0.2s |
+| Tag resolution | 2 GETs at startup | ~0.2s |
+| **Default High/Critical/Medium/Low battery (no sweep)** | **≈ 51s** | within ≤60s for 500 objects |
+| Duplicate sweep (only on `severity_threshold="all"`) | N × (bge-m3 embed + Qdrant query) | the dominant, variable cost — see below |
+
+The `get_object` fan-out alone nearly exhausts the budget, so the non-sweep battery is the part that must fit ≤60s — and it does (~51s @ 500). **The duplicate sweep is excluded from any non-default run** (B2): it runs only when `severity_threshold == "all"`. An operator wanting a fast High/Critical-only pass uses `severity_threshold="high"`, which skips the sweep and the entire per-object embedding cost.
+
+**Hard ceiling (SF2):** `WIKI_LINT_MAX_OBJECTS` (default 2000). When enumeration exceeds it, the **sweep is skipped automatically** (even under `"all"`) and a warning is emitted; the rest of the lint still runs (degraded, not aborted) so High/Critical findings are never lost to a large wiki:
+
+```
+lint_sweep_skipped_object_cap: {N} objects exceed WIKI_LINT_MAX_OBJECTS={cap} — potential_duplicates sweep skipped to stay within budget
+```
+
+The softer count warning still fires above 500 objects (independent of the cap):
 
 ```
 lint_object_count_exceeded_budget: {N} objects found — lint may exceed 60s; consider archiving unused objects
@@ -172,15 +211,18 @@ Per `docs/known-limitations.md §9`, the O(N) enumeration concern is the same as
 
 ## Configuration
 
-New env knobs (all use `_positive_int` guard from config.py:45, rejecting 0/negative):
+New env knobs. Integer knobs use the existing `_positive_int` guard (config.py:45, rejecting 0/negative). The duplicate band needs a fractional value, which `_positive_int` cannot express — so `wiki/config.py` gains a **new `_bounded_float(env, default, lo=0.0, hi=1.0)` guard** (parse via `float()`; on non-numeric/unset → `default`; clamp/reject out-of-range to `default`) used by `lint_duplicate_max_score()`.
 
-| Env var | Default | Purpose |
-|---------|---------|---------|
-| `WIKI_LINT_OVERSIZED_CHARS` | 2000 | Oversized-description threshold |
-| `WIKI_LINT_ORPHAN_GRACE_DAYS` | 7 | Orphan entity/concept grace period |
-| `WIKI_LINT_STALE_NEEDS_REVIEW_DAYS` | 30 | `stale_needs_review` age cutoff |
+| Env var | Default | Guard | Purpose |
+|---------|---------|-------|---------|
+| `WIKI_LINT_OVERSIZED_CHARS` | 2000 | `_positive_int` | Oversized-description threshold |
+| `WIKI_LINT_ORPHAN_GRACE_DAYS` | 7 | `_positive_int` | Orphan grace period (source-derived age) |
+| `WIKI_LINT_STALE_NEEDS_REVIEW_DAYS` | 30 | `_positive_int` | `stale_needs_review` age cutoff |
+| `WIKI_LINT_DUPLICATE_MAX_SCORE` | 0.85 | `_bounded_float` `[0,1]` | Upper bound of the `[0.70, X)` duplicate band (B1) |
+| `WIKI_LINT_MAX_OBJECTS` | 2000 | `_positive_int` | Object ceiling; above it the duplicate sweep is skipped (SF2) |
+| `WIKI_LINT_PIPELINE_WINDOW_SECONDS` | 300 | `_positive_int` | ± window for the `pipeline_orphan` timestamp heuristic (G3) |
 
-`WIKI_INDEX_THRESHOLD` (existing, default 200) is reused as the upper bound for the duplicate-sweep score band. No new threshold variable needed for duplicates.
+The earlier draft's claim "no new threshold variable needed for duplicates" is **reversed**: `index_threshold()` returns an object **count** (default 200), not a similarity score, and cannot serve as the band's upper bound.
 
 Add to `.env.example`:
 
@@ -188,6 +230,9 @@ Add to `.env.example`:
 WIKI_LINT_OVERSIZED_CHARS=2000
 WIKI_LINT_ORPHAN_GRACE_DAYS=7
 WIKI_LINT_STALE_NEEDS_REVIEW_DAYS=30
+WIKI_LINT_DUPLICATE_MAX_SCORE=0.85
+WIKI_LINT_MAX_OBJECTS=2000
+WIKI_LINT_PIPELINE_WINDOW_SECONDS=300
 ```
 
 ---
@@ -198,20 +243,27 @@ WIKI_LINT_STALE_NEEDS_REVIEW_DAYS=30
 
 **Prompt injection:** not applicable — `wiki_lint` produces a structural report from property reads and does not invoke an LLM. Object names and descriptions read during lint are not interpolated into any prompt.
 
-**Credentials:** no new credential surfaces. `ANYTYPE_API_KEY` (bearer token) and optional `QDRANT_API_KEY` inherited from existing config. All error strings and WikiLog `notes` containing API endpoint fragments pass through `scrub_credentials()` (util.py:98) before being returned or written.
+**Credentials:** no new credential surfaces. `ANYTYPE_API_KEY` (bearer token) and optional `QDRANT_API_KEY` inherited from existing config. `scrub_credentials()` (util.py:98) **strips userinfo (`user:pass@`) and the query string/fragment from URL-shaped fragments** — it does NOT redact bearer tokens or API keys (those live in request headers, never in lint output) (SF11). Lint never concatenates `ANYTYPE_API_KEY`/`QDRANT_API_KEY` into any `detail`, `notes`, or error string; any URL-shaped endpoint fragment in an error/notes string is passed through `scrub_credentials()` before being returned or written.
+
+**Object-controlled text in output (SF12):** object titles/descriptions are not LLM-interpolated, but they ARE written into the report and into Anytype's WikiLog. To bound data exposure and log bloat: (a) the `oversized` finding's `detail` carries a **char-count summary** (e.g. `"description is 3140 chars (> 2000)"`), never the raw oversized body; (b) any object title/description placed into a finding `detail` or into WikiLog `wiki_subject`/`wiki_notes` is run through `strip_control_chars(...)[:N]` (precedent: `query.py:347` truncates the subject via `strip_control_chars(question)[:50]`).
 
 **SSRF:** lint fetches only Anytype objects by ID (configured host) and queries Qdrant (configured host). No user-supplied URLs are fetched.
+
+**Doctor (G8):** no `wiki/doctor.py` change — `run_doctor` is a fixed preflight battery and lint adds no new external dependency. Doctor remains green; this satisfies the ticket's "doctor green" AC without modification.
 
 ---
 
 ## Resource Impact
 
+**Clients (G7):** lint uses the same dual-client setup as `query.py:405–406` — an `AnytypeReadClient` for `get_object`/backlinks, and a `WikiClient` for `list_objects`/`search`/`create_object`/WikiLog. The WikiLog write is routed through `WikiClient`, never the read client.
+
 - **Enumeration:** one `list_objects` paginated GET sequence, O(N). Seeds `all_objects` and `enum_map`.
-- **Object fetch:** up to N `get_object` calls (one per object), mitigated by `_fetch_cached` — each object fetched at most once across all checks.
-- **Duplicate sweep:** up to N `semantic_search_core` calls (or a configurable sample cap). Each call hits Qdrant locally. This is the most CPU-intensive pass; the Informational severity means it can be skipped via `severity_threshold` without losing High/Critical findings.
+- **Object fetch:** up to N `get_object` calls (one per object), mitigated by `_fetch_cached` — each object fetched at most once across all checks. Lint is single-space-per-run, so the `_fetch_cached` `object_id`-only cache key (query.py:692) is sound (SF3).
+- **Source fetches (SF5):** age-based checks dereference each object's `wiki_sources` and `_fetch_cached`-load the linked sources for `wiki_ingested_at`. Sources are few relative to entities/concepts and share the same per-run cache, so this adds at most (#distinct sources) extra GETs, not O(N).
+- **Duplicate sweep:** N `semantic_search_core` calls (bge-m3 embed + Qdrant query each) — the dominant cost. It runs **only** on the default `severity_threshold="all"` pass AND only when `N <= WIKI_LINT_MAX_OBJECTS`; otherwise it is skipped (sweep-skip warning) without losing any High/Critical finding (B2/SF2).
 - **WikiLog cross-ref (pipeline_orphan):** one `WikiClient.search` POST to retrieve WikiLog objects with `wiki_action=ingest`.
 - **Tag resolution:** two GETs at startup (properties + tags for `wiki_status`); cached for the run.
-- **Total wall time target:** ≤60s for ≤500 objects. Above 500 objects the budget warning is emitted.
+- **Total wall time target:** ≤60s for ≤500 objects (non-sweep battery; see Performance Budget arithmetic). Above 500 objects the budget warning is emitted.
 
 ---
 
@@ -225,6 +277,7 @@ All tests in `tests/wiki/test_lint.py`. CI-runnable tests use `@respx.mock`, `mo
 |------|-----------------|
 | `test_asymmetric_relation_check_fires` | Seed object A with `wiki_relations=[B]` and object B with no reciprocal; assert finding `check="asymmetric_relation"`, severity Critical. Backlinks-primary path: `obj["backlinks"]` present and empty → fallback fires. |
 | `test_backlinks_primary_no_traversal` | Seed object A with `backlinks=["B"]` in the `get_object` response; assert no O(N) traversal occurs (the fallback branch is not entered). |
+| `test_backlinks_malformed_falls_back` | `backlinks` present but non-list (`null`, a dict, a non-list scalar); assert it is treated identically to absent — fallback traversal runs and the primary path does not raise (SF10). |
 | `test_pipeline_orphan_check_fires` | WikiLog with `wiki_action=ingest` and `wiki_notes` containing `"relation_rollback"` near the timestamp of a zero-relation object; assert finding `check="pipeline_orphan"`, severity High. |
 | `test_orphan_check_fires_after_grace` | Object with zero `wiki_relations` and `wiki_ingested_at` older than 7 days; assert finding `check="orphan"`, severity High. |
 | `test_orphan_check_suppressed_within_grace` | Same object with `wiki_ingested_at` < 7 days ago; assert no orphan finding. |
@@ -232,18 +285,25 @@ All tests in `tests/wiki/test_lint.py`. CI-runnable tests use `@respx.mock`, `mo
 | `test_stale_needs_review_fires` | `wiki_entity` with `wiki_status=needs-review` AND `wiki_ingested_at < now − 30d`; assert finding `check="stale_needs_review"`, severity Medium. |
 | `test_both_needs_review_checks_fire_on_aged_object` | Same aged needs-review object fires BOTH `unreviewed_needs_review` (High) AND `stale_needs_review` (Medium); assert both appear in `findings[]` and `summary` counts each. |
 | `test_stale_stub_check_never_emitted` | Full lint run on a fixture with only `needs-review` / `reviewed` / `archived` status values; assert no finding with `check="stale_stub"` in the report. |
-| `test_contradiction_check_passive` | Object with non-empty `wiki_contradictions`; assert zero findings with `check="contradiction_unresolved"` when `wiki_contradictions` is set but `wiki_last_reviewed` is null — PASSIVE check, fires on manual population only. When `wiki_contradictions` is manually populated on a fixture, assert finding fires. |
-| `test_stale_check_fires` | `last_modified < linked source wiki_ingested_at − 90d`; assert finding `check="stale"`, severity Medium. |
-| `test_oversized_check_fires` | Description > 2000 chars; assert finding `check="oversized"`, severity Low. |
-| `test_empty_type_check_fires` | Space with zero `wiki_concept` objects; assert finding `check="empty_type"`, severity Informational. |
-| `test_duplicate_sweep_fires_in_band` | `semantic_search_core` monkeypatched to return a candidate with score 0.75 (in the 0.70–`index_threshold()` band); assert entry in `potential_duplicates[]` with correct `similarity_score`. |
-| `test_duplicate_sweep_excludes_outside_band` | score < 0.70 and score > `index_threshold()` (as a float, e.g. `index_threshold()/1000`) both excluded from `potential_duplicates[]`. |
-| `test_severity_threshold_high_filters_medium_low` | Full fixture with findings at all severities; `severity_threshold="high"` → `findings[]` contains only Critical + High; summary counts only those. |
-| `test_pre_check_schema_outdated_fires_before_write` | Mocked schema version older than `"0.4.1"` → `[CONFIG ERROR] wiki_schema_outdated` returned; no POST to objects. |
+| `test_contradiction_check_passive` | `wiki_entity` with non-empty `wiki_contradictions` AND null `wiki_last_reviewed` → finding fires (manual population); pipeline fixture with empty `wiki_contradictions` → zero findings. Check scoped to `wiki_entity` only — `wiki_concept` has no `wiki_last_reviewed` (SF9). |
+| `test_stale_check_fires` | Entity whose linked `wiki_source` has `wiki_ingested_at` such that `last_modified < that − 90d`; assert the source dereference happens and finding `check="stale"`, severity Medium (SF5). |
+| `test_oversized_check_fires` | Description > 2000 chars; assert finding `check="oversized"`, severity Low, and `detail` is a char-count summary (not the raw body) (SF12). |
+| `test_empty_type_check_fires` | Space with zero `wiki_concept` objects; assert finding `check="empty_type"`, severity Informational (only under default `all`). |
+| `test_duplicate_sweep_fires_in_band` | `semantic_search_core` monkeypatched to return a candidate with score **0.75** (in `[0.70, 0.85)`); default `severity_threshold="all"`; assert one entry in `potential_duplicates[]` with `similarity_score=0.75`. |
+| `test_duplicate_sweep_excludes_outside_band` | Candidates with score **0.60** (below floor) and **0.95** (≥ 0.85 upper bound) both excluded from `potential_duplicates[]`. |
+| `test_duplicate_sweep_self_match_and_pair_dedup` | Sweep returns the source object itself (excluded via `object_id` match) AND a reciprocal pair A→B / B→A; assert the pair appears **exactly once** in `potential_duplicates[]` (canonicalized) (SF8). |
+| `test_duplicate_sweep_skipped_under_threshold` | `severity_threshold="high"`; assert `semantic_search_core` is never called and `potential_duplicates[]` is empty (B2). |
+| `test_duplicate_sweep_skipped_over_object_cap` | Enumeration returns > `WIKI_LINT_MAX_OBJECTS` (monkeypatched low) under `all`; assert sweep skipped, `lint_sweep_skipped_object_cap` warning present, High/Critical findings still produced (SF2). |
+| `test_severity_threshold_high_filters_medium_low` | Full fixture, all severities; `severity_threshold="high"` → `findings[]` only Critical + High; informational excluded; summary matches. |
+| `test_severity_threshold_low_excludes_informational` | `severity_threshold="low"` → Critical/High/Medium/Low retained, `empty_type`/`potential_duplicate` (informational) absent; `potential_duplicates[]` empty (SF7). |
+| `test_pre_check_schema_outdated_fires_before_write` | Mocked schema version older than `"0.4.1"` → `[CONFIG ERROR] wiki_schema_outdated`, `status="error"`, `error_category="config_error"`; no POST to objects. |
+| `test_pre_check_schema_missing_aborts` | `_schema_version_from_objects` returns `None` (empty space) → `[CONFIG ERROR] wiki_schema_missing`, `status="error"`, no WikiLog POST (SF4). |
+| `test_pre_check_schema_newer_warns_and_continues` | Live schema > code → lint continues, `wiki_schema_newer` warning in `warnings[]`, WikiLog still written (SF4). |
+| `test_partial_status_on_get_object_failure` | One `get_object` returns 5xx → that object skipped + recorded in `warnings[]`, lint continues, `status="partial"`, WikiLog still written (SF6). |
 | `test_pre_check_patch_decision_missing_fires_before_write` | Missing `patch-decision.md` (via `monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))`) → `[CONFIG ERROR] patch_decision_missing_or_invalid` returned; no Anytype call. |
 | `test_pre_checks_fire_before_wikilog_write` | Both pre-check failure paths assert zero POST calls. |
 | `test_object_count_budget_warning_above_500` | Mocked enumeration returns 501 objects; assert `lint_object_count_exceeded_budget: 501` in `LintReport.warnings`. |
-| `test_wikilog_receipt_written_on_clean_run` | Clean run; assert one POST with `type_key="wiki_log"` and `wiki_action=lint` in the body. |
+| `test_wikilog_receipt_written_on_clean_run` | Clean run; assert one POST with `type_key="wiki_log"` and `wiki_action=lint` in the body, and `elapsed_ms >= 0` in the report (G1). |
 | `test_wikilog_skipped_on_pre_check_failure` | Pre-check failure; assert zero POST calls. |
 | `test_wiki_lint_registered_and_cli_routed` | `wiki_lint` in MCP tool registry (server.py); `"wiki-lint"` in `cli.SUBCOMMANDS`. No live services. |
 
@@ -279,21 +339,21 @@ Exclude from CI: `uv run pytest -m 'not live'`
 
 4. **Double-count rule:** a needs-review entity older than 30d fires BOTH `unreviewed_needs_review` (High) AND `stale_needs_review` (Medium) — both appear in `findings[]` and both are counted in `summary` (CI-mocked `test_both_needs_review_checks_fire_on_aged_object`).
 
-5. **All 9 check types produce findings on seeded fixtures:** Critical (`asymmetric_relation`), High (`pipeline_orphan`, `orphan`, `unreviewed_needs_review`, `contradiction_unresolved`), Medium (`stale`, `stale_needs_review`), Low (`oversized`), Informational (`empty_type`, `potential_duplicate`) — each verified by a dedicated CI-mocked test.
+5. **All 10 check types produce findings on seeded fixtures:** Critical (`asymmetric_relation`), High (`pipeline_orphan`, `orphan`, `unreviewed_needs_review`, `contradiction_unresolved`), Medium (`stale`, `stale_needs_review`), Low (`oversized`), Informational (`empty_type`, `potential_duplicate`) — each verified by a dedicated CI-mocked test (G2).
 
 6. **Contradiction check passive:** zero `contradiction_unresolved` findings on a pipeline wiki fixture (all `wiki_contradictions` empty); finding fires when `wiki_contradictions` is manually populated (CI-mocked `test_contradiction_check_passive`).
 
-7. **`severity_threshold` filtering:** `severity_threshold="high"` returns only Critical and High findings in `findings[]` and summary; lower severities absent (CI-mocked `test_severity_threshold_high_filters_medium_low`).
+7. **`severity_threshold` filtering + informational gating (SF7):** order `critical > high > medium > low > informational`. `="high"` returns only Critical+High; `="low"` retains down to Low but excludes informational and leaves `potential_duplicates[]` empty; only `="all"` includes informational and runs the sweep (CI-mocked `test_severity_threshold_high_filters_medium_low` + `test_severity_threshold_low_excludes_informational`).
 
-8. **Duplicate sweep correct band:** potential-duplicate findings appear for scores in `[0.70, config.index_threshold()/1000)` band and are absent for scores outside that band (CI-mocked).
+8. **Duplicate sweep correct band + dedup (B1/SF8):** under `severity_threshold="all"`, potential-duplicate pairs appear for `0.70 <= score < WIKI_LINT_DUPLICATE_MAX_SCORE` (default 0.85) and are absent below 0.70 / at-or-above 0.85; self-matches are excluded and each reciprocal pair is emitted exactly once (CI-mocked `test_duplicate_sweep_fires_in_band`, `test_duplicate_sweep_excludes_outside_band`, `test_duplicate_sweep_self_match_and_pair_dedup`).
 
-9. **QA#25 fires before write** (by reference — exact error strings, helpers, and ordering per master spec lines 743, 1590–1607 and research §G): outdated schema → `[CONFIG ERROR] wiki_schema_outdated`, no WikiLog POST (CI-mocked).
+9. **QA#25 schema gate — three branches (SF4):** `live < code` → `[CONFIG ERROR] wiki_schema_outdated`; `live is None` → `[CONFIG ERROR] wiki_schema_missing`; both abort with `status="error"`, `error_category="config_error"`, no WikiLog POST. `live > code` → `wiki_schema_newer` warning and lint continues (CI-mocked, three tests).
 
 10. **QA#30 fires before write** (by reference — per master spec line 905 and research §G): missing patch-decision → `[CONFIG ERROR] patch_decision_missing_or_invalid`, no Anytype call (CI-mocked).
 
-11. **WikiLog receipt:** every clean or partial run writes one `wiki_log` object with `wiki_action=lint`; WikiLog is skipped on pre-check failure (CI-mocked `test_wikilog_receipt_written_on_clean_run` + `test_wikilog_skipped_on_pre_check_failure`).
+11. **WikiLog receipt + status lifecycle (SF6/G1):** every `ok` or `partial` run writes one `wiki_log` object with `wiki_action=lint` and reports `elapsed_ms >= 0`; a `get_object`/sweep failure yields `status="partial"` (skipped object in `warnings[]`) without aborting; WikiLog is skipped only on aborting pre-check failure (`status="error"`) (CI-mocked `test_wikilog_receipt_written_on_clean_run`, `test_partial_status_on_get_object_failure`, `test_wikilog_skipped_on_pre_check_failure`).
 
-12. **500-object budget warning:** >500 objects enumerated → `lint_object_count_exceeded_budget: {N}` in `LintReport.warnings` (CI-mocked `test_object_count_budget_warning_above_500`).
+12. **Object budget warning + sweep cap (SF2):** >500 objects enumerated → `lint_object_count_exceeded_budget: {N}` in `warnings`; > `WIKI_LINT_MAX_OBJECTS` → duplicate sweep auto-skipped with `lint_sweep_skipped_object_cap` warning while High/Critical findings still produced (CI-mocked `test_object_count_budget_warning_above_500` + `test_duplicate_sweep_skipped_over_object_cap`).
 
 13. **D5 wire contracts: tag resolution uses property-scoped two-step:** no call to `/v1/spaces/{space_id}/tags`; all tag resolution goes through `list_properties` → `list_tags(space_id, property_id)` (CI-mocked `test_asymmetric_relation_check_fires` + needs-review tests verify the two-step path).
 
@@ -309,11 +369,11 @@ Exclude from CI: `uv run pytest -m 'not live'`
 
 | File | Action |
 |------|--------|
-| `src/anytype_llm_wiki/wiki/lint.py` | NEW — object enumeration, 9-check battery, duplicate sweep, LintReport assembly, WikiLog receipt |
+| `src/anytype_llm_wiki/wiki/lint.py` | NEW — dual-client setup, object enumeration, 10-check battery, duplicate sweep (band `[0.70, 0.85)`, gated on `all`), LintReport assembly, WikiLog receipt |
 | `src/anytype_llm_wiki/wiki/cli.py` | EDIT — add `"wiki-lint"` to `SUBCOMMANDS` (cli.py:21), add `_cmd_lint` |
 | `src/anytype_llm_wiki/server.py` | EDIT — register `wiki_lint` MCP tool |
-| `src/anytype_llm_wiki/wiki/config.py` | EDIT — add `lint_oversized_chars()`, `lint_orphan_grace_days()`, `lint_stale_needs_review_days()` using `_positive_int` guard |
-| `.env.example` | EDIT — add three `WIKI_LINT_*` vars |
+| `src/anytype_llm_wiki/wiki/config.py` | EDIT — add a `_bounded_float([0,1])` guard; add `lint_oversized_chars()`, `lint_orphan_grace_days()`, `lint_stale_needs_review_days()`, `lint_max_objects()`, `lint_pipeline_window_seconds()` (`_positive_int`) + `lint_duplicate_max_score()` (`_bounded_float`) |
+| `.env.example` | EDIT — add six `WIKI_LINT_*` vars |
 | `README.md` | EDIT — add lint section; "How it works" maintain loop; grep marketing claims for consistency (Mem0 #140 R2 lesson) |
 | `CHANGELOG.md` | EDIT — v0.5.0 entry |
 | `MIGRATIONS.md` | NOT touched — D2-option-B; no schema bump; `WIKI_SCHEMA_VERSION` stays at `"0.4.1"` |
@@ -327,7 +387,8 @@ Exclude from CI: `uv run pytest -m 'not live'`
 | `_cmp_versions(a, b)` | ingest.py:447 | version comparison |
 | `_object_deeplink(space_id, object_id)` | bootstrap.py:83 | deeplink generation |
 | `read_patch_decision()` | util.py:229 | QA#30 patch-decision gate |
-| `scrub_credentials(url)` | util.py:98 | error/WikiLog string sanitization |
+| `scrub_credentials(url)` | util.py:98 | strip userinfo + query/fragment from URL-shaped error/WikiLog fragments (SF11) |
+| `strip_control_chars(text)` | util.py:82 | sanitize+truncate object text in `detail`/WikiLog subject/notes (SF12) |
 | `_resolve_wiki_action_tag(client, space_id, "lint")` | ingest.py:212 | WikiLog action tag resolution |
 | `_write_wikilog(client, space_id, ...)` | ingest.py:241 | WikiLog write |
 | `WikiClient.list_objects(space_id)` | wiki_client.py:136 | object enumeration (paginates internally) |
@@ -344,8 +405,8 @@ Exclude from CI: `uv run pytest -m 'not live'`
 
 ### Ordering
 
-1. Add config vars to `wiki/config.py` (`lint_oversized_chars`, `lint_orphan_grace_days`, `lint_stale_needs_review_days`) and `.env.example`.
-2. Implement `wiki/lint.py`: pre-checks → enumerate → tag resolution → check battery (in master spec data-flow order: asymmetric → orphan/pipeline-orphan → contradiction → stale → oversized → empty-type → duplicate sweep) → severity filter → LintReport assembly → WikiLog receipt.
+1. Add the `_bounded_float` guard and config accessors to `wiki/config.py` (`lint_oversized_chars`, `lint_orphan_grace_days`, `lint_stale_needs_review_days`, `lint_max_objects`, `lint_pipeline_window_seconds`, `lint_duplicate_max_score`) and the six vars to `.env.example`.
+2. Implement `wiki/lint.py`: QA#30 → enumerate → QA#25 (3 branches) → tag resolution → check battery (asymmetric → orphan/pipeline-orphan → contradiction → stale → oversized → empty-type → duplicate sweep [only if `severity_threshold="all"` and `N <= lint_max_objects()`]) → severity filter → LintReport assembly → WikiLog receipt. The empty-type check is placed late here (the master data-flow lists it first); this reorder is deliberate and harmless — checks are independent and share the per-run cache (G6).
 3. Register `wiki_lint` in `server.py` and add `wiki-lint` to `cli.py`.
 4. Write `tests/wiki/test_lint.py` — CI tests first (one per check), then filtering/pre-check/WikiLog tests, live smoke test last.
 5. Update `README.md` and `CHANGELOG.md`.
@@ -362,6 +423,36 @@ None. D1–D5 are all locked above. The master spec's OQ#7 is resolved by D1.
 
 - **Automated `wiki_contradictions` population (v0.6.0 / #287):** re-activates the contradiction check for pipeline wikis. Keeps the check passive in v0.5.0.
 - **Count-cache (`docs/known-limitations.md §9`):** deferred — not a v0.5.0 deliverable.
-- **Duplicate-sweep sample cap:** if the full N-object sweep proves too slow in practice, a configurable `WIKI_LINT_DUPLICATE_SAMPLE` cap (random sample of wiki objects) is a natural follow-up. Not specified here to keep config surface minimal.
+- **Duplicate-sweep random sampling:** v0.5.0 bounds sweep cost via `severity_threshold` gating + the `WIKI_LINT_MAX_OBJECTS` hard skip (B2/SF2). A finer-grained `WIKI_LINT_DUPLICATE_SAMPLE` (random subset rather than all-or-nothing) remains a natural follow-up if operators want partial-coverage sweeps on very large wikis.
 - **Multi-space federation:** deferred (master spec roadmap).
 - **Auto-fix / auto-merge of findings:** explicitly out of scope — `wiki_lint` is report-only and mutates nothing but its own WikiLog receipt.
+
+---
+
+## Review Resolution (R1)
+
+Each finding from `review-r1.md` → disposition. Source-cited findings (SF4/SF5/SF11) re-verified against the cited lines.
+
+- **B1** (duplicate band was an object-count) — FIXED: D4, Lint-Checks, Config, AC8, and both duplicate tests now use literal `[0.70, 0.85)` via new `WIKI_LINT_DUPLICATE_MAX_SCORE` knob (default 0.85) guarded by new `_bounded_float`; `index_threshold()` reuse and `/1000` hack removed; Config claim reversed.
+- **B2** (uncapped N-embedding sweep) — FIXED: sweep runs only on `severity_threshold="all"`, auto-skips above `WIKI_LINT_MAX_OBJECTS`; Performance Budget gives per-phase arithmetic showing the no-sweep battery ≈51s ≤60s @ 500.
+- **SF1** (fan-out arithmetic) — FIXED: Performance Budget table, sequential, per-phase derivation.
+- **SF2** (hard cap) — FIXED: `WIKI_LINT_MAX_OBJECTS` (default 2000) auto-skips sweep with warning; lint continues degraded.
+- **SF3** (single-space cache key) — FIXED: stated in Resource Impact.
+- **SF4** (schema branches) — FIXED: Pre-Checks now has `None→wiki_schema_missing` (abort), `<→outdated` (abort), `>→newer` (warn-continue); verified against `query.py:424–448`. Three tests + AC9.
+- **SF5** (`wiki_ingested_at` cross-source hop) — FIXED: Age-derivation note covers orphan/stale/stale_needs_review; verified `wiki_ingested_at` is on `wiki_source` only (`types_schema.py:79`, `ingest.py:621`); source fetches budgeted in Resource Impact.
+- **SF6** (status lifecycle) — FIXED: ok/partial/error defined; `test_partial_status_on_get_object_failure` + AC11.
+- **SF7** (severity ordering + informational) — FIXED: total order stated, `low` excludes informational, `potential_duplicates[]` gated to `all`; `severity_threshold="low"` test + AC7.
+- **SF8** (self-match + pair canonicalization) — FIXED: D4 sweep mechanics; dedup test.
+- **SF9** (contradiction on concept) — FIXED: check scoped to `wiki_entity` only (verified `wiki_last_reviewed` absent from `wiki_concept`, `types_schema.py:106–113`).
+- **SF10** (malformed backlinks) — FIXED: non-list treated as absent → fallback; `test_backlinks_malformed_falls_back`.
+- **SF11** (scrub_credentials wording) — FIXED: corrected to "strips userinfo + query/fragment from URL-shaped fragments"; verified `util.py:98–141`.
+- **SF12** (detail/WikiLog truncation) — FIXED: char-count summary for oversized; `strip_control_chars(...)[:N]` on object text into detail/subject/notes.
+- **G1** (`elapsed_ms`) — FIXED: `elapsed_ms >= 0` asserted in clean-run test + AC11.
+- **G2** (9→10 checks) — FIXED: relabelled in Tool-signature note + AC5.
+- **G3** (pipeline_orphan window) — FIXED: `WIKI_LINT_PIPELINE_WINDOW_SECONDS` (default 300s) tolerance.
+- **G4** (missing `wiki_status`) — FIXED: treated as not-needs-review (severity/status block).
+- **G5** (`error_category`) — FIXED: set on all error paths matching `query.py:430/442`.
+- **G6** (check reorder) — FIXED: deliberate-reorder call-out in Ordering.
+- **G7** (dual-client) — FIXED: Resource Impact states AnytypeReadClient + WikiClient split.
+- **G8** (doctor) — FIXED: "no doctor change; doctor remains green" in Security.
+- **G9** (enumeration between gates) — FIXED: Pre-Checks states the read is intentionally between QA#30 and QA#25.
