@@ -65,9 +65,15 @@ The insertion point is `ingest.py:_run_ingest`, inside the `for cand in candidat
 
 A new dedicated function `detect_contradictions(new_facts, obj_id, target, space_id, client, read_client)` in `ingest.py` calls `_call_ollama_prompt` (extraction.py:99-152) with a new prompt file at `src/anytype_llm_wiki/wiki/prompts/contradiction.md`. Candidate peers are bounded by objects already linked via `wiki_relations` read from the in-memory `target` dict (O(relations), not O(wiki); no target GET). Qdrant semantic pre-filter is an optional enhancement; the MVP uses only the already-linked set. Returns `list[dict]` of `{"object_id": str, "reason": str}`. The read-plane `read_client` (`AnytypeReadClient`) is used for PEER reads only.
 
-#### LD5 — `_existing_text` must move to `util.py`
+#### LD5 — relation/text readers move to `util.py` (circular-import-safe)
 
-`_existing_text` is defined at `remember.py:629-642`. `ingest.py` needs the same helper, but `remember.py` imports from `ingest.py` (not the reverse), so importing `_existing_text` from `remember.py` into `ingest.py` would create a circular import. Move `_existing_text` to `util.py`; update both `remember.py` and `ingest.py` to import from `util`.
+`ingest.py` needs two readers that today live in modules it cannot import from:
+- `_existing_text` (remember.py:629-642) reads **text-format** props (e.g. `wiki_facts`). `remember.py` imports from `ingest.py`, so the reverse import would be circular.
+- `_parse_relation_elements` (query.py:72) normalizes an **objects-format** relation `objects` array to ids. `query.py` imports from `ingest.py` (query.py:38), so `ingest.py` cannot import from `query.py` either.
+
+`util.py` is the base module both already import from (it imports no siblings except `config`). Therefore: move `_existing_text` AND `_parse_relation_elements` to `util.py`, and add a small `_relation_ids(obj, prop_key) -> list[str]` helper there (find the prop by key in `obj["properties"]`, return `_parse_relation_elements(prop.get("objects"))`). Re-export `_parse_relation_elements` from `query.py` (`from .util import _parse_relation_elements`) so existing importers and its direct parser test keep working unchanged. `remember.py` and `ingest.py` import `_existing_text` / `_relation_ids` from `util`.
+
+The reader distinction is load-bearing: text-format props (`wiki_facts`, `wiki_definition`) use `_existing_text`; objects-format relations (`wiki_relations`, `wiki_contradictions`) use `_relation_ids`. Using `_existing_text` on an objects-format prop returns `""` and silently breaks detection.
 
 ### Fold-in Dispositions
 
@@ -87,10 +93,11 @@ Three existing files are modified; one new file is added:
 
 | File | Change |
 |------|--------|
-| `wiki/ingest.py` | Construct `AnytypeReadClient()` in `_run_ingest` (with `try/finally: close()`); hook in `_run_ingest` update branch; new `detect_contradictions()`; new `_write_contradiction_links()`; update `_create_source` for `was_resumed` (both call sites); import `_existing_text` from `util` and `AnytypeReadClient` from `..anytype_client` |
+| `wiki/ingest.py` | Construct `AnytypeReadClient()` in `_run_ingest` (with `try/finally: close()`); hook in `_run_ingest` update branch; new `detect_contradictions()`; new `_write_contradiction_links()`; update `_create_source` for `was_resumed` (both call sites); import `_existing_text` + `_relation_ids` from `util` and `AnytypeReadClient` from `..anytype_client` |
 | `wiki/extraction.py` | No change — `_call_ollama_prompt` reused as-is |
 | `wiki/lint.py` | Remove `_PASSIVE_CONTRADICTION_NOTE` (lines 79-83); update `_empty_report` notes (line 172); strip passive detail from finding (line 429); update docstrings (lines 20-22, 211-214) |
-| `wiki/util.py` | Add `_existing_text` (moved from `remember.py:629`) |
+| `wiki/util.py` | Add `_existing_text` (moved from `remember.py:629`), `_parse_relation_elements` (moved from `query.py:72`), and new `_relation_ids(obj, prop_key)` helper |
+| `wiki/query.py` | Replace the `_parse_relation_elements` definition with a re-export `from .util import _parse_relation_elements` (preserves existing importers + its parser test) |
 | `wiki/remember.py` | Update import of `_existing_text` to use `util._existing_text` |
 | `wiki/prompts/contradiction.md` | New — contradiction detection prompt (I/O contract in §3.3) |
 
@@ -110,8 +117,8 @@ flowchart TD
     D --> E[objects_updated.append]
     E --> F{kind == entity?}
     F -- no (concept) --> G[skip detection\nLD1: entity-only]
-    F -- yes --> H["target facts + target wiki_relations\nread from in-memory target dict (no GET)\nnew_facts from cand"]
-    H --> I["detect_contradictions(new_facts, obj_id,\nspace_id, client, read_client)\npeer GETs via read_client only"]
+    F -- yes --> H["target wiki_relations via _relation_ids(target,...)\nread from in-memory target dict (no GET)\nnew_facts from cand"]
+    H --> I["detect_contradictions(new_facts, obj_id,\ntarget, space_id, client, read_client)\npeer GETs via read_client only"]
     I -- raises (hard failure) --> J[caller appends warning\ncontradiction_detection_degraded\nresult continues]
     I -- returns [] (no contradictions) --> N[continue loop\nno warning]
     I -- peers found --> K[_write_contradiction_links\nbidirectional GET-peer+PATCH+rollback]
@@ -153,16 +160,21 @@ ollama_base = (os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()).rstrip(
 ```
 
 **Algorithm:**
-1. Read the target's `wiki_relations` from the in-memory `target` dict via
-   `_existing_text(target, "wiki_relations")` (no GET on the target — `target` is
-   the search-result object from `resolve_entity`, ingest.py:184-200, which carries
-   `properties`; remember.py's `_existing_text` already reads facts from it). Parse
-   linked peer ids via `_parse_relation_elements` (query.py:72). This is the
+1. Read the target's `wiki_relations` (an **objects-format** relation) from the
+   in-memory `target` dict via `_relation_ids(target, "wiki_relations")` — NOT
+   `_existing_text`, which reads only text-format props (`p.get("text")`,
+   remember.py:629-642) and would return `""` for an objects-format relation,
+   silently yielding an empty candidate set (detection would never fire).
+   `_relation_ids` finds the prop by key in `target["properties"]` and returns
+   `_parse_relation_elements(prop.get("objects"))` — the proven pattern at
+   query.py:715-720. No GET on the target (`target` is the search-result object from
+   `resolve_entity`, ingest.py:184-200, which carries `properties`). This is the
    authoritative candidate set.
 2. For each peer id (`peer_id != obj_id` — skip self-reference), GET the PEER via
-   `read_client.get_object(space_id, peer_id)` to read its `wiki_facts`. Peer reads
-   are the ONLY use of `get_object` in detection. A peer GET failure skips that peer
-   (it does not abort detection).
+   `read_client.get_object(space_id, peer_id)` and read its (text-format) `wiki_facts`
+   via `_existing_text(peer_obj, "wiki_facts")` (`_existing_text` is correct here —
+   `wiki_facts` IS text-format). Peer reads are the ONLY use of `get_object` in
+   detection. A peer GET failure skips that peer (it does not abort detection).
 3. Build the prompt with `_load_contradiction_prompt()` then `str.replace()` of the
    sentinel tokens (see below) — NOT `.format()` (the candidates JSON contains `{`/`}`
    that would break `.format()`).
@@ -234,12 +246,13 @@ def _write_contradiction_links(
     existing contradictions are read via read_client.get_object before merge.
 
     For each peer_id (skipping peer_id == obj_id):
-    1. A-side list = _existing_text(target, "wiki_contradictions") parsed to ids;
-       append peer_id (dedup — no-op if already present).
+    1. A-side list = _relation_ids(target, "wiki_contradictions") (objects-format —
+       NOT _existing_text, which reads text props only); append peer_id (dedup —
+       no-op if already present).
     2. PATCH obj_id wiki_contradictions (A-side). Skip the PATCH entirely if the
        dedup made no change (idempotent re-ingest no-op).
-    3. GET peer_id via read_client → read existing wiki_contradictions → append
-       obj_id (dedup).
+    3. GET peer_id via read_client → read existing wiki_contradictions via
+       _relation_ids(peer_obj, "wiki_contradictions") → append obj_id (dedup).
     4. PATCH peer_id wiki_contradictions (B-side). Skip if dedup made no change.
     5. If B fails: revert A by PATCHing back the prior A-side list. Log
        contradiction_rollback.
@@ -439,8 +452,9 @@ space by the same pipeline — no cross-space data access is introduced.
 
 **Anti-injection preamble is load-bearing (SF-5 — corrects prior wording).** Peer
 `wiki_facts` are NOT "system-controlled". They are LLM-summarized source text derived
-from external documents; `sanitize_property_value` (util.py:82) strips only control
-and bidi characters, not adversarial natural-language instructions. The `{{NEW_CLAIM}}`
+from external documents; `sanitize_property_value` (extraction.py:323, which delegates
+to `strip_control_chars` at util.py:82) strips only control and bidi characters, not
+adversarial natural-language instructions. The `{{NEW_CLAIM}}`
 and `{{CANDIDATES}}` values are therefore attacker-influenced data flowing into an LLM
 prompt — a genuine prompt-injection surface. Mitigations:
 - The contradiction prompt file (`contradiction.md`) MUST open with the same
@@ -481,7 +495,7 @@ Rollback notes are scrubbed to exception type + short message via `scrub_credent
 
 | # | Acceptance Criterion | Test type | Test location | Seam / mock strategy |
 |---|---|---|---|---|
-| **AC-1** | Ingest update of an entity whose new facts contradict an existing entity → `wiki_contradictions` set bidirectionally, `wiki_last_reviewed` NOT written | CI seam | `tests/wiki/test_ingest.py::TestContradictionDetection::test_contradiction_bidirectional_write` | respx mocks for search (POST, returns target with `properties` incl. `wiki_relations=[peer-id]`), get_object (GET on PEER only), update_object (PATCH×2 A+B); monkeypatch `detect_contradictions` to return `[{"object_id": "peer-id", "reason": "..."}]`. Assert NO GET fired against the target object id (BL-3) |
+| **AC-1** | Ingest update of an entity whose new facts contradict an existing entity → `wiki_contradictions` set bidirectionally, `wiki_last_reviewed` NOT written | CI seam | `tests/wiki/test_ingest.py::TestContradictionDetection::test_contradiction_bidirectional_write` | respx mocks for search (POST) returning the target as an **objects-shaped** object — `properties` is a list whose `wiki_relations` prop carries `objects: [peer-id]` (the no-GET design depends on the search response being this shape; the fixture MUST populate it), get_object (GET on PEER only), update_object (PATCH×2 A+B); monkeypatch `detect_contradictions` to return `[{"object_id": "peer-id", "reason": "..."}]`. Assert NO GET fired against the target object id (BL-3) and that `_relation_ids(target, "wiki_relations")` would yield `["peer-id"]` from the fixture |
 | **AC-2** | Ingest create branch → no contradiction check, `contradictions_detected: 0` | CI seam | `tests/wiki/test_ingest.py::TestContradictionDetection::test_no_detection_on_create` | Same respx setup; search returns no existing object |
 | **AC-3** | `wiki_lint` reports `contradiction_unresolved` as High finding (no passive caveat in detail or notes) | CI seam | `tests/wiki/test_lint.py::TestContradictionCheck::test_contradiction_check_active` | Seed entity with `wiki_contradictions=["obj-ref"]`, `wiki_last_reviewed=None`; assert finding severity==high, detail has no "PASSIVE", `report["notes"]` does not contain `_PASSIVE_CONTRADICTION_NOTE` string |
 | **AC-4** | Setting `wiki_last_reviewed` on contradicted entity → `contradiction_unresolved` finding does NOT fire | CI seam | `tests/wiki/test_lint.py::TestContradictionCheck::test_contradiction_cleared_by_review` | Seed entity with `wiki_contradictions=["obj-ref"]` and `wiki_last_reviewed="2026-06-05T00:00:00+00:00"`; assert finding absent |
@@ -534,7 +548,7 @@ Only AC-8/AC-9 are `@pytest.mark.live`.
 
 Ordered steps; each step is independently committable:
 
-1. **Move `_existing_text` to `util.py`** — copy `remember.py:629-642` into `util.py`; update `remember.py` to `from .util import _existing_text`; add import to `ingest.py`. Verify `test_remember.py` and `test_ingest.py` still pass.
+1. **Move readers to `util.py` (LD5)** — copy `_existing_text` (`remember.py:629-642`) and `_parse_relation_elements` (`query.py:72`) into `util.py`; add the new `_relation_ids(obj, prop_key)` helper. Update `remember.py` to `from .util import _existing_text`; replace the `query.py` definition with `from .util import _parse_relation_elements` (re-export); add `from .util import _existing_text, _relation_ids` to `ingest.py`. Verify `test_remember.py`, `test_query.py`, and `test_ingest.py` still pass (the query parser test imports `_parse_relation_elements` from `query` — the re-export keeps it green).
 
 2. **`_create_source` returns `(source_id, was_resumed)`** — change return type to `tuple[str | None, bool]`; `grep -n "_create_source(" src/` and unpack the tuple at BOTH call sites (ingest.py:477 empty-source early-return path and ingest.py:510 main path — BL-6). Update `test_ingest.py` assertions.
 
