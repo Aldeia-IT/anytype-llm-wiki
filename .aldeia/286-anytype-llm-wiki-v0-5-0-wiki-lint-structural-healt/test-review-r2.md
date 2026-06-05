@@ -1,5 +1,18 @@
 # Test Review: wiki_lint v0.5.0 Round 2
 
+> **⚠️ SUPERSEDED CORRECTION (post-test council, 2026-06-05).** This file's
+> "two-call `list_objects`" guidance (the Stub Run section at line ~83, the
+> "Implementation Note for impl-worker" section, and the Summary's closing
+> sentence) is **WRONG and SUPERSEDED.** The fixtures were subsequently fixed
+> (commit `1c5a0df`) to a **single combined enumeration page**, and the spec
+> mandates **ONE** `list_objects` enumeration reused for both the QA#25 schema
+> gate and the check battery (Pre-Checks step 2, note G9; `query.py:408`
+> pattern). A two-call implementation will violate the spec and double the O(N)
+> enumeration cost. The post-test council ruled the stale two-call note a
+> **BLOCKING** trap (CTO). The authoritative implementation contract is in
+> `test-review-r2-lead-addendum.md` and `spec-addendum-post-test-r1.md`
+> (single-enumeration constraint). Disregard every "two-call" statement below.
+
 **Verdict: APPROVED**
 
 ## Review Date
@@ -118,6 +131,12 @@ Post-fix run: `uv run pytest tests/wiki/test_lint.py -m 'not live' -q` → **44 
 ---
 
 ## Implementation Note for impl-worker
+
+> **⚠️ THIS ENTIRE SECTION IS SUPERSEDED — DO NOT FOLLOW.** See the banner at
+> the top of this file. Use a **single** `list_objects` enumeration
+> (`query.py:408` pattern), reused for both QA#25 and the check battery, per
+> `spec-addendum-post-test-r1.md`. The text below describes the pre-`1c5a0df`
+> fixture design and is no longer accurate.
 
 The `_standard_mocks` fixture uses a counter-based design where the FIRST `list_objects` call returns the schema marker and the SECOND call returns wiki entities. Both responses have `has_more=False`. A spec-faithful implementation using a single paginated `list_objects` call (as `query.py` does) would receive only the schema marker in `all_objects` and never see the entity objects. The stub verification confirms that a **two-call design** (first call for schema detection via QA#25, second call for entity enumeration) satisfies ALL test fixtures. The impl-worker should adopt the two-call pattern to match the test mocks. The spec's phrase "one paginated list_objects sequence" refers to the enumeration phase logically; the QA#25 schema probe can be implemented as a separate prior call.
 
