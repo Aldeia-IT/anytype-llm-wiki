@@ -483,30 +483,40 @@ def _run_bootstrap(
     return result
 
 
-def _read_schema_version(client, space_id: str) -> str | None:
-    """Read the live schema-version marker for a space (Decision 2, Option a).
+def _schema_version_from_objects(objects: list[dict]) -> str | None:
+    """Derive the live schema-version marker from an already-fetched object list.
 
     Primary source: the root "Wiki" Collection's ``wiki_schema_version`` property
     (G4 guard — BOTH name=='Wiki' AND type.key=='collection' required so a stray
     object named "Wiki" cannot spoof the marker). Fallback: the maximum version
     across all ``wiki_log`` objects. Returns ``max(collection, wikilog)`` so a
     stale collection marker cannot mask a newer WikiLog (SF7); None if neither
-    carries a marker.
+    carries a marker. Pure — does no I/O so callers that already enumerated the
+    space can avoid a second ``list_objects`` (N+1).
     """
-    objects = client.list_objects(space_id)
-
     collection_value: str | None = None
     wikilog_max: str | None = None
     for obj in objects:
         if not isinstance(obj, dict):
             continue
-        type_key = obj.get("type", {}).get("key")
+        t = obj.get("type")
+        type_key = t.get("key") if isinstance(t, dict) else t
         if obj.get("name") == _ROOT_COLLECTION_NAME and type_key == _ROOT_COLLECTION_TYPE_KEY:
             collection_value = _found_schema_version(obj)
         if type_key == "wiki_log":
             wikilog_max = _max_version(wikilog_max, _found_schema_version(obj))
 
     return _max_version(collection_value, wikilog_max)
+
+
+def _read_schema_version(client, space_id: str) -> str | None:
+    """Read the live schema-version marker for a space (Decision 2, Option a).
+
+    Enumerates the space then delegates the marker scan to
+    ``_schema_version_from_objects``.
+    """
+    objects = client.list_objects(space_id)
+    return _schema_version_from_objects(objects)
 
 
 def _patch_schema_version_on_collection(

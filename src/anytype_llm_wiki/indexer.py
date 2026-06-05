@@ -10,11 +10,76 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 from . import config
 from .anytype_client import get_object, list_objects, list_spaces
 from .chunker import chunk_object
-from .embedder import embed
+from .embedder import embed, embed_query
 
 
 def _qdrant() -> QdrantClient:
     return QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY or None)
+
+
+def semantic_search_core(
+    query: str,
+    space_id: str | None = None,
+    types: list[str] | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Search Anytype object chunks by semantic similarity (shared core).
+
+    Extracted from the v0.1 ``semantic_search`` MCP tool so both that tool and
+    ``wiki/query.py`` Tier-2 retrieval share one implementation.
+
+    Filter construction (Decision 2 — nested AND-of-OR):
+      - ``space_id`` (when given) is a top-level ``must`` condition (unchanged
+        single-condition behaviour).
+      - a ``types`` list becomes a NESTED ``should``-group appended to ``must``.
+        A nested filter inside ``must`` is a hard requirement that >=1 of its
+        conditions match, i.e. "space AND (type in list)". ``min_should`` is NOT
+        used (it is typed ``Optional[MinShould]`` and would raise a Pydantic
+        ValidationError if set to an int).
+
+    Returns a list of result dicts (object_name, object_id, type, heading, text,
+    score). The Qdrant client is built via the module-level ``_qdrant()`` factory
+    and the collection name is read from ``config.QDRANT_COLLECTION`` so tests can
+    monkeypatch both.
+    """
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    vector = embed_query(query)
+    client = _qdrant()
+
+    must: list = []
+    if space_id:
+        must.append(FieldCondition(key="space_id", match=MatchValue(value=space_id)))
+    if types:
+        must.append(
+            Filter(
+                should=[
+                    FieldCondition(key="type_key", match=MatchValue(value=t))
+                    for t in types
+                ]
+            )
+        )
+    search_filter = Filter(must=must) if must else None
+
+    results = client.query_points(
+        collection_name=config.QDRANT_COLLECTION,
+        query=vector,
+        query_filter=search_filter,
+        limit=limit,
+        with_payload=True,
+    )
+
+    return [
+        {
+            "object_name": r.payload.get("object_name", ""),
+            "object_id": r.payload.get("object_id", ""),
+            "type": r.payload.get("type_key", ""),
+            "heading": r.payload.get("heading", ""),
+            "text": r.payload.get("text", "")[:500],
+            "score": round(r.score, 4),
+        }
+        for r in results.points
+    ]
 
 
 def _ensure_collection(client: QdrantClient) -> None:

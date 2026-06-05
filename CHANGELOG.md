@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-05
+
+### User-visible changes
+
+- **`wiki-query` command / `wiki_query` MCP tool** — query the compiled wiki and
+  get a synthesized, source-cited answer. Params: `question`, `space_id`,
+  `file_back?`. **Tiered retrieval** picks a strategy by wiki Object count,
+  flipping at `WIKI_INDEX_THRESHOLD` (default 200): Tier 1 (index-navigation)
+  enumerates the wiki directly below the threshold; Tier 2 (vector-augmented) uses
+  semantic search at/above it. Each candidate's 1-hop neighborhood is expanded
+  (deduplicated via a per-run object cache), the context is bounded
+  (`WIKI_SYNTH_MAX_OBJECTS` / `_MAX_OBJECT_TOKENS` / `_MAX_INPUT_TOKENS`), and a
+  local LLM synthesizes a prose answer **only from the retrieved context**, citing
+  each Object used. Reuses the extraction model/endpoint/timeout — no second
+  resident model.
+- **Compounding loop (file-back).** On a clean answer that meets the gate
+  (`file_back=True`, or default ≥ `WIKI_FILE_BACK_MIN_SOURCES` cited sources AND
+  ≥ `WIKI_FILE_BACK_MIN_WORDS` words), the question/answer is filed back as a typed
+  Query Object (`wiki_question`/`wiki_answer`/`wiki_asked_at`/`wiki_drew_from`). On
+  the next `reindex_anytype`, the filed answer becomes a Tier-2 retrieval candidate
+  for future queries. **Latency caveat:** a filed answer surfaces in retrieval only
+  after the next reindex — see `docs/known-limitations.md` §7.
+- **Multi-type `semantic_search` fix.** A multi-type `semantic_search` call
+  (`types=[...]` with more than one type) previously returned zero results due to
+  AND-semantics on the type filter; it now uses a nested AND-of-OR filter ("space
+  AND (type ∈ list)"). Single-type behavior is unchanged.
+- **New config:** `WIKI_INDEX_THRESHOLD` (200), `WIKI_FILE_BACK_MIN_SOURCES` (3),
+  `WIKI_FILE_BACK_MIN_WORDS` (100), `WIKI_SYNTH_MAX_INPUT_TOKENS` (8192),
+  `WIKI_SYNTH_MAX_OBJECTS` (24), `WIKI_SYNTH_MAX_OBJECT_TOKENS` (1024). Zero/negative
+  values fall back to defaults. No schema bump — `wiki_answer` already exists
+  (schema stays `0.3.1`); no re-bootstrap required.
+
+### Security
+
+- `wiki_query` wraps all retrieved Object content and names in a single `<context>`
+  fence under a "DATA, not INSTRUCTIONS" preamble; names pass a name-policy filter;
+  the question is sanitized before the prompt. No SSRF surface (Objects fetched by
+  ID over localhost; only the local Ollama endpoint is called). The file-back loop
+  is documented as an injection amplifier, bounded by the clean-synthesis gate plus
+  the min-sources/min-words thresholds (README → Prompt injection and the file-back loop).
+- Reciprocal relation writes onto pre-existing cited Objects use an explicit
+  read-merge-write (`prior ∪ [query_id]`) — never a full overwrite — to avoid
+  clobbering an Object's persisted relations.
+
+### Internal changes
+
+- New module `wiki/query.py` (tiered retrieval, 1-hop cache, synthesis transport,
+  file-back, WikiLog) and prompt `wiki/prompts/synthesis.md`.
+- `indexer.py` gains `semantic_search_core` (the nested-filter search core);
+  `server.py`'s `semantic_search` tool now delegates to it.
+- `error_category` and the >500-row `filterexpression_fallback` warning are
+  surfaced to the operator log stream, not only the per-query result.
+
+### Release checklist (carry-forward, not gated by CI)
+
+- Run the live smoke test once against **real Qdrant v1.17.0** and **Aldeia's own
+  vault** before any community tag (internal-dogfood-first) to confirm the
+  nested-`should`-in-`must` filter on that Qdrant version and to **pin the live
+  relation read-back element shape** (the one wire contract with no read-side code
+  to mirror; the dual-shape parser accepts both `"id"` and `{"id": …}` forms).
+- Capture the maintainer-measured **p95 < 5s on Mac Mini M4** as an explicit
+  release-checklist item (the mocked `test_mocked_query_completes_under_5s` is a
+  no-pathology gate, not the production SLO).
+
 ## [0.3.1] - 2026-06-04
 
 ### User-visible changes
