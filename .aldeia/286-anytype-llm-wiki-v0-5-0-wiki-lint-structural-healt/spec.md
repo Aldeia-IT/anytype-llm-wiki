@@ -1,6 +1,6 @@
 # wiki_lint v0.5.0 — Structural Health Check
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-05
 **Author:** spec-writer agent
 **Ticket:** #286 (Aldeia-IT/aldeia-box)
