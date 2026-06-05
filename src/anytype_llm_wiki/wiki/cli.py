@@ -231,6 +231,8 @@ def _cmd_lint(args: argparse.Namespace) -> int:
             print(f"  error:      {result['error']}")
         for warning in result.get("warnings", []):
             print(f"  warn:       {warning}")
+        for note in result.get("notes", []):
+            print(f"  note:       {note}")
     return 0 if result.get("status") in ("ok", "partial") else 1
 
 

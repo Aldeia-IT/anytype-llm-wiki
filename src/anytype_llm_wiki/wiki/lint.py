@@ -73,6 +73,15 @@ _FAILURE_MARKER = "relation_rollback"
 
 _NEEDS_REVIEW = "needs-review"
 
+# CPO-6 (third surface): an always-on report note so a green/zero-findings run does
+# not read as a guarantee that no contradictions exist. The contradiction_unresolved
+# check is PASSIVE until v0.6.0/#287 (wiki_contradictions is not auto-populated yet).
+_PASSIVE_CONTRADICTION_NOTE = (
+    "contradiction_unresolved is passive until v0.6.0 (#287): wiki_contradictions is "
+    "not auto-populated yet, so a clean contradiction result does not guarantee that "
+    "no contradictions exist."
+)
+
 
 # ---------------------------------------------------------------------------
 # Shape helpers
@@ -159,6 +168,8 @@ def _empty_report() -> dict:
         "wiki_log_id": None,
         "deeplink": None,
         "warnings": [],
+        # Always-on advisory notes (present even on a clean run) — CPO-6 third surface.
+        "notes": [_PASSIVE_CONTRADICTION_NOTE],
         "status": "ok",
         "error": None,
         "error_category": None,
@@ -220,9 +231,10 @@ def wiki_lint(
         report["error_category"] = "config_error"
         return _finish("error")
 
-    read_client = AnytypeReadClient()
-    write_client = WikiClient()
+    read_client = write_client = None
     try:
+        read_client = AnytypeReadClient()
+        write_client = WikiClient()
         # --- Step 1: enumerate ONCE (the only list_objects call) ---
         try:
             all_objects = write_client.list_objects(space_id)
@@ -565,5 +577,7 @@ def wiki_lint(
         )
         return _finish(status)
     finally:
-        read_client.close()
-        write_client.close()
+        if read_client is not None:
+            read_client.close()
+        if write_client is not None:
+            write_client.close()

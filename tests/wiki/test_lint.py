@@ -1776,6 +1776,16 @@ class TestStatusLifecycle:
         assert result.get("wiki_log_id") is not None, (
             f"wiki_log_id must be set on clean run; result: {result}"
         )
+        # CPO-6 (third surface): the passive-contradiction caveat must be present in
+        # the report even when no contradiction finding fired — the exact over-trust
+        # case. The note is always-on, independent of whether the check produced output.
+        assert not any(
+            f.get("check") == "contradiction_unresolved" for f in result.get("findings", [])
+        ), "clean-run fixture must fire no contradiction findings (precondition for CPO-6 note)"
+        notes = result.get("notes", [])
+        assert any("passive until v0.6.0" in str(n) for n in notes), (
+            f"green run must carry the passive-contradiction note (CPO-6); notes: {notes}"
+        )
 
     @respx.mock
     def test_wikilog_skipped_on_pre_check_failure(self, monkeypatch, tmp_path):
