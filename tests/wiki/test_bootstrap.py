@@ -861,20 +861,23 @@ class TestBootstrapLiveAPI:
 
 
 class TestSchemaVersionBumped:
-    """Guard: WIKI_SCHEMA_VERSION must be '0.3.1' (D11, prerequisite of AC-R11)."""
+    """Guard: WIKI_SCHEMA_VERSION must be '0.4.1' (D11, prerequisite of AC-R11)."""
 
-    def test_wiki_schema_version_is_031(self):
-        """D11: WIKI_SCHEMA_VERSION must be pinned at '0.3.1' (spec §5 D11).
+    def test_wiki_schema_version_is_041(self):
+        """D11: WIKI_SCHEMA_VERSION must be pinned at '0.4.1' (spec §5 D11).
 
-        #289 (v0.3.1) makes the code version load-bearing for the AC-R11
-        schema-outdated abort: a live 0.3.0 space must read as outdated against
-        code at '0.3.1'. A positive pin is a stronger regression guard than the
-        version-relative checks elsewhere in this module.
+        The schema version is load-bearing for the AC-R11 schema-outdated abort:
+        a live space at an older version must read as outdated against the code
+        version. #303 (v0.4.1) renamed all property display names to a `Wiki `
+        prefix (Anytype native export/import collapses bundled-relation names
+        like "Status"/"Description"/"Timestamp"), which is a schema change, so
+        the version is bumped 0.3.1 -> 0.4.1. A positive pin is a stronger
+        regression guard than the version-relative checks elsewhere in this module.
         Covers: §10.1 checklist item, D11, AC-R11.
         """
         from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
-        assert WIKI_SCHEMA_VERSION == "0.3.1", (
-            f"WIKI_SCHEMA_VERSION must be '0.3.1' (D11, prerequisite of AC-R11); "
+        assert WIKI_SCHEMA_VERSION == "0.4.1", (
+            f"WIKI_SCHEMA_VERSION must be '0.4.1' (D11, prerequisite of AC-R11); "
             f"got: {WIKI_SCHEMA_VERSION!r}. Bump types_schema.py."
         )
 

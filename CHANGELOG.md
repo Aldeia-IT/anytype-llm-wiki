@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-05
+
+### Internal changes
+
+- **All wiki property display names are now prefixed `Wiki …`** (e.g. `Wiki
+  Status`, `Wiki Timestamp`, `Wiki Description`). The bare names (`Status`,
+  `Description`, `Timestamp`) collided with Anytype's bundled relations: an
+  Anytype native space **export→import silently dropped the colliding
+  properties' values** (e.g. every WikiLog `Wiki Timestamp`) by remapping them
+  onto the bundled relation. Prefixing every property name makes the schema
+  backup/restore-safe and future-proof. Property **keys** (`wiki_*`) are
+  unchanged — display-name only. Schema version `0.3.1` → `0.4.1`; re-bootstrap
+  each space to adopt the new names (idempotent, additive).
+
 ## [0.4.0] - 2026-06-05
 
 ### User-visible changes
@@ -162,7 +176,8 @@ This release builds on the existing semantic-search foundation:
   re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
   `semantic_search` also prompts a reindex when the collection is empty).
 
-[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.2.0...v0.3.0

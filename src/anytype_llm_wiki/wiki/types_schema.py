@@ -24,7 +24,7 @@ API-contract notes (verified against the Anytype local API, version
 # Semver x.y.z. v0.3.0 ships the wiki_ingest compile pipeline; v0.3.1 adds the
 # wiki_remember agent-memory write path plus wiki_status / wiki_source_type tag
 # seeding. MUST be > "0.1.0".
-WIKI_SCHEMA_VERSION = "0.3.1"
+WIKI_SCHEMA_VERSION = "0.4.1"
 
 # Allowed tag colors per the Anytype API (CreateTagRequest.color enum). Tags are
 # assigned a color by cycling this palette deterministically at bootstrap time.
@@ -73,12 +73,12 @@ WIKI_TYPES = [
         "plural_name": "Sources",
         "layout": "basic",
         "properties": [
-            {"property_key": "wiki_url", "name": "URL", "format": "url"},
-            {"property_key": "wiki_file_path", "name": "File Path", "format": "text"},
-            {"property_key": "wiki_excerpt", "name": "Excerpt", "format": "text"},
-            {"property_key": "wiki_ingested_at", "name": "Ingested At", "format": "date"},
-            {"property_key": "wiki_domain_tags", "name": "Domain Tags", "format": "multi_select"},
-            {"property_key": "wiki_source_type", "name": "Source Type", "format": "select"},
+            {"property_key": "wiki_url", "name": "Wiki URL", "format": "url"},
+            {"property_key": "wiki_file_path", "name": "Wiki File Path", "format": "text"},
+            {"property_key": "wiki_excerpt", "name": "Wiki Excerpt", "format": "text"},
+            {"property_key": "wiki_ingested_at", "name": "Wiki Ingested At", "format": "date"},
+            {"property_key": "wiki_domain_tags", "name": "Wiki Domain Tags", "format": "multi_select"},
+            {"property_key": "wiki_source_type", "name": "Wiki Source Type", "format": "select"},
         ],
     },
     {
@@ -87,14 +87,14 @@ WIKI_TYPES = [
         "plural_name": "Entities",
         "layout": "basic",
         "properties": [
-            {"property_key": "wiki_description", "name": "Description", "format": "text"},
-            {"property_key": "wiki_facts", "name": "Facts", "format": "text"},
-            {"property_key": "wiki_relations", "name": "Relations", "format": "objects"},
-            {"property_key": "wiki_sources", "name": "Sources", "format": "objects"},
-            {"property_key": "wiki_domain_tags", "name": "Domain Tags", "format": "multi_select"},
-            {"property_key": "wiki_contradictions", "name": "Contradictions", "format": "objects"},
-            {"property_key": "wiki_status", "name": "Status", "format": "select"},
-            {"property_key": "wiki_last_reviewed", "name": "Last Reviewed", "format": "date"},
+            {"property_key": "wiki_description", "name": "Wiki Description", "format": "text"},
+            {"property_key": "wiki_facts", "name": "Wiki Facts", "format": "text"},
+            {"property_key": "wiki_relations", "name": "Wiki Relations", "format": "objects"},
+            {"property_key": "wiki_sources", "name": "Wiki Sources", "format": "objects"},
+            {"property_key": "wiki_domain_tags", "name": "Wiki Domain Tags", "format": "multi_select"},
+            {"property_key": "wiki_contradictions", "name": "Wiki Contradictions", "format": "objects"},
+            {"property_key": "wiki_status", "name": "Wiki Status", "format": "select"},
+            {"property_key": "wiki_last_reviewed", "name": "Wiki Last Reviewed", "format": "date"},
         ],
     },
     {
@@ -103,13 +103,13 @@ WIKI_TYPES = [
         "plural_name": "Concepts",
         "layout": "basic",
         "properties": [
-            {"property_key": "wiki_definition", "name": "Definition", "format": "text"},
-            {"property_key": "wiki_open_questions", "name": "Open Questions", "format": "text"},
-            {"property_key": "wiki_related", "name": "Related", "format": "objects"},
-            {"property_key": "wiki_sources", "name": "Sources", "format": "objects"},
-            {"property_key": "wiki_domain_tags", "name": "Domain Tags", "format": "multi_select"},
-            {"property_key": "wiki_contradictions", "name": "Contradictions", "format": "objects"},
-            {"property_key": "wiki_status", "name": "Status", "format": "select"},
+            {"property_key": "wiki_definition", "name": "Wiki Definition", "format": "text"},
+            {"property_key": "wiki_open_questions", "name": "Wiki Open Questions", "format": "text"},
+            {"property_key": "wiki_related", "name": "Wiki Related", "format": "objects"},
+            {"property_key": "wiki_sources", "name": "Wiki Sources", "format": "objects"},
+            {"property_key": "wiki_domain_tags", "name": "Wiki Domain Tags", "format": "multi_select"},
+            {"property_key": "wiki_contradictions", "name": "Wiki Contradictions", "format": "objects"},
+            {"property_key": "wiki_status", "name": "Wiki Status", "format": "select"},
         ],
     },
     {
@@ -118,10 +118,10 @@ WIKI_TYPES = [
         "plural_name": "Comparisons",
         "layout": "basic",
         "properties": [
-            {"property_key": "wiki_subjects", "name": "Subjects", "format": "objects"},
-            {"property_key": "wiki_dimensions", "name": "Dimensions", "format": "text"},
-            {"property_key": "wiki_verdict", "name": "Verdict", "format": "text"},
-            {"property_key": "wiki_sources", "name": "Sources", "format": "objects"},
+            {"property_key": "wiki_subjects", "name": "Wiki Subjects", "format": "objects"},
+            {"property_key": "wiki_dimensions", "name": "Wiki Dimensions", "format": "text"},
+            {"property_key": "wiki_verdict", "name": "Wiki Verdict", "format": "text"},
+            {"property_key": "wiki_sources", "name": "Wiki Sources", "format": "objects"},
         ],
     },
     {
@@ -130,10 +130,10 @@ WIKI_TYPES = [
         "plural_name": "Queries",
         "layout": "basic",
         "properties": [
-            {"property_key": "wiki_question", "name": "Question", "format": "text"},
-            {"property_key": "wiki_answer", "name": "Answer", "format": "text"},
-            {"property_key": "wiki_drew_from", "name": "Drew From", "format": "objects"},
-            {"property_key": "wiki_asked_at", "name": "Asked At", "format": "date"},
+            {"property_key": "wiki_question", "name": "Wiki Question", "format": "text"},
+            {"property_key": "wiki_answer", "name": "Wiki Answer", "format": "text"},
+            {"property_key": "wiki_drew_from", "name": "Wiki Drew From", "format": "objects"},
+            {"property_key": "wiki_asked_at", "name": "Wiki Asked At", "format": "date"},
         ],
     },
     {
@@ -142,13 +142,13 @@ WIKI_TYPES = [
         "plural_name": "WikiLogs",
         "layout": "basic",
         "properties": [
-            {"property_key": "wiki_action", "name": "Action", "format": "select"},
-            {"property_key": "wiki_subject", "name": "Subject", "format": "text"},
-            {"property_key": "wiki_objects_created", "name": "Objects Created", "format": "number"},
-            {"property_key": "wiki_objects_updated", "name": "Objects Updated", "format": "number"},
-            {"property_key": "wiki_timestamp", "name": "Timestamp", "format": "date"},
-            {"property_key": "wiki_notes", "name": "Notes", "format": "text"},
-            {"property_key": "wiki_schema_version", "name": "Schema Version", "format": "text"},
+            {"property_key": "wiki_action", "name": "Wiki Action", "format": "select"},
+            {"property_key": "wiki_subject", "name": "Wiki Subject", "format": "text"},
+            {"property_key": "wiki_objects_created", "name": "Wiki Objects Created", "format": "number"},
+            {"property_key": "wiki_objects_updated", "name": "Wiki Objects Updated", "format": "number"},
+            {"property_key": "wiki_timestamp", "name": "Wiki Timestamp", "format": "date"},
+            {"property_key": "wiki_notes", "name": "Wiki Notes", "format": "text"},
+            {"property_key": "wiki_schema_version", "name": "Wiki Schema Version", "format": "text"},
         ],
     },
 ]
