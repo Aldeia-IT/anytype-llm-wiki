@@ -165,6 +165,7 @@ Once registered, your AI assistant gains these MCP tools:
 | `wiki_ingest` | Compile a source (URL or local file) into curated, interlinked wiki Objects with provenance, then auto-reindex. Params: `source`, `space_id`, `domain_hint?` |
 | `wiki_remember` | Consolidate an agent's natural-language narration into typed wiki Objects (LLM-assisted merge/dedup/conflict-flag), then auto-reindex. Params: `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?` |
 | `wiki_query` | Query the compiled wiki and get a synthesized, source-cited answer (tiered retrieval + local-LLM synthesis), optionally filing the answer back as a reusable Query Object. Params: `question`, `space_id`, `file_back?` |
+| `wiki_lint` | Run a read-only structural health check over a wiki space and file a WikiLog receipt. Reports asymmetric relations, orphans, staleness, oversized descriptions, and more, ranked by severity. Params: `space_id`, `severity_threshold?`, `include_duplicates?` |
 
 `wiki_ingest` fetches the source (with SSRF protections), extracts entities and
 concepts via local Ollama (`WIKI_EXTRACT_MODEL`, default `qwen2.5:7b`), resolves
@@ -323,6 +324,55 @@ A few operational characteristics matter for self-hosting operators:
   `WIKI_EXTRACT_ENDPOINT` is non-local, the off-machine consent banner is
   **notify-once and non-blocking** (it self-acknowledges and proceeds).
 
+## Linting the wiki (`wiki_lint`)
+
+`wiki_lint` is the **read-only structural health check** for a bootstrapped wiki
+space. It enumerates the wiki once, runs a battery of checks, ranks the results by
+severity, and files a single `wiki_log` receipt. It mutates nothing else — there is
+no auto-fix; `wiki_lint` only reports.
+
+```bash
+uv run python -m anytype_llm_wiki.wiki.cli wiki-lint --space-id <your-space-id> --json
+```
+
+The same flow is available to an agent over MCP via the `wiki_lint` tool
+(`space_id`, `severity_threshold?`, `include_duplicates?`).
+
+### What it checks
+
+| Check | Severity | What it flags |
+|-------|----------|---------------|
+| `asymmetric_relation` | Critical | A → B relation with no reciprocal B → A link |
+| `orphan` | High | Object with no inbound/outbound relations, older than the grace period |
+| `pipeline_orphan` | High | Zero-relation Object created near a recorded ingest `relation_rollback` failure (±300s heuristic) |
+| `contradiction_unresolved` | High | Entity with unresolved `wiki_contradictions` and no review timestamp — **passive (see below)** |
+| `unreviewed_needs_review` | High | Object still marked `needs-review` (any age) |
+| `stale` | Medium | `last_modified` predates the source ingest timestamp by > 90 days |
+| `stale_needs_review` | Medium | `needs-review` Object whose source is older than the cutoff |
+| `oversized` | Low | Description longer than the oversized cap (reports a char count, never the body) |
+| `empty_type` | Informational | A wiki content type with zero Objects |
+| `potential_duplicate` | Informational | Two Objects in the `[0.70, 0.85)` similarity band — **opt-in only (see below)** |
+
+Filter the report with `--severity-threshold` (`all` | `low` | `medium` | `high` |
+`critical`; `all` includes informational, `low` and above exclude it).
+
+### The duplicate sweep is opt-in
+
+The `potential_duplicate` sweep embeds the wiki and runs a Qdrant similarity search
+per Object, so it is **disabled by default**. Pass `--include-duplicates` (MCP:
+`include_duplicates=True`) to enable it. The advertised performance budget (≤60s for
+a wiki of ≤500 Objects) describes the **default, sweep-off path only** — the opt-in
+sweep can exceed that budget and is hard-skipped entirely above `WIKI_LINT_MAX_OBJECTS`
+(with a warning).
+
+### `contradiction_unresolved` is passive until v0.6.0
+
+The `contradiction_unresolved` check is **passive** in v0.5.0: `wiki_contradictions`
+is not yet auto-populated by the ingest/remember pipelines (that lands in v0.6.0 /
+[#287](https://github.com/Aldeia-IT/aldeia-box/issues/287)). A green contradiction
+result is therefore **not a guarantee** that no contradictions exist — it only means
+none have been manually recorded. Do not over-trust a clean contradiction column.
+
 ## Auto-reindex
 
 For continuous indexing, run a reindex on a schedule. Reindex is available as the `reindex_anytype` MCP tool and as a one-line module call you can drive from cron or launchd.
@@ -380,11 +430,25 @@ Search is fast enough for interactive use. Indexing is fast enough to run freque
 | `WIKI_SYNTH_MAX_INPUT_TOKENS` | `8192` | `wiki_query` total synthesis context cap (token estimate = chars // 4) |
 | `WIKI_SYNTH_MAX_OBJECTS` | `24` | `wiki_query` max Objects fed to synthesis |
 | `WIKI_SYNTH_MAX_OBJECT_TOKENS` | `1024` | `wiki_query` per-Object head-truncation cap |
+| `WIKI_LINT_OVERSIZED_CHARS` | `2000` | `wiki_lint` description length above which `oversized` fires |
+| `WIKI_LINT_ORPHAN_GRACE_DAYS` | `7` | `wiki_lint` age grace before an unlinked Object is an `orphan` |
+| `WIKI_LINT_STALE_NEEDS_REVIEW_DAYS` | `30` | `wiki_lint` needs-review age cutoff for `stale_needs_review` |
+| `WIKI_LINT_MAX_OBJECTS` | `2000` | `wiki_lint` duplicate sweep auto-skips above this Object count |
+| `WIKI_LINT_PIPELINE_WINDOW_SECONDS` | `300` | `wiki_lint` ±window for the `pipeline_orphan` timestamp heuristic |
+| `WIKI_LINT_DUPLICATE_MAX_SCORE` | `0.85` | `wiki_lint` upper bound (exclusive) of the `[0.70, 0.85)` duplicate band |
+
+**You do not need to set any of the `WIKI_LINT_*` knobs** — the defaults are
+sensible for a typical wiki. They are exposed only for operators tuning a large or
+unusual space. Note `pipeline_orphan` is an honest ±300s timestamp heuristic: it
+correlates a zero-relation Object against a recorded ingest `relation_rollback`
+failure and has false negatives by design (it cannot prove an Object is *not* a
+pipeline orphan).
 
 `wiki_query` synthesis reuses `WIKI_EXTRACT_TIMEOUT` (default 600s) as its
 read-timeout ceiling; this is a deliberate accepted ceiling, and a slow-synthesis
 warning is logged when a single synthesis call exceeds 60s. Zero/negative values
-for the integer variables above fall back to their defaults.
+for the integer variables above fall back to their defaults (and `WIKI_LINT_DUPLICATE_MAX_SCORE`
+values outside `[0, 1]` fall back too).
 
 ## Architecture
 
@@ -396,7 +460,7 @@ for the integer variables above fall back to their defaults.
 
 **Indexer** — incremental by default. Tracks `last_modified_date` per object in a JSON state file. Only fetches and re-embeds objects that changed since the last run. Cleans up vectors for deleted objects.
 
-**MCP server** — [FastMCP](https://github.com/jlowin/fastmcp) server exposing `semantic_search`, `reindex_anytype`, `wiki_bootstrap`, `wiki_ingest`, `wiki_remember`, and `wiki_query` as tools over stdio.
+**MCP server** — [FastMCP](https://github.com/jlowin/fastmcp) server exposing `semantic_search`, `reindex_anytype`, `wiki_bootstrap`, `wiki_ingest`, `wiki_remember`, `wiki_query`, and `wiki_lint` as tools over stdio.
 
 **Wiki bootstrap** — idempotently provisions the typed wiki schema (Types, Properties, a domain-tag taxonomy, and a root Collection) in an Anytype space, with an in-place schema-upgrade path. Keyed by `type_key` so re-runs reconcile rather than duplicate.
 

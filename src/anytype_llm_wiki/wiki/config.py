@@ -57,6 +57,81 @@ def _positive_int(env: str, default: int) -> int:
     return val if val > 0 else default
 
 
+def _bounded_float(env: str, default: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    """Resolve a float env var at call time, clamped to the inclusive [lo, hi] range.
+
+    Reads ``os.environ`` on each call (never cached at import). Unset, non-numeric,
+    or out-of-range ``[lo, hi]`` values fall back to ``default`` (SF10/B1 guard).
+    """
+    raw = os.environ.get(env)
+    if raw is None:
+        return default
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        return default
+    if val < lo or val > hi:
+        return default
+    return val
+
+
+# v0.5.0 wiki_lint structural-health-check defaults.
+DEFAULT_WIKI_LINT_OVERSIZED_CHARS = 2000
+DEFAULT_WIKI_LINT_ORPHAN_GRACE_DAYS = 7
+DEFAULT_WIKI_LINT_STALE_NEEDS_REVIEW_DAYS = 30
+DEFAULT_WIKI_LINT_MAX_OBJECTS = 2000
+DEFAULT_WIKI_LINT_PIPELINE_WINDOW_SECONDS = 300
+DEFAULT_WIKI_LINT_DUPLICATE_MAX_SCORE = 0.85
+
+
+def lint_oversized_chars() -> int:
+    """Resolve WIKI_LINT_OVERSIZED_CHARS — oversized-description cap (default 2000)."""
+    return _positive_int(
+        "WIKI_LINT_OVERSIZED_CHARS", DEFAULT_WIKI_LINT_OVERSIZED_CHARS
+    )
+
+
+def lint_orphan_grace_days() -> int:
+    """Resolve WIKI_LINT_ORPHAN_GRACE_DAYS — orphan age grace period (default 7)."""
+    return _positive_int(
+        "WIKI_LINT_ORPHAN_GRACE_DAYS", DEFAULT_WIKI_LINT_ORPHAN_GRACE_DAYS
+    )
+
+
+def lint_stale_needs_review_days() -> int:
+    """Resolve WIKI_LINT_STALE_NEEDS_REVIEW_DAYS — stale needs-review cutoff (default 30)."""
+    return _positive_int(
+        "WIKI_LINT_STALE_NEEDS_REVIEW_DAYS",
+        DEFAULT_WIKI_LINT_STALE_NEEDS_REVIEW_DAYS,
+    )
+
+
+def lint_max_objects() -> int:
+    """Resolve WIKI_LINT_MAX_OBJECTS — duplicate-sweep object cap (default 2000)."""
+    return _positive_int("WIKI_LINT_MAX_OBJECTS", DEFAULT_WIKI_LINT_MAX_OBJECTS)
+
+
+def lint_pipeline_window_seconds() -> int:
+    """Resolve WIKI_LINT_PIPELINE_WINDOW_SECONDS — pipeline_orphan ±window (default 300)."""
+    return _positive_int(
+        "WIKI_LINT_PIPELINE_WINDOW_SECONDS",
+        DEFAULT_WIKI_LINT_PIPELINE_WINDOW_SECONDS,
+    )
+
+
+def lint_duplicate_max_score() -> float:
+    """Resolve WIKI_LINT_DUPLICATE_MAX_SCORE — duplicate band upper bound (default 0.85).
+
+    Bounded to [0, 1]; out-of-range or non-numeric values fall back to the default.
+    """
+    return _bounded_float(
+        "WIKI_LINT_DUPLICATE_MAX_SCORE",
+        DEFAULT_WIKI_LINT_DUPLICATE_MAX_SCORE,
+        0.0,
+        1.0,
+    )
+
+
 def extract_max_input_tokens() -> int:
     """Resolve WIKI_EXTRACT_MAX_INPUT_TOKENS (default 8192)."""
     return _positive_int(

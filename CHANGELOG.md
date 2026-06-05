@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-05
+
+### User-visible changes
+
+- **`wiki-lint` command / `wiki_lint` MCP tool** — a read-only structural health
+  check over a bootstrapped wiki space. Params: `space_id`, `severity_threshold?`
+  (`all` | `low` | `medium` | `high` | `critical`, default `all`),
+  `include_duplicates?` (default `False`). Enumerates the wiki **once** and runs a
+  ten-check battery — `asymmetric_relation` (Critical), `orphan` /
+  `pipeline_orphan` / `unreviewed_needs_review` / `contradiction_unresolved`
+  (High), `stale` / `stale_needs_review` (Medium), `oversized` (Low), and
+  `empty_type` / `potential_duplicate` (Informational) — returning a
+  severity-ranked LintReport and filing a single `wiki_log` receipt
+  (`wiki_action=lint`). The tool mutates nothing else; there is no auto-fix.
+- **Duplicate sweep is opt-in.** The `potential_duplicate` Qdrant sweep runs only
+  with `--include-duplicates` / `include_duplicates=True`, and is hard-skipped
+  above `WIKI_LINT_MAX_OBJECTS`. The advertised ≤60s / ≤500-Object performance
+  budget describes the **default sweep-off path**; the opt-in sweep can exceed it.
+- **`contradiction_unresolved` is passive in v0.5.0.** `wiki_contradictions` is not
+  yet auto-populated (lands in v0.6.0 / #287), so a green contradiction result is
+  not a guarantee — the check only fires on manually recorded contradictions.
+
+### Configuration
+
+- Six new optional knobs (sensible defaults; none required):
+  `WIKI_LINT_OVERSIZED_CHARS` (2000), `WIKI_LINT_ORPHAN_GRACE_DAYS` (7),
+  `WIKI_LINT_STALE_NEEDS_REVIEW_DAYS` (30), `WIKI_LINT_MAX_OBJECTS` (2000),
+  `WIKI_LINT_PIPELINE_WINDOW_SECONDS` (300), and `WIKI_LINT_DUPLICATE_MAX_SCORE`
+  (0.85, clamped to `[0, 1]`).
+
+### Internal changes
+
+- No schema change: `WIKI_SCHEMA_VERSION` stays at `0.4.1`; `wiki_lint` requires a
+  space bootstrapped at the current schema but adds no new Types or Properties.
+
 ## [0.4.1] - 2026-06-05
 
 ### Internal changes
@@ -176,7 +211,8 @@ This release builds on the existing semantic-search foundation:
   re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
   `semantic_search` also prompts a reindex when the collection is empty).
 
-[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.0...v0.3.1

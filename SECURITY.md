@@ -12,8 +12,8 @@ applied to the most recent release line.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.2.x   | :white_check_mark: Current preview line, receives security fixes |
-| < 0.2.0 | :x: Not supported  |
+| 0.5.x   | :white_check_mark: Current preview line, receives security fixes |
+| < 0.5.0 | :x: Not supported  |
 
 As the project matures, this table will be updated to reflect the versions that
 are actively maintained.

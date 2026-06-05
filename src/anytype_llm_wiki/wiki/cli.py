@@ -18,7 +18,14 @@ from .bootstrap import wiki_bootstrap
 from .doctor import run_doctor
 
 # Subcommands that server.main() routes here instead of starting the MCP server.
-SUBCOMMANDS = ("wiki-bootstrap", "wiki-ingest", "wiki-remember", "wiki-query", "doctor")
+SUBCOMMANDS = (
+    "wiki-bootstrap",
+    "wiki-ingest",
+    "wiki-remember",
+    "wiki-query",
+    "wiki-lint",
+    "doctor",
+)
 
 
 def _parse_domain_tags(raw: str | None) -> list[str] | None:
@@ -189,6 +196,46 @@ def _cmd_query(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in ("ok", "partial") else 1
 
 
+def _cmd_lint(args: argparse.Namespace) -> int:
+    from .lint import wiki_lint
+
+    result = wiki_lint(
+        space_id=args.space_id,
+        severity_threshold=args.severity_threshold,
+        include_duplicates=args.include_duplicates,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        status = result.get("status")
+        print(f"[wiki-lint] space {args.space_id}: status={status}")
+        summary = result.get("summary", {})
+        print(f"  summary:    {summary}")
+        print(f"  findings:   {len(result.get('findings', []))}")
+        for f in result.get("findings", []):
+            print(
+                f"    - [{f.get('severity')}] {f.get('check')}: "
+                f"{f.get('object_title')} {f.get('detail')}"
+            )
+        dups = result.get("potential_duplicates", [])
+        if dups:
+            print(f"  duplicates: {len(dups)}")
+            for d in dups:
+                print(
+                    f"    - {d.get('object_a')} ~ {d.get('object_b')} "
+                    f"(score {d.get('similarity_score')})"
+                )
+        if result.get("wiki_log_id"):
+            print(f"  wiki_log:   {result['wiki_log_id']}")
+        if result.get("error"):
+            print(f"  error:      {result['error']}")
+        for warning in result.get("warnings", []):
+            print(f"  warn:       {warning}")
+        for note in result.get("notes", []):
+            print(f"  note:       {note}")
+    return 0 if result.get("status") in ("ok", "partial") else 1
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     report = run_doctor()
     if args.json:
@@ -277,6 +324,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     query_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     query_p.set_defaults(func=_cmd_query)
+
+    lint_p = sub.add_parser(
+        "wiki-lint", help="Run a structural health check over a wiki space."
+    )
+    lint_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
+    lint_p.add_argument(
+        "--severity-threshold",
+        default="all",
+        help="Minimum severity retained (all|low|medium|high|critical; default all).",
+    )
+    lint_p.add_argument(
+        "--include-duplicates",
+        action="store_true",
+        default=False,
+        help="Run the opt-in Qdrant duplicate sweep (can exceed the ≤60s budget).",
+    )
+    lint_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    lint_p.set_defaults(func=_cmd_lint)
 
     doctor_p = sub.add_parser("doctor", help="Run preflight checks.")
     doctor_p.add_argument(
