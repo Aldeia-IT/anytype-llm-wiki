@@ -155,3 +155,22 @@ as a real fetch failure (the object is dropped and the result is downgraded to
 is exercised by the CI suite; live behavior (where `get_object` returns the real
 object shape) is pinned by the skip-gated live smoke test
 (`tests/wiki/test_query.py::TestQueryLive`).
+
+## 9. `wiki_query` enumerates the whole wiki on every call — O(N) scaling cliff
+
+(v0.4.0, ticket #285.)
+
+Every `wiki_query` calls `list_objects` to enumerate the entire wiki on **both**
+tiers — Tier 1 navigation reads the full object set, and Tier 2 still enumerates
+to compute the count that selects the tier (`WIKI_INDEX_THRESHOLD=200`). Cost is
+therefore O(N) in the number of wiki objects, per query. Compounding this, the
+optional file-back of a synthesis as a reusable Query Object monotonically grows
+N over time, so sustained dogfooding trends the per-query latency toward the p95
+ceiling over months.
+
+This is correct and acceptable at the current dogfooding scale (hundreds of
+objects). The fix is deferred to **v0.5.0**: cache the object count / index size
+(invalidated on write) so the tier decision and Tier 1 navigation avoid a full
+re-enumeration on every call. Tracked here rather than as a separate ticket
+(per maintainer decision); raised by the post-impl council and prior #285
+councils.

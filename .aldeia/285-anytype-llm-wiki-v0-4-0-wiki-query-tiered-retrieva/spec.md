@@ -360,10 +360,13 @@ object (`wiki_relations` for entities, `wiki_related` for concepts).
 #### WikiLog
 
 A WikiLog receipt is written after **every** `wiki_query` invocation whenever Anytype is
-reachable — including error returns (pre-check fail, Qdrant-down-at-threshold, synthesis
-error), not only success/partial (SF9, mirrors master spec 1516). It is skipped only when
-Anytype itself is unreachable (a WikiLog write would also fail). On error returns, `notes`
-records the error category, e.g. `"query: error qdrant_unavailable, vector_augmented"`.
+reachable — including most error returns (Qdrant-down-at-threshold, synthesis error), not
+only success/partial (SF9, mirrors master spec 1516). It is skipped when Anytype itself is
+unreachable (a WikiLog write would also fail), and — the one exception — on **schema/patch
+pre-check failures**: these are config errors that fire *before any write*, so the code
+returns immediately with no WikiLog (the tests assert no POST on these paths). On the
+WikiLog-writing error returns, `notes` records the error category, e.g.
+`"query: error qdrant_unavailable, vector_augmented"`.
 `notes` is passed through `scrub_credentials()` (SF8).
 
 ```python
@@ -384,7 +387,7 @@ _write_wikilog(
 
 | Condition | `status` | `error_category` | WikiLog? |
 |-----------|----------|------------------|----------|
-| Pre-check fail (schema missing/outdated, patch-decision) | `error` | `config_error` | yes (if Anytype up) |
+| Pre-check fail (schema missing/outdated, patch-decision) | `error` | `config_error` | no (fires before any write) |
 | Anytype enumeration totally fails (`list_objects` down) | `error` | `api_error` | no (Anytype down) |
 | Qdrant down AND `count >= threshold` | `error` | `api_error` | yes |
 | Synthesis model not pulled / Ollama down | `error` | `config_error`/`api_error` | yes |
