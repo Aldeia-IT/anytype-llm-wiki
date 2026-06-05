@@ -135,7 +135,8 @@ def _make_entity(
         {"key": "wiki_relations", "objects": relations or []},
     ]
     if wiki_status is not None:
-        props.append({"key": "wiki_status", "select": {"name": wiki_status, "id": f"tag-{wiki_status}"}})
+        # id must match the resolved tag id from _make_tags_response (e.g. "tag-needs-review-id")
+        props.append({"key": "wiki_status", "select": {"name": wiki_status, "id": f"tag-{wiki_status}-id"}})
     if wiki_contradictions is not None:
         props.append({"key": "wiki_contradictions", "objects": wiki_contradictions})
     if wiki_last_reviewed is not None:
@@ -170,7 +171,8 @@ def _make_concept(
         {"key": "wiki_related", "objects": relations or []},
     ]
     if wiki_status is not None:
-        props.append({"key": "wiki_status", "select": {"name": wiki_status, "id": f"tag-{wiki_status}"}})
+        # id must match the resolved tag id from _make_tags_response (e.g. "tag-needs-review-id")
+        props.append({"key": "wiki_status", "select": {"name": wiki_status, "id": f"tag-{wiki_status}-id"}})
     if wiki_sources is not None:
         props.append({"key": "wiki_sources", "objects": wiki_sources})
 
@@ -300,7 +302,10 @@ def _standard_mocks(list_objects_responses=None):
                 prop_id = "unknown"
             return httpx.Response(200, json=_make_tags_response(prop_id))
 
-        # get_object: /v1/spaces/{sid}/objects/{oid} with format=md
+        # get_object: /v1/spaces/{sid}/objects/{oid}?format=md
+        # The "?" check is load-bearing: AnytypeReadClient.get_object always appends
+        # ?format=md per the wire contract, distinguishing it from list_objects which
+        # uses /objects (no trailing slash, no query string on the collection path).
         if "/objects/" in path and "?" in url_str:
             oid = path.rstrip("/").split("/")[-1]
             if oid in _cached_objects:
@@ -1144,18 +1149,8 @@ class TestDuplicateSweep:
                 }
             ]
 
-        try:
-            import anytype_llm_wiki.indexer as _idx_mod
-            monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_semantic_search_core)
-        except (ImportError, AttributeError):
-            pass
-
-        try:
-            import anytype_llm_wiki.wiki.lint as _lint_mod
-            monkeypatch.setattr(_lint_mod, "semantic_search_core", fake_semantic_search_core,
-                                raising=False)
-        except (ImportError, AttributeError):
-            pass
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_semantic_search_core)
 
         respx.get().mock(side_effect=get_side_effect)
         respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
@@ -1196,17 +1191,8 @@ class TestDuplicateSweep:
                 {"object_id": "obj-band-c", "type": "wiki_entity", "score": 0.95, "name": "C"},
             ]
 
-        try:
-            import anytype_llm_wiki.indexer as _idx_mod
-            monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_semantic_search_core)
-        except (ImportError, AttributeError):
-            pass
-        try:
-            import anytype_llm_wiki.wiki.lint as _lint_mod
-            monkeypatch.setattr(_lint_mod, "semantic_search_core", fake_semantic_search_core,
-                                raising=False)
-        except (ImportError, AttributeError):
-            pass
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_semantic_search_core)
 
         respx.get().mock(side_effect=get_side_effect)
         respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
@@ -1250,17 +1236,8 @@ class TestDuplicateSweep:
                     {"object_id": "obj-pair-a", "type": "wiki_entity", "score": 0.80, "name": "A"},
                 ]
 
-        try:
-            import anytype_llm_wiki.indexer as _idx_mod
-            monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_semantic_search_core)
-        except (ImportError, AttributeError):
-            pass
-        try:
-            import anytype_llm_wiki.wiki.lint as _lint_mod
-            monkeypatch.setattr(_lint_mod, "semantic_search_core", fake_semantic_search_core,
-                                raising=False)
-        except (ImportError, AttributeError):
-            pass
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_semantic_search_core)
 
         respx.get().mock(side_effect=get_side_effect)
         respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
@@ -1303,18 +1280,9 @@ class TestDuplicateSweep:
             qdrant_calls.append((args, kwargs))
             return MagicMock()
 
-        try:
-            import anytype_llm_wiki.indexer as _idx_mod
-            monkeypatch.setattr(_idx_mod, "semantic_search_core", tracking_ssc)
-            monkeypatch.setattr(_idx_mod, "_qdrant", tracking_qdrant)
-        except (ImportError, AttributeError):
-            pass
-        try:
-            import anytype_llm_wiki.wiki.lint as _lint_mod
-            monkeypatch.setattr(_lint_mod, "semantic_search_core", tracking_ssc, raising=False)
-            monkeypatch.setattr(_lint_mod, "_qdrant", tracking_qdrant, raising=False)
-        except (ImportError, AttributeError):
-            pass
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", tracking_ssc)
+        monkeypatch.setattr(_idx_mod, "_qdrant", tracking_qdrant)
 
         respx.get().mock(side_effect=get_side_effect)
         respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
@@ -1381,16 +1349,8 @@ class TestDuplicateSweep:
                 {"object_id": "obj-thresh-b", "type": "wiki_entity", "score": 0.75, "name": "Thresh B"},
             ]
 
-        try:
-            import anytype_llm_wiki.indexer as _idx_mod
-            monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_ssc)
-        except (ImportError, AttributeError):
-            pass
-        try:
-            import anytype_llm_wiki.wiki.lint as _lint_mod
-            monkeypatch.setattr(_lint_mod, "semantic_search_core", fake_ssc, raising=False)
-        except (ImportError, AttributeError):
-            pass
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_ssc)
 
         respx.get().mock(side_effect=get_side_effect)
         respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
@@ -1440,16 +1400,8 @@ class TestDuplicateSweep:
             ssc_called.append(args)
             return []
 
-        try:
-            import anytype_llm_wiki.indexer as _idx_mod
-            monkeypatch.setattr(_idx_mod, "semantic_search_core", tracking_ssc)
-        except (ImportError, AttributeError):
-            pass
-        try:
-            import anytype_llm_wiki.wiki.lint as _lint_mod
-            monkeypatch.setattr(_lint_mod, "semantic_search_core", tracking_ssc, raising=False)
-        except (ImportError, AttributeError):
-            pass
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", tracking_ssc)
 
         get_side_effect, register = _standard_mocks(
             list_objects_responses=[
@@ -1635,6 +1587,10 @@ class TestPreChecks:
     def test_pre_check_schema_newer_warns_and_continues(self, monkeypatch):
         """Live schema > code → lint continues, 'wiki_schema_newer' warning in warnings[],
         WikiLog still written. AC9/SF4.
+
+        Uses URL-dispatched side_effect (like _standard_mocks) so the test is robust to
+        implementation reordering of GET calls (properties/tags fetched before or after
+        object enumeration pages, etc.).
         """
         post_called = []
 
@@ -1642,20 +1598,48 @@ class TestPreChecks:
             post_called.append(str(request.url))
             return httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}})
 
-        # First GET returns newer schema marker; subsequent GETs return empty objects
-        get_responses = iter([
-            httpx.Response(200, json=_schema_newer_response()),
-            httpx.Response(200, json=_empty_list_response()),
-            httpx.Response(200, json=_make_properties_response()),
-            httpx.Response(200, json=_make_tags_response("prop-wiki-status-001")),
-            httpx.Response(200, json=_make_search_response([])),
-        ])
+        # URL-dispatched GET handler — order-independent, resilient to call-count changes.
+        # First list_objects call gets newer-schema response; all subsequent get empty pages.
+        _list_calls = [0]
 
         def get_side_effect(request, **kwargs):
-            try:
-                return next(get_responses)
-            except StopIteration:
+            path = request.url.path
+            url_str = str(request.url)
+
+            # list_properties
+            if "/properties" in path and "/tags" not in path:
+                return httpx.Response(200, json=_make_properties_response())
+
+            # list_tags for a property (property-scoped two-step tag resolution)
+            if "/properties/" in path and "/tags" in path:
+                parts = path.split("/")
+                try:
+                    prop_idx = parts.index("properties")
+                    prop_id = parts[prop_idx + 1]
+                except (ValueError, IndexError):
+                    prop_id = "unknown"
+                return httpx.Response(200, json=_make_tags_response(prop_id))
+
+            # get_object: /v1/spaces/{sid}/objects/{oid}?format=md
+            # (presence of "?" distinguishes single-object fetch from list; per wire contract
+            #  AnytypeReadClient.get_object always appends ?format=md)
+            if "/objects/" in path and "?" in url_str:
+                oid = path.rstrip("/").split("/")[-1]
+                return httpx.Response(200, json=_make_get_object_envelope(
+                    _make_entity(oid, name=f"Object {oid}")
+                ))
+
+            # list_objects (paginated collection scan)
+            if "/objects" in path and "/objects/" not in path:
+                idx = _list_calls[0]
+                _list_calls[0] += 1
+                if idx == 0:
+                    # First call: return newer-schema marker so the warn-and-continue path fires
+                    return httpx.Response(200, json=_schema_newer_response())
+                # All subsequent pages: empty (no wiki objects in this test)
                 return httpx.Response(200, json=_empty_list_response())
+
+            return httpx.Response(200, json=_empty_list_response())
 
         respx.get().mock(side_effect=get_side_effect)
         respx.post().mock(side_effect=tracking_post)
