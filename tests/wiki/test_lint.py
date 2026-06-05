@@ -57,20 +57,35 @@ def set_anytype_env(monkeypatch):
 # Canned response builders
 # ---------------------------------------------------------------------------
 
-def _schema_current_response():
-    """list_objects response stamped with the live WIKI_SCHEMA_VERSION — QA#25 passes."""
-    from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
+def _schema_marker(version: str | None = None) -> dict:
+    """Return the root 'Wiki' collection object used as the schema-version marker.
+
+    ``_schema_version_from_objects`` requires name=='Wiki' AND type.key=='collection'
+    (G4 guard).  This object is recognised as the schema marker but is NOT a wiki
+    wiki_entity / wiki_concept / etc., so the check-battery's wiki-type filter will
+    correctly exclude it from the per-object check loop.
+    """
+    if version is None:
+        from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
+        version = WIKI_SCHEMA_VERSION
     return {
-        "data": [
-            {
-                "id": "coll-wiki-001",
-                "name": "Wiki",
-                "type": {"key": "collection"},
-                "properties": [
-                    {"key": "wiki_schema_version", "text": WIKI_SCHEMA_VERSION}
-                ],
-            }
+        "id": "coll-wiki-001",
+        "name": "Wiki",
+        "type": {"key": "collection"},
+        "properties": [
+            {"key": "wiki_schema_version", "text": version}
         ],
+    }
+
+
+def _schema_current_response():
+    """Single-page list_objects response stamped with the live WIKI_SCHEMA_VERSION.
+
+    Contains ONLY the schema marker (no wiki objects).  Used by schema pre-check
+    tests that do not need wiki objects in the enumeration.  The QA#25 gate passes.
+    """
+    return {
+        "data": [_schema_marker()],
         "pagination": {"has_more": False},
     }
 
@@ -78,16 +93,7 @@ def _schema_current_response():
 def _schema_outdated_response():
     """list_objects with version older than code — triggers wiki_schema_outdated."""
     return {
-        "data": [
-            {
-                "id": "coll-wiki-old",
-                "name": "Wiki",
-                "type": {"key": "collection"},
-                "properties": [
-                    {"key": "wiki_schema_version", "text": "0.0.1"}
-                ],
-            }
-        ],
+        "data": [_schema_marker("0.0.1")],
         "pagination": {"has_more": False},
     }
 
@@ -95,16 +101,7 @@ def _schema_outdated_response():
 def _schema_newer_response():
     """list_objects with version newer than code — triggers wiki_schema_newer warning."""
     return {
-        "data": [
-            {
-                "id": "coll-wiki-new",
-                "name": "Wiki",
-                "type": {"key": "collection"},
-                "properties": [
-                    {"key": "wiki_schema_version", "text": "99.99.99"}
-                ],
-            }
-        ],
+        "data": [_schema_marker("99.99.99")],
         "pagination": {"has_more": False},
     }
 
@@ -265,21 +262,44 @@ def _make_tags_response(property_id: str) -> dict:
     return {"data": all_tags, "pagination": {"has_more": False}}
 
 
-def _standard_mocks(list_objects_responses=None):
-    """
-    Return a side_effect function for GET that handles:
-    - list_objects → schema + objects
+def _standard_mocks(objects=None, schema_version=None):
+    """Return a ``(get_side_effect, register_object)`` pair for GET mocking.
+
+    Handles:
+    - list_objects  → ONE single-page enumeration containing [schema_marker, *objects]
+                      (query.py pattern: single WikiClient.list_objects call returns
+                       the schema-version marker collection AND all wiki objects in one
+                       combined data[] array so _schema_version_from_objects and the
+                       check battery both operate on the same list — spec Pre-Checks step
+                       2 "one paginated list_objects sequence" / note G9).
     - list_properties → wiki_status + wiki_action properties
-    - list_tags → needs-review + ingest + lint tags
-    - get_object → individual object fetches (envelope)
+    - list_tags       → needs-review + ingest + lint tags (property-scoped two-step)
+    - get_object      → individual object fetches (envelope), served from _cached_objects
 
-    list_objects_responses: list of successive responses to return for object listing.
-    If None, returns schema_current + empty.
+    Parameters
+    ----------
+    objects:
+        Wiki objects to include in the enumeration after the schema marker.
+        Defaults to [] (empty space — schema check passes, zero wiki objects found).
+    schema_version:
+        Version string for the schema marker.  Defaults to the current
+        WIKI_SCHEMA_VERSION so QA#25 passes.  Pass ``"0.0.1"`` to trigger the
+        outdated branch or ``"99.99.99"`` for the newer branch *within a combined
+        single-page response that also carries wiki objects*.
+
+    Notes
+    -----
+    The schema marker object (type.key == "collection", name == "Wiki") is
+    deliberately NOT a wiki_entity / wiki_concept / etc., so the check-battery's
+    wiki-type filter will exclude it from per-object processing while
+    _schema_version_from_objects will still find the version on the same list.
     """
-    if list_objects_responses is None:
-        list_objects_responses = [_schema_current_response(), _empty_list_response()]
+    _wiki_objects = list(objects) if objects is not None else []
+    _single_page = {
+        "data": [_schema_marker(schema_version)] + _wiki_objects,
+        "pagination": {"has_more": False},
+    }
 
-    _list_calls = [0]
     _cached_objects: dict[str, dict] = {}
 
     def get_side_effect(request, **kwargs):
@@ -290,11 +310,10 @@ def _standard_mocks(list_objects_responses=None):
         if "/properties" in path and "/tags" not in path:
             return httpx.Response(200, json=_make_properties_response())
 
-        # list_tags for a property
+        # list_tags for a property (property-scoped two-step tag resolution)
         if "/properties/" in path and "/tags" in path:
             # Extract property_id from path like /v1/spaces/{sid}/properties/{pid}/tags
             parts = path.split("/")
-            # find 'properties' index
             try:
                 prop_idx = parts.index("properties")
                 prop_id = parts[prop_idx + 1]
@@ -315,13 +334,14 @@ def _standard_mocks(list_objects_responses=None):
                 _make_entity(oid, name=f"Object {oid}")
             ))
 
-        # list_objects: /v1/spaces/{sid}/objects (pagination)
+        # list_objects: /v1/spaces/{sid}/objects?offset=...&limit=...
+        # Returns a SINGLE page containing [schema_marker, *wiki_objects] with
+        # has_more=False.  A spec-faithful single-call impl calls list_objects once,
+        # _paginated_get fetches this one page, and both _schema_version_from_objects
+        # and the check-battery filter operate on the same combined all_objects list
+        # (mirrors query.py ~line 408 and test_query.py ~line 556).
         if "/objects" in path and "?" in url_str and "/objects/" not in path:
-            idx = _list_calls[0]
-            _list_calls[0] += 1
-            if idx < len(list_objects_responses):
-                return httpx.Response(200, json=list_objects_responses[idx])
-            return httpx.Response(200, json=_empty_list_response())
+            return httpx.Response(200, json=_single_page)
 
         # space-level tags — MUST NOT be called (returns 404 to expose misuse)
         if path.endswith("/tags") and "/properties/" not in path:
@@ -330,6 +350,7 @@ def _standard_mocks(list_objects_responses=None):
         return httpx.Response(200, json=_empty_list_response())
 
     def register_object(obj: dict):
+        """Pre-seed an object so get_object returns a real envelope for it."""
         _cached_objects[obj["id"]] = obj
 
     return get_side_effect, register_object
@@ -440,10 +461,7 @@ class TestAsymmetricRelationCheck:
         objects = [obj_a, obj_b]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(obj_a)
         register(obj_b)
@@ -485,10 +503,7 @@ class TestBacklinksD1:
         original_list_objects = None
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(obj_a)
         register(obj_b)
@@ -523,10 +538,7 @@ class TestBacklinksD1:
 
         objects = [obj_a, obj_b, obj_c]
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(obj_a)
         register(obj_b)
@@ -580,10 +592,7 @@ class TestPipelineOrphanCheck:
         objects = [orphan_obj]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(orphan_obj)
 
@@ -641,10 +650,7 @@ class TestOrphanCheck:
 
         objects = [orphan]
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(orphan)
         register(source_obj)
@@ -688,10 +694,7 @@ class TestOrphanCheck:
 
         objects = [new_orphan]
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(new_orphan)
         register(source_obj)
@@ -730,10 +733,7 @@ class TestNeedsReviewChecks:
         objects = [entity, other]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
         register(other)
@@ -780,10 +780,7 @@ class TestNeedsReviewChecks:
         objects = [entity, other]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
         register(other)
@@ -830,10 +827,7 @@ class TestNeedsReviewChecks:
         objects = [entity, ref]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
         register(ref)
@@ -878,10 +872,7 @@ class TestNeedsReviewChecks:
         objects = [entity_nr, entity_rv, entity_ar]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         for o in objects:
             register(o)
@@ -928,10 +919,7 @@ class TestContradictionCheck:
         objects = [normal_entity, conflict_entity]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         for o in objects:
             register(o)
@@ -997,10 +985,7 @@ class TestStaleCheck:
         objects = [stale_entity, ref]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(stale_entity)
         register(ref)
@@ -1045,10 +1030,7 @@ class TestOversizedCheck:
         objects = [oversized_entity, ref]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(oversized_entity)
         register(ref)
@@ -1091,10 +1073,7 @@ class TestEmptyTypeCheck:
         objects = [entity]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
 
@@ -1130,10 +1109,7 @@ class TestDuplicateSweep:
         objects = [entity_a, entity_b]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity_a)
         register(entity_b)
@@ -1177,10 +1153,7 @@ class TestDuplicateSweep:
         objects = [entity_a, entity_b, entity_c]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         for o in objects:
             register(o)
@@ -1216,10 +1189,7 @@ class TestDuplicateSweep:
         objects = [entity_a, entity_b]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity_a)
         register(entity_b)
@@ -1262,10 +1232,7 @@ class TestDuplicateSweep:
         objects = [entity]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
 
@@ -1303,10 +1270,7 @@ class TestDuplicateSweep:
 
         # severity_threshold="all" still does not activate sweep
         get_side_effect2, register2 = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register2(entity)
         respx.get().mock(side_effect=get_side_effect2)
@@ -1333,10 +1297,7 @@ class TestDuplicateSweep:
         objects = [entity_a, entity_b]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity_a)
         register(entity_b)
@@ -1404,10 +1365,7 @@ class TestDuplicateSweep:
         monkeypatch.setattr(_idx_mod, "semantic_search_core", tracking_ssc)
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         for o in objects:
             register(o)
@@ -1452,10 +1410,7 @@ class TestSeverityThreshold:
         objects = [entity, ref]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
         register(ref)
@@ -1491,10 +1446,7 @@ class TestSeverityThreshold:
         objects = [entity]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
 
@@ -1729,6 +1681,15 @@ class TestStatusLifecycle:
 
         wikilog_posted = []
 
+        # Single-page enumeration: schema marker + both objects in one data[] array.
+        # The FAILURE is on the get_object call (5xx) for obj-bad, NOT on list_objects.
+        # list_objects returns both objects so the check battery processes them, then
+        # get_object for obj-bad returns 500, causing partial status.
+        _list_page = {
+            "data": [_schema_marker()] + objects,
+            "pagination": {"has_more": False},
+        }
+
         def get_side_effect(request, **kwargs):
             url_str = str(request.url)
             path = request.url.path
@@ -1737,19 +1698,15 @@ class TestStatusLifecycle:
                 return httpx.Response(200, json=_make_properties_response())
             if "/properties/" in path and "/tags" in path:
                 return httpx.Response(200, json=_make_tags_response("prop-001"))
-            if "/objects/obj-bad" in path:
+            # get_object for obj-bad: 5xx to trigger partial status
+            if "/objects/obj-bad" in path and "?" in url_str:
                 return httpx.Response(500, json={"error": "internal error"})
-            if "/objects/obj-good" in path:
+            # get_object for obj-good: success
+            if "/objects/obj-good" in path and "?" in url_str:
                 return httpx.Response(200, json=_make_get_object_envelope(entity_good))
-            # list_objects
+            # list_objects: single combined page (spec-faithful single call)
             if "/objects" in path and "?" in url_str and "/objects/" not in path:
-                # Return schema on first call, objects on second
-                if not hasattr(get_side_effect, "_list_count"):
-                    get_side_effect._list_count = 0
-                get_side_effect._list_count += 1
-                if get_side_effect._list_count == 1:
-                    return httpx.Response(200, json=_schema_current_response())
-                return httpx.Response(200, json=_paginated_response(objects))
+                return httpx.Response(200, json=_list_page)
             return httpx.Response(200, json=_empty_list_response())
 
         def post_side_effect(request, **kwargs):
@@ -1798,10 +1755,7 @@ class TestStatusLifecycle:
             return httpx.Response(201, json={"object": {"id": "other-obj"}})
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
 
         respx.get().mock(side_effect=get_side_effect)
@@ -1861,10 +1815,7 @@ class TestObjectBudgetWarning:
         ]
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         for o in objects:
             register(o)
@@ -1902,10 +1853,7 @@ class TestTagResolution:
         ).mock(return_value=httpx.Response(404, json={"error": "not found"}))
 
         get_side_effect, register = _standard_mocks(
-            list_objects_responses=[
-                _schema_current_response(),
-                _paginated_response(objects),
-            ]
+            objects=objects
         )
         register(entity)
 
