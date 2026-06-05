@@ -162,7 +162,8 @@ This release builds on the existing semantic-search foundation:
   re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
   `semantic_search` also prompts a reindex when the collection is empty).
 
-[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/releases/tag/v0.2.0
