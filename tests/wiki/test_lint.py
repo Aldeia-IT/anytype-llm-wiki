@@ -891,13 +891,22 @@ class TestNeedsReviewChecks:
 
 
 class TestContradictionCheck:
-    """AC5/AC6: contradiction_unresolved check — High severity, passive on pipeline wikis."""
+    """AC3/AC4: contradiction_unresolved check — High severity, ACTIVE (no passive caveat) post-v0.6.0."""
 
     @respx.mock
-    def test_contradiction_check_passive(self, monkeypatch):
-        """AC6: pipeline fixture with empty wiki_contradictions → zero contradiction findings.
-        Manually populated wiki_contradictions + null wiki_last_reviewed → finding fires.
-        Check scoped to wiki_entity only (SF9).
+    def test_contradiction_check_active(self, monkeypatch):
+        """AC3: contradiction_unresolved fires as High finding with NO passive caveat in detail.
+
+        v0.6.0 activates the contradiction check: lint.py removes the
+        _PASSIVE_CONTRADICTION_NOTE constant and "(PASSIVE check — see #287)" suffix.
+        This test FAILS until lint.py:429 strips the passive suffix (§3.7 change 3).
+
+        Assertions:
+          - finding fires for entity with wiki_contradictions set + null wiki_last_reviewed
+          - finding severity == "high"
+          - finding detail does NOT contain "PASSIVE" (new — FAILS now because current
+            lint.py:429 appends "(PASSIVE check — see #287)")
+          - report["notes"] does NOT contain the _PASSIVE_CONTRADICTION_NOTE string
         """
         # Pipeline-normal entity: no contradictions
         normal_entity = _make_entity(
@@ -907,7 +916,7 @@ class TestContradictionCheck:
             backlinks=["obj-conflict"],
             wiki_contradictions=[],
         )
-        # Manually-populated entity: has contradictions, no last_reviewed
+        # Entity with contradictions set (as the pipeline now writes) and no last_reviewed
         conflict_entity = _make_entity(
             "obj-conflict",
             name="Conflict Entity",
@@ -932,12 +941,71 @@ class TestContradictionCheck:
 
         findings = result.get("findings", [])
         contradictions = [f for f in findings if f.get("check") == "contradiction_unresolved"]
-        # Conflict entity should fire; normal entity should not
+
+        # Finding fires for conflict entity
         assert any(f.get("object_id") == "obj-conflict" for f in contradictions), (
             f"Expected contradiction_unresolved for obj-conflict; findings: {contradictions}"
         )
+        # Normal entity (no contradictions) does not fire
         assert not any(f.get("object_id") == "obj-normal" for f in contradictions), (
             f"Normal entity must not fire contradiction_unresolved; findings: {contradictions}"
+        )
+
+        # AC3 new assertion: finding detail must NOT contain "PASSIVE" — FAILS until
+        # lint.py:429 is updated (§3.7 change 3).
+        for finding in contradictions:
+            detail = finding.get("detail", "")
+            assert "PASSIVE" not in detail, (
+                f"AC3: contradiction_unresolved detail must NOT contain 'PASSIVE' after v0.6.0 "
+                f"activation (§3.7 change 3); got detail={detail!r}"
+            )
+
+        # AC3 new assertion: report notes must NOT carry the passive-note string
+        notes = result.get("notes", [])
+        assert not any("passive until v0.6.0" in str(n) for n in notes), (
+            f"AC3: report notes must NOT contain passive-note string post-v0.6.0; notes: {notes}"
+        )
+
+    @respx.mock
+    def test_contradiction_cleared_by_review(self, monkeypatch):
+        """AC4: entity with wiki_contradictions set AND wiki_last_reviewed non-null
+        → contradiction_unresolved finding does NOT fire.
+
+        The predicate is (contradictions AND NOT last_reviewed). Setting
+        wiki_last_reviewed suppresses the finding — operator marks it resolved.
+        """
+        reviewed_entity = _make_entity(
+            "obj-reviewed",
+            name="Reviewed Contradiction Entity",
+            relations=["obj-peer"],
+            backlinks=["obj-peer"],
+            wiki_contradictions=["obj-peer"],
+            wiki_last_reviewed="2026-06-05T00:00:00+00:00",
+        )
+        peer = _make_entity(
+            "obj-peer",
+            name="Peer Entity",
+            relations=["obj-reviewed"],
+            backlinks=["obj-reviewed"],
+        )
+        objects = [reviewed_entity, peer]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        for o in objects:
+            register(o)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        findings = result.get("findings", [])
+        contradictions = [f for f in findings if f.get("check") == "contradiction_unresolved"]
+
+        assert not any(f.get("object_id") == "obj-reviewed" for f in contradictions), (
+            f"AC4: contradiction_unresolved must NOT fire when wiki_last_reviewed is set; "
+            f"findings: {contradictions}"
         )
 
 
@@ -1776,15 +1844,17 @@ class TestStatusLifecycle:
         assert result.get("wiki_log_id") is not None, (
             f"wiki_log_id must be set on clean run; result: {result}"
         )
-        # CPO-6 (third surface): the passive-contradiction caveat must be present in
-        # the report even when no contradiction finding fired — the exact over-trust
-        # case. The note is always-on, independent of whether the check produced output.
+        # v0.6.0 post-activation (§3.7 change 2): the _PASSIVE_CONTRADICTION_NOTE is removed.
+        # _empty_report().notes is now [] — the passive advisory is no longer emitted.
+        # This assertion REPLACES the old CPO-6 "passive until v0.6.0" assertion.
+        # FAILS until lint.py:172 is updated to return "notes": [] (§3.7 change 2).
         assert not any(
             f.get("check") == "contradiction_unresolved" for f in result.get("findings", [])
-        ), "clean-run fixture must fire no contradiction findings (precondition for CPO-6 note)"
+        ), "clean-run fixture must fire no contradiction findings (precondition)"
         notes = result.get("notes", [])
-        assert any("passive until v0.6.0" in str(n) for n in notes), (
-            f"green run must carry the passive-contradiction note (CPO-6); notes: {notes}"
+        assert notes == [], (
+            f"post-v0.6.0: _empty_report notes must be empty [] — the passive-contradiction "
+            f"note is removed (§3.7 change 2); got notes: {notes}"
         )
 
     @respx.mock
