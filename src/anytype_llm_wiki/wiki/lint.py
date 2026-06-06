@@ -16,10 +16,6 @@ called EXACTLY ONCE; the same ``all_objects`` list feeds both the QA#25 schema g
 Performance: the advertised ≤60s / ≤500-object budget describes the DEFAULT
 sweep-off path. The opt-in duplicate sweep (``include_duplicates=True``) embeds the
 wiki and can exceed that budget; it is also hard-skipped above WIKI_LINT_MAX_OBJECTS.
-
-Passive contradiction note (CPO-6): the ``contradiction_unresolved`` check is PASSIVE
-until v0.6.0/#287 — ``wiki_contradictions`` is not yet auto-populated, so a green
-contradiction result is NOT a guarantee that no contradictions exist.
 """
 
 import logging
@@ -72,15 +68,6 @@ _DUPLICATE_LO = 0.70
 _FAILURE_MARKER = "relation_rollback"
 
 _NEEDS_REVIEW = "needs-review"
-
-# CPO-6 (third surface): an always-on report note so a green/zero-findings run does
-# not read as a guarantee that no contradictions exist. The contradiction_unresolved
-# check is PASSIVE until v0.6.0/#287 (wiki_contradictions is not auto-populated yet).
-_PASSIVE_CONTRADICTION_NOTE = (
-    "contradiction_unresolved is passive until v0.6.0 (#287): wiki_contradictions is "
-    "not auto-populated yet, so a clean contradiction result does not guarantee that "
-    "no contradictions exist."
-)
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +155,7 @@ def _empty_report() -> dict:
         "wiki_log_id": None,
         "deeplink": None,
         "warnings": [],
-        # Always-on advisory notes (present even on a clean run) — CPO-6 third surface.
-        "notes": [_PASSIVE_CONTRADICTION_NOTE],
+        "notes": [],
         "status": "ok",
         "error": None,
         "error_category": None,
@@ -208,8 +194,7 @@ def wiki_lint(
     summary → WikiLog receipt.
 
     The duplicate sweep is OPT-IN (``include_duplicates=True``) and can exceed the
-    ≤60s budget the default path honors. The ``contradiction_unresolved`` check is
-    PASSIVE until v0.6.0/#287 — a green contradiction result is not a guarantee.
+    ≤60s budget the default path honors.
     """
     start = time.monotonic()
     report = _empty_report()
@@ -413,7 +398,7 @@ def wiki_lint(
                                 f"{window}s of an ingest relation_rollback failure",
                             ))
 
-            # (d) contradiction_unresolved (High) — PASSIVE; wiki_entity only (SF9)
+            # (d) contradiction_unresolved (High) — active; wiki_entity only (SF9)
             if tk == "wiki_entity":
                 contra_prop = _prop(o, "wiki_contradictions")
                 contradictions = (
@@ -425,8 +410,8 @@ def wiki_lint(
                 if contradictions and not last_reviewed:
                     findings.append(_finding(
                         "high", "contradiction_unresolved", o, space_id,
-                        f"{len(contradictions)} unresolved contradiction(s) and no "
-                        "wiki_last_reviewed (PASSIVE check — see #287)",
+                        f"{len(contradictions)} unresolved contradiction(s) — set "
+                        "wiki_last_reviewed to resolve",
                     ))
 
             # (e) stale (Medium) — entity/concept
