@@ -78,6 +78,7 @@ def _empty_result() -> dict:
         "objects_updated": [],
         "objects_skipped": [],
         "relations_created": 0,
+        "contradictions_detected": 0,
         "wiki_log_id": None,
         "warnings": [],
         "status": "ok",
@@ -486,7 +487,8 @@ def _run_ingest(
     if not candidates:
         # Empty source → create Source, write WikiLog, return ok with empty_source.
         result["warnings"].append("empty_source")
-        result["source_object_id"] = _create_source(client, space_id, source, markdown, result)
+        source_id, _was_resumed = _create_source(client, space_id, source, markdown, result)
+        result["source_object_id"] = source_id
         action_tag_id, degraded = _resolve_wiki_action_tag(client, space_id)
         if degraded:
             result["warnings"].append("wiki_action_tag_not_found")
@@ -519,7 +521,7 @@ def _run_ingest(
         result["warnings"].append("extraction_degraded")
 
     # 9. create Source object.
-    source_id = _create_source(client, space_id, source, markdown, result)
+    source_id, was_resumed = _create_source(client, space_id, source, markdown, result)
     result["source_object_id"] = source_id
 
     # 10. resolve + create/update each candidate. A candidate's ``kind`` maps to
@@ -585,7 +587,10 @@ def _run_ingest(
     action_tag_id, degraded = _resolve_wiki_action_tag(client, space_id)
     if degraded:
         result["warnings"].append("wiki_action_tag_not_found")
-    notes = "; ".join(rollback_notes) if rollback_notes else "ingest"
+    notes_parts = list(rollback_notes)
+    if was_resumed:
+        notes_parts.append("resumed_partial_ingest")
+    notes = "; ".join(notes_parts) if notes_parts else "ingest"
     result["wiki_log_id"] = _write_wikilog(
         client, space_id,
         subject=source,
@@ -624,8 +629,13 @@ def _derive_relations(
 
 def _create_source(
     client: WikiClient, space_id: str, source: str, markdown: str, result: dict
-) -> str | None:
-    """Create the wiki_source object. Records a warning on failure (non-fatal)."""
+) -> tuple[str | None, bool]:
+    """Create or reuse the wiki_source object.
+
+    Returns ``(source_id, was_resumed)`` where ``was_resumed`` is True when an
+    existing Source was reused (partial-resume signal, E2). Records a warning on
+    failure (non-fatal).
+    """
     is_url = source.startswith("http://") or source.startswith("https://")
     excerpt = sanitize_property_value((markdown or "")[:1000])
     props = [
@@ -650,7 +660,7 @@ def _create_source(
                     client.update_object(space_id, sid, {"properties": props})
                 except (httpx.HTTPError, KeyError, ValueError, TypeError):
                     pass
-                return sid
+                return sid, True
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         pass
 
@@ -661,10 +671,10 @@ def _create_source(
             name=_source_name(source),
             properties=props,
         )
-        return obj.get("id")
+        return obj.get("id"), False
     except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
         result["warnings"].append(f"source_create_failed: {exc}")
-        return None
+        return None, False
 
 
 def _source_name(source: str) -> str:
