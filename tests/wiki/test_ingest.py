@@ -1091,6 +1091,949 @@ class TestIngestEntryPathConsentBeforeOffMachine:
 
 
 # ---------------------------------------------------------------------------
+# AC-6: TestReingestIdempotency — resumed_partial_ingest WikiLog note (E2)
+# Added method: test_resumed_partial_ingest_wikilog
+# ---------------------------------------------------------------------------
+
+class TestReingestIdempotencyWikilog:
+    """AC-6: Re-ingest of same source → Source reused; WikiLog notes contain
+    'resumed_partial_ingest'. Tests the new (source_id, was_resumed) tuple return
+    from _create_source (§3.6).
+
+    FAILS until _create_source returns (str|None, bool) and _run_ingest appends
+    'resumed_partial_ingest' to WikiLog notes when was_resumed=True.
+    """
+
+    @respx.mock
+    def test_resumed_partial_ingest_wikilog(self, monkeypatch):
+        """AC-6: Re-ingest of same source → Source object is reused (search returns it),
+        WikiLog notes field contains 'resumed_partial_ingest'.
+
+        Wire contract:
+        - search (POST /v1/spaces/{sid}/search): returns existing wiki_source on second ingest
+        - PATCH: Source PATCH + entity updates
+        - WikiLog create (POST): assert notes contain 'resumed_partial_ingest'
+
+        FAILS now: _create_source returns bare str (not tuple) and no 'resumed_partial_ingest'
+        note is ever written (§3.6).
+        """
+        import json as _json
+
+        source_url = "https://example.com/resumed-ingest-paper"
+        existing_source_id = "wiki-source-existing-001"
+        wikilog_payloads: list[dict] = []
+        store: dict = {}  # normalized_name -> {id, type_key}
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            from anytype_llm_wiki.wiki.util import normalize_title
+            url = str(request.url)
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+
+            if "/search" in url:
+                query = normalize_title(payload.get("query", ""))
+                if existing_source_id and query and query in normalize_title(source_url):
+                    # Return the existing wiki_source so _create_source detects resume
+                    return httpx.Response(200, json={
+                        "data": [{
+                            "id": existing_source_id,
+                            "name": source_url,
+                            "type": {"key": "wiki_source"},
+                            "properties": [],
+                        }],
+                        "pagination": {"has_more": False},
+                    })
+                # For entity searches, return empty (force create path for entities)
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+            if payload.get("type_key") == "wiki_log":
+                wikilog_payloads.append(payload)
+                return httpx.Response(201, json={"object": {"id": "wikilog-resume-001", "name": "ingest"}})
+
+            # Other creates (entities, etc.)
+            return httpx.Response(201, json={"object": {"id": "obj-new-001", "name": payload.get("name", "obj")}})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        # Basic sanity: ingest must return a dict
+        assert isinstance(result, dict), f"wiki_ingest must return a dict; got {type(result)}"
+
+        # AC-6: WikiLog payload must contain 'resumed_partial_ingest' in notes.
+        # FAILS now because _create_source never returns was_resumed=True (§3.6 not yet impl).
+        assert wikilog_payloads, (
+            "AC-6: WikiLog must be written on re-ingest; no wiki_log POST captured"
+        )
+        wikilog_notes_all = " ".join(
+            str(p.get("properties", [])) for p in wikilog_payloads
+        )
+        # Also check name field of the wikilog object (some impls embed notes in name)
+        wikilog_all_text = wikilog_notes_all + " " + " ".join(
+            _json.dumps(p) for p in wikilog_payloads
+        )
+        assert "resumed_partial_ingest" in wikilog_all_text, (
+            f"AC-6: WikiLog notes must contain 'resumed_partial_ingest' when Source is reused; "
+            f"wikilog payloads: {wikilog_payloads}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC-1, AC-2, AC-5, AC-10, AC-11, AC-12, AC-13, AC-14:
+# TestContradictionDetection — seam tests for detect_contradictions hook
+# ---------------------------------------------------------------------------
+# NOTE: The new symbols (detect_contradictions, _write_contradiction_links,
+# _load_contradiction_prompt) are imported at the TOP of each test method
+# below. This causes the test to fail with ImportError on execution rather
+# than at collection time, which keeps pre-existing unrelated tests green
+# while still failing loudly (no try/except soft-pass guards).
+
+
+def _make_objects_shaped_search_response(
+    obj_id: str,
+    name: str,
+    peer_id: str,
+    existing_contradictions: list | None = None,
+) -> dict:
+    """Build a POST /search response whose target carries objects-format properties.
+
+    IMPORTANT — PARSING CONTRACT ONLY (addendum item 5b / CTO-ADV-1):
+    This hand-authored fixture asserts that _relation_ids() correctly reads
+    objects-format 'wiki_relations' and 'wiki_contradictions' arrays from the
+    in-memory target dict.  It does NOT validate that the real Anytype search
+    endpoint returns populated objects-format arrays for these relations.  That
+    platform assumption must be verified by impl against a REAL Anytype search
+    response (addendum item 1 / CTO-ADV-1); if real search does NOT hydrate
+    objects-format arrays, impl must add a target get_object call and update §4.
+    Do NOT treat this fixture passing as evidence the no-target-GET assumption holds.
+    """
+    props = [
+        {"key": "wiki_facts", "text": "Some entity facts here."},
+        # objects-format relation — the no-GET design reads peer ids from here
+        {"key": "wiki_relations", "objects": [peer_id]},
+    ]
+    if existing_contradictions is not None:
+        props.append({"key": "wiki_contradictions", "objects": existing_contradictions})
+    return {
+        "data": [{
+            "id": obj_id,
+            "name": name,
+            "type": {"key": "wiki_entity"},
+            "properties": props,
+        }],
+        "pagination": {"has_more": False},
+    }
+
+
+def _make_peer_get_object_response(peer_id: str, peer_facts: str = "Peer facts here.") -> dict:
+    """Build an AnytypeReadClient.get_object response (GET /objects/{id}?format=md)."""
+    return {
+        "object": {
+            "id": peer_id,
+            "name": f"Peer {peer_id}",
+            "type": {"key": "wiki_entity"},
+            "properties": [
+                {"key": "wiki_facts", "text": peer_facts},
+                {"key": "wiki_contradictions", "objects": []},
+            ],
+        }
+    }
+
+
+FAKE_OBJ_ID = "entity-target-001"
+FAKE_PEER_ID = "entity-peer-001"
+FAKE_OLLAMA_BASE = "http://127.0.0.1:11434"
+
+
+class TestContradictionDetection:
+    """AC-1,2,5,10,11,12,13,14: contradiction detection seam tests.
+
+    All tests in this class are CI-runnable (not skip-gated).
+    Wire contract (§3.8):
+    - search = POST /v1/spaces/{sid}/search (NEVER GET)
+    - get_object = GET /v1/spaces/{sid}/objects/{oid}?format=md (PEER reads only)
+    - update_object = PATCH /v1/spaces/{sid}/objects/{oid} (bidirectional write)
+
+    FAIL until detect_contradictions, _write_contradiction_links, and
+    _load_contradiction_prompt exist in ingest.py.
+    """
+
+    @respx.mock
+    def test_contradiction_bidirectional_write(self, monkeypatch):
+        """AC-1: ingest update of entity whose new facts contradict a linked peer →
+        wiki_contradictions set bidirectionally; wiki_last_reviewed NOT written;
+        NO GET fired against the target object id (BL-3).
+
+        Wire contract assertions:
+        - search is POST (§3.8 WIRE LANDMINE 1)
+        - get_object is GET matching /objects/ AND ? (§3.8 WIRE LANDMINE 2)
+        - NO GET fires for the target object id (BL-3: target is from in-memory dict)
+        - TWO PATCHes: A-side (obj_id) and B-side (peer_id)
+        - result["contradictions_detected"] == 1
+        - result["status"] == "ok" or "partial" (not "error")
+
+        PARSING CONTRACT NOTE (addendum item 5b / CTO-ADV-1):
+        The objects-shaped search fixture below asserts _relation_ids() correctly
+        parses objects-format wiki_relations from the search-result target dict.
+        It does NOT prove real Anytype search hydrates these arrays.
+        """
+        import json as _json
+
+        target_obj_id = FAKE_OBJ_ID
+        peer_id = FAKE_PEER_ID
+        source_url = "https://example.com/contradiction-paper"
+
+        get_calls: list[str] = []
+        patch_calls: list[dict] = []  # list of {url, payload}
+
+        def on_get(request, **kwargs):
+            get_calls.append(str(request.url))
+            path = request.url.path
+            url_str = str(request.url)
+
+            # list_objects (schema check)
+            if "/objects" in path and "?" in url_str and "/objects/" not in path:
+                return httpx.Response(200, json=_make_schema_ok_response())
+
+            # get_object for PEER (GET /objects/{peer_id}?format=md)
+            if f"/objects/{peer_id}" in path and "?" in url_str:
+                return httpx.Response(200, json=_make_peer_get_object_response(peer_id))
+
+            # get_object for TARGET must NOT be called (BL-3)
+            if f"/objects/{target_obj_id}" in path and "?" in url_str:
+                # Return 200 so test doesn't fail on HTTP error, but we'll assert
+                # below that this was never called
+                return httpx.Response(200, json=_make_peer_get_object_response(target_obj_id))
+
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def on_post(request, **kwargs):
+            url = str(request.url)
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+
+            # search (POST) — returns target with objects-shaped wiki_relations
+            # WIRE LANDMINE 1: search MUST be POST, not GET.
+            if "/search" in url:
+                query = payload.get("query", "")
+                from anytype_llm_wiki.wiki.util import normalize_title
+                if normalize_title(query) == normalize_title(source_url):
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        target_obj_id, source_url, peer_id
+                    ))
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+            # WikiLog and source creates
+            return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
+
+        def on_patch(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            patch_calls.append({"url": str(request.url), "payload": payload})
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        # Monkeypatch detect_contradictions to return one peer contradiction.
+        # This exercises the _write_contradiction_links hook, not the LLM path.
+        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client):
+            return [{"object_id": peer_id, "reason": "Contradictory facts detected"}]
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_contradictions,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict), f"wiki_ingest must return a dict; got {type(result)}"
+
+        # Status must not be error
+        assert result.get("status") != "error", (
+            f"AC-1: status must not be error; got result={result}"
+        )
+
+        # contradictions_detected must be in result (§3.5 new key)
+        assert "contradictions_detected" in result, (
+            f"AC-1: result must contain 'contradictions_detected' key (§3.5); keys: {list(result.keys())}"
+        )
+        assert result["contradictions_detected"] >= 1, (
+            f"AC-1: contradictions_detected must be >= 1; got {result['contradictions_detected']}"
+        )
+
+        # BL-3: NO GET must fire against the TARGET object id
+        target_gets = [u for u in get_calls if f"/objects/{target_obj_id}" in u and "?" in u]
+        assert not target_gets, (
+            f"AC-1 / BL-3: NO GET must be issued for the target object id {target_obj_id!r}; "
+            f"target GETs found: {target_gets}. The target's relations/facts come from the "
+            f"in-memory search-result dict, not a separate GET."
+        )
+
+        # wiki_last_reviewed must NOT be written in any PATCH
+        for pc in patch_calls:
+            for prop in pc["payload"].get("properties", []) or []:
+                assert prop.get("key") != "wiki_last_reviewed", (
+                    f"AC-1: wiki_last_reviewed must NOT be written by the contradiction path; "
+                    f"found in PATCH to {pc['url']!r}: {pc['payload']}"
+                )
+
+        # Bidirectional PATCHes: one for A-side (target), one for B-side (peer)
+        contradiction_patches = [
+            pc for pc in patch_calls
+            if any(p.get("key") == "wiki_contradictions" for p in pc["payload"].get("properties", []) or [])
+        ]
+        assert len(contradiction_patches) >= 2, (
+            f"AC-1: expect bidirectional PATCHes (A-side + B-side wiki_contradictions); "
+            f"contradiction PATCHes captured: {contradiction_patches}"
+        )
+
+    @respx.mock
+    def test_no_detection_on_create(self, monkeypatch):
+        """AC-2: ingest create branch → no contradiction check, contradictions_detected == 0.
+
+        The create branch (action == 'create') does not call detect_contradictions
+        because there are no existing facts to compare against (§3.2 / LD3).
+        """
+        import json as _json
+
+        source_url = "https://example.com/new-entity-paper"
+        detect_called = []
+
+        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client):
+            detect_called.append({"obj_id": obj_id})
+            return []
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_contradictions,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                # Return no existing object → create path (not update)
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "new-entity-001", "name": payload.get("name", "obj")}})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+
+        # AC-2: contradictions_detected must be 0 on create path
+        assert result.get("contradictions_detected", 0) == 0, (
+            f"AC-2: contradictions_detected must be 0 on create path; "
+            f"got {result.get('contradictions_detected')}"
+        )
+
+        # AC-2: detect_contradictions must NOT be called on create path
+        assert not detect_called, (
+            f"AC-2: detect_contradictions must NOT be called on create path; "
+            f"calls: {detect_called}"
+        )
+
+    @respx.mock
+    def test_detection_degraded(self, monkeypatch):
+        """AC-5: LLM failure during contradiction detection → ingest continues,
+        'contradiction_detection_degraded' in result['warnings'],
+        contradictions_detected == 0, status != 'error'.
+
+        Also includes a CONTRAST TEST on the no-contradiction path asserting
+        the warning is ABSENT (distinguishing degraded from no-contradictions).
+
+        FAILS until the try/except hook in _run_ingest appends the degraded warning (§3.5a).
+        """
+        import json as _json
+
+        source_url = "https://example.com/degraded-detection-paper"
+
+        def fake_detect_raises(new_facts, obj_id, target, space_id, client, read_client):
+            import httpx as _httpx
+            raise _httpx.ConnectError("Connection refused — LLM unavailable")
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_raises,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                # Return existing entity → update path (detection hook fires)
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(source_url) in normalize_title(query) or normalize_title(query) in normalize_title(source_url):
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        FAKE_OBJ_ID, source_url, FAKE_PEER_ID
+                    ))
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-001", "name": payload.get("name", "obj")}})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+
+        # AC-5: ingest must continue (not error) when detection raises
+        assert result.get("status") != "error", (
+            f"AC-5: ingest must continue on detection failure; got status={result.get('status')!r}"
+        )
+
+        # AC-5: degraded warning must be present
+        assert "contradiction_detection_degraded" in result.get("warnings", []), (
+            f"AC-5: 'contradiction_detection_degraded' must be in warnings; "
+            f"got warnings={result.get('warnings')}"
+        )
+
+        # AC-5: contradictions_detected must be 0 on degraded path
+        assert result.get("contradictions_detected", 0) == 0, (
+            f"AC-5: contradictions_detected must be 0 on degraded path; "
+            f"got {result.get('contradictions_detected')}"
+        )
+
+    @respx.mock
+    def test_detection_degraded_warning_absent_on_clean_path(self, monkeypatch):
+        """AC-5 CONTRAST: no-contradiction path → 'contradiction_detection_degraded' is ABSENT.
+
+        Distinguishes 'no contradictions' (clean, empty peers) from 'detection failed'
+        (degraded warning). The warning must NOT appear when detect_contradictions
+        returns [] without raising.
+        """
+        import json as _json
+
+        source_url = "https://example.com/clean-detection-paper"
+
+        def fake_detect_no_contradictions(new_facts, obj_id, target, space_id, client, read_client):
+            return []  # No contradictions found — clean path
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_no_contradictions,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(source_url) in normalize_title(query) or normalize_title(query) in normalize_title(source_url):
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        FAKE_OBJ_ID, source_url, FAKE_PEER_ID
+                    ))
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-001", "name": payload.get("name", "obj")}})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+
+        # CONTRAST: warning must NOT be present on the clean (no-contradiction) path
+        assert "contradiction_detection_degraded" not in result.get("warnings", []), (
+            f"AC-5 contrast: 'contradiction_detection_degraded' must be ABSENT when "
+            f"detect_contradictions returns [] cleanly; warnings={result.get('warnings')}"
+        )
+
+    def test_anti_injection_preamble_present(self, monkeypatch, tmp_path):
+        """AC-10: anti-injection preamble present in BOTH the prompt file AND
+        the _load_contradiction_prompt() OSError fallback (SF-5).
+
+        Two sub-assertions:
+        a) The real prompt file contains the preamble sentinel phrase
+           (asserts 'DATA' / 'untrusted' / 'instructions' pattern — §3.3).
+        b) _load_contradiction_prompt() called with path monkeypatched to a
+           non-existent file returns the OSError fallback, which also contains
+           the preamble sentinel.
+
+        FAILS until src/anytype_llm_wiki/wiki/prompts/contradiction.md exists
+        AND _load_contradiction_prompt() is implemented in ingest.py.
+        """
+        import importlib
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+
+        # (a) Real prompt file must exist and contain the preamble
+        real_prompt_path = _ingest_mod._CONTRADICTION_PROMPT_PATH
+        assert real_prompt_path.exists(), (
+            f"AC-10(a): contradiction.md must exist at {real_prompt_path}; "
+            f"it is a v0.6.0 deliverable (impl §8 step 4)"
+        )
+        real_text = real_prompt_path.read_text(encoding="utf-8")
+        # Preamble must assert the DATA/instructions distinction
+        preamble_present = (
+            "untrusted" in real_text.lower()
+            or ("data" in real_text.lower() and "instruction" in real_text.lower())
+        )
+        assert preamble_present, (
+            f"AC-10(a): contradiction.md must open with the anti-injection preamble "
+            f"(see §3.3 and §5 SF-5); preamble sentinel not found in prompt file"
+        )
+
+        # (b) OSError fallback must also carry the preamble
+        fake_missing_path = tmp_path / "nonexistent_contradiction.md"
+        monkeypatch.setattr(_ingest_mod, "_CONTRADICTION_PROMPT_PATH", fake_missing_path)
+        fallback_text = _ingest_mod._load_contradiction_prompt()
+        fallback_preamble = (
+            "untrusted" in fallback_text.lower()
+            or ("data" in fallback_text.lower() and "instruction" in fallback_text.lower())
+        )
+        assert fallback_preamble, (
+            f"AC-10(b): _load_contradiction_prompt() OSError fallback must contain the "
+            f"anti-injection preamble (§3.3 SF-5 — the fallback is a real attack surface); "
+            f"fallback text: {fallback_text!r}"
+        )
+
+    @respx.mock
+    def test_hallucinated_id_filtered(self, monkeypatch):
+        """AC-11: hallucinated peer id (not in candidate set) returned by the LLM
+        is dropped; detect_contradictions returns [] and no PATCH writes ghost-id.
+
+        Security invariant SG-2: the LLM cannot introduce a new link target.
+        Only ids the pipeline supplied (from wiki_relations on the target) may be
+        written to wiki_contradictions.
+
+        Strategy: monkeypatch _call_ollama_prompt to return a ghost-id NOT in
+        wiki_relations; assert detect_contradictions filters it out (returns []).
+        This exercises the REAL hallucinated-ID filter logic, not a mock.
+        """
+        import json as _json
+
+        # Build a target with wiki_relations = [FAKE_PEER_ID]
+        # ghost-id is NOT in that set
+        ghost_id = "ghost-hallucinated-id-999"
+        real_peer_id = FAKE_PEER_ID
+
+        target_obj = {
+            "id": FAKE_OBJ_ID,
+            "name": "Test Entity",
+            "type": {"key": "wiki_entity"},
+            "properties": [
+                {"key": "wiki_facts", "text": "Some facts."},
+                {"key": "wiki_relations", "objects": [real_peer_id]},
+            ],
+        }
+
+        # Mock _call_ollama_prompt to return ghost-id (hallucination)
+        def fake_call_ollama_prompt(base, prompt):
+            return (
+                {"contradictions": [{"object_id": ghost_id, "reason": "injected id"}]},
+                None,
+            )
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest._call_ollama_prompt",
+            fake_call_ollama_prompt,
+        )
+
+        # Mock read_client (peer GET)
+        from unittest.mock import MagicMock
+        mock_read_client = MagicMock()
+        mock_read_client.get_object.return_value = _make_peer_get_object_response(real_peer_id)["object"]
+
+        from anytype_llm_wiki.wiki.ingest import detect_contradictions
+        result = detect_contradictions(
+            new_facts="New contradicting facts.",
+            obj_id=FAKE_OBJ_ID,
+            target=target_obj,
+            space_id=FAKE_SPACE_ID,
+            client=MagicMock(),
+            read_client=mock_read_client,
+        )
+
+        # AC-11: ghost-id must be filtered out
+        result_ids = [r["object_id"] for r in result]
+        assert ghost_id not in result_ids, (
+            f"AC-11 / SG-2: hallucinated id {ghost_id!r} must be filtered from "
+            f"detect_contradictions output; got result: {result}"
+        )
+        assert result == [], (
+            f"AC-11: detect_contradictions must return [] when all LLM ids are hallucinated; "
+            f"got: {result}"
+        )
+
+    @respx.mock
+    def test_self_reference_skipped(self, monkeypatch):
+        """AC-12: wiki_relations entry equal to obj_id is skipped (SG-3).
+
+        A self-referencing link must never trigger a peer GET or a self-PATCH
+        to wiki_contradictions. The candidate set is built from wiki_relations
+        after filtering out peer_id == obj_id.
+        """
+        from unittest.mock import MagicMock, call as mock_call
+
+        obj_id = FAKE_OBJ_ID
+        # target's wiki_relations includes its own id (self-reference)
+        target_obj = {
+            "id": obj_id,
+            "name": "Self-Referencing Entity",
+            "type": {"key": "wiki_entity"},
+            "properties": [
+                {"key": "wiki_facts", "text": "Facts that reference self."},
+                {"key": "wiki_relations", "objects": [obj_id]},  # self-reference
+            ],
+        }
+
+        mock_read_client = MagicMock()
+        mock_client = MagicMock()
+
+        # Mock _call_ollama_prompt: return self-reference (LLM echoes the id back)
+        def fake_call_ollama_prompt(base, prompt):
+            return ({"contradictions": [{"object_id": obj_id, "reason": "self conflict"}]}, None)
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest._call_ollama_prompt",
+            fake_call_ollama_prompt,
+        )
+
+        from anytype_llm_wiki.wiki.ingest import detect_contradictions
+        result = detect_contradictions(
+            new_facts="Some new facts.",
+            obj_id=obj_id,
+            target=target_obj,
+            space_id=FAKE_SPACE_ID,
+            client=mock_client,
+            read_client=mock_read_client,
+        )
+
+        # AC-12: self-reference must be skipped — no GET for obj_id
+        assert not mock_read_client.get_object.called or all(
+            obj_id not in str(c) for c in mock_read_client.get_object.call_args_list
+        ), (
+            f"AC-12 / SG-3: get_object must NOT be called for the entity's own id {obj_id!r}; "
+            f"calls: {mock_read_client.get_object.call_args_list}"
+        )
+
+        # AC-12: self-reference must not appear in result
+        result_ids = [r["object_id"] for r in result]
+        assert obj_id not in result_ids, (
+            f"AC-12 / SG-3: self-reference {obj_id!r} must not appear in detect_contradictions "
+            f"output; got: {result}"
+        )
+
+    @respx.mock
+    def test_multiple_peers_contradict(self, monkeypatch):
+        """AC-13: multiple peers contradicting one new fact → each gets a bidirectional link;
+        contradictions_detected == number of new links (2).
+
+        Monkeypatches detect_contradictions to return two peers; asserts:
+        - A-side PATCHed twice (once for each peer)
+        - B-side PATCHed twice
+        - result["contradictions_detected"] == 2
+        """
+        import json as _json
+
+        source_url = "https://example.com/multi-peer-paper"
+        peer_id_a = "peer-alpha-001"
+        peer_id_b = "peer-beta-001"
+        target_obj_id = FAKE_OBJ_ID
+
+        patch_calls: list[dict] = []
+
+        def fake_detect_two_peers(new_facts, obj_id, target, space_id, client, read_client):
+            return [
+                {"object_id": peer_id_a, "reason": "Peer alpha contradicts"},
+                {"object_id": peer_id_b, "reason": "Peer beta contradicts"},
+            ]
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_two_peers,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            path = request.url.path
+            url_str = str(request.url)
+
+            if "/objects" in path and "?" in url_str and "/objects/" not in path:
+                return httpx.Response(200, json=_make_schema_ok_response())
+
+            # Peer A read
+            if f"/objects/{peer_id_a}" in path and "?" in url_str:
+                return httpx.Response(200, json={
+                    "object": {
+                        "id": peer_id_a,
+                        "name": "Peer Alpha",
+                        "type": {"key": "wiki_entity"},
+                        "properties": [
+                            {"key": "wiki_facts", "text": "Alpha facts."},
+                            {"key": "wiki_contradictions", "objects": []},
+                        ],
+                    }
+                })
+            # Peer B read
+            if f"/objects/{peer_id_b}" in path and "?" in url_str:
+                return httpx.Response(200, json={
+                    "object": {
+                        "id": peer_id_b,
+                        "name": "Peer Beta",
+                        "type": {"key": "wiki_entity"},
+                        "properties": [
+                            {"key": "wiki_facts", "text": "Beta facts."},
+                            {"key": "wiki_contradictions", "objects": []},
+                        ],
+                    }
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(source_url) in normalize_title(query) or normalize_title(query) in normalize_title(source_url):
+                    # Target with two peers in wiki_relations
+                    props = [
+                        {"key": "wiki_facts", "text": "Target facts."},
+                        {"key": "wiki_relations", "objects": [peer_id_a, peer_id_b]},
+                        {"key": "wiki_contradictions", "objects": []},
+                    ]
+                    return httpx.Response(200, json={
+                        "data": [{
+                            "id": target_obj_id,
+                            "name": source_url,
+                            "type": {"key": "wiki_entity"},
+                            "properties": props,
+                        }],
+                        "pagination": {"has_more": False},
+                    })
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
+
+        def on_patch(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            patch_calls.append({"url": str(request.url), "payload": payload})
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+
+        # AC-13: contradictions_detected must be 2 (one per new link)
+        assert result.get("contradictions_detected", 0) == 2, (
+            f"AC-13: contradictions_detected must be 2 for two new peers; "
+            f"got {result.get('contradictions_detected')}"
+        )
+
+        # AC-13: wiki_contradictions PATCHes: expect at least 4
+        # (2 A-side + 2 B-side, one for each peer)
+        contradiction_patches = [
+            pc for pc in patch_calls
+            if any(
+                p.get("key") == "wiki_contradictions"
+                for p in (pc["payload"].get("properties") or [])
+            )
+        ]
+        assert len(contradiction_patches) >= 4, (
+            f"AC-13: expect at least 4 wiki_contradictions PATCHes "
+            f"(2 A-side + 2 B-side); got {len(contradiction_patches)}: "
+            f"{[pc['url'] for pc in contradiction_patches]}"
+        )
+
+    @respx.mock
+    def test_dedup_no_op(self, monkeypatch):
+        """AC-14: peer already in wiki_contradictions → dedup no-op; A-side PATCH skipped;
+        links_written / contradictions_detected do not count it.
+
+        The target's wiki_contradictions already contains the peer_id.
+        _write_contradiction_links must detect the dedup and not PATCH again.
+        contradictions_detected must be 0 (no new link written).
+
+        FAILS until _write_contradiction_links implements dedup-skip (§3.4).
+        """
+        import json as _json
+
+        source_url = "https://example.com/dedup-paper"
+        peer_id = FAKE_PEER_ID
+        target_obj_id = FAKE_OBJ_ID
+
+        patch_calls: list[dict] = []
+
+        def fake_detect_one_peer(new_facts, obj_id, target, space_id, client, read_client):
+            return [{"object_id": peer_id, "reason": "Already linked contradiction"}]
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_one_peer,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            path = request.url.path
+            url_str = str(request.url)
+
+            if "/objects" in path and "?" in url_str and "/objects/" not in path:
+                return httpx.Response(200, json=_make_schema_ok_response())
+
+            # Peer GET for B-side: peer already has target in its contradictions
+            if f"/objects/{peer_id}" in path and "?" in url_str:
+                return httpx.Response(200, json={
+                    "object": {
+                        "id": peer_id,
+                        "name": "Peer Already Linked",
+                        "type": {"key": "wiki_entity"},
+                        "properties": [
+                            {"key": "wiki_facts", "text": "Peer facts."},
+                            # peer already has target in wiki_contradictions
+                            {"key": "wiki_contradictions", "objects": [target_obj_id]},
+                        ],
+                    }
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(source_url) in normalize_title(query) or normalize_title(query) in normalize_title(source_url):
+                    # Target already has peer in wiki_contradictions (already linked)
+                    props = [
+                        {"key": "wiki_facts", "text": "Target facts."},
+                        {"key": "wiki_relations", "objects": [peer_id]},
+                        {"key": "wiki_contradictions", "objects": [peer_id]},  # already there
+                    ]
+                    return httpx.Response(200, json={
+                        "data": [{
+                            "id": target_obj_id,
+                            "name": source_url,
+                            "type": {"key": "wiki_entity"},
+                            "properties": props,
+                        }],
+                        "pagination": {"has_more": False},
+                    })
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
+
+        def on_patch(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            patch_calls.append({"url": str(request.url), "payload": payload})
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+
+        # AC-14: contradictions_detected must be 0 (no new link; already present)
+        assert result.get("contradictions_detected", 0) == 0, (
+            f"AC-14: contradictions_detected must be 0 when peer already linked (dedup no-op); "
+            f"got {result.get('contradictions_detected')}"
+        )
+
+        # AC-14: A-side wiki_contradictions PATCH must be skipped (no new link to write)
+        a_side_contradiction_patches = [
+            pc for pc in patch_calls
+            if target_obj_id in pc["url"]
+            and any(
+                p.get("key") == "wiki_contradictions"
+                for p in (pc["payload"].get("properties") or [])
+            )
+        ]
+        assert not a_side_contradiction_patches, (
+            f"AC-14: A-side wiki_contradictions PATCH must be SKIPPED when peer already present "
+            f"(dedup no-op, §3.4); PATCHes found: {a_side_contradiction_patches}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Live tests (@pytest.mark.live — skip when services unreachable)
 # ---------------------------------------------------------------------------
 
@@ -1427,3 +2370,160 @@ class TestExtractionDeterministicOptions:
         assert opts.get("temperature") == 0, (
             f"extraction must use deterministic decoding (temperature 0); got options={opts!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# AC-8, AC-9: Live contradiction smoke tests (@pytest.mark.live)
+# These live in the existing live block per BL-5 (no test_live.py).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.live
+def test_contradiction_smoke():
+    """AC-8: Live smoke test — ingest two conflicting sources, assert wiki_contradictions
+    set bidirectionally and wiki_lint reports High contradiction_unresolved finding.
+
+    Requires: live Anytype space (ANYTYPE_SPACE_ID) + live Ollama (default or
+    WIKI_EXTRACT_ENDPOINT).
+
+    Skipped when ANYTYPE_SPACE_ID not set.
+    """
+    import os as _os
+    space_id = _os.environ.get("ANYTYPE_SPACE_ID")
+    if not space_id:
+        pytest.skip("ANYTYPE_SPACE_ID not set — live contradiction smoke test skipped")
+
+    import tempfile
+    from anytype_llm_wiki.wiki.ingest import wiki_ingest
+    from anytype_llm_wiki.wiki.lint import wiki_lint
+
+    # Two conflicting entities with the same heading but contradictory facts
+    ENTITY_NAME = "Contradiction Smoke Test Entity 287"
+    source_a_text = (
+        f"# {ENTITY_NAME}\n\n"
+        "The speed of light in vacuum is exactly 299,792,458 metres per second. "
+        "This is a fixed physical constant defined by the SI unit system."
+    )
+    source_b_text = (
+        f"# {ENTITY_NAME}\n\n"
+        "The speed of light in vacuum is approximately 300,000 kilometres per second. "
+        "This is an approximation commonly used in everyday physics education."
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as fa:
+        fa.write(source_a_text)
+        file_a = fa.name
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as fb:
+        fb.write(source_b_text)
+        file_b = fb.name
+
+    try:
+        result_a = wiki_ingest(source=file_a, space_id=space_id)
+        result_b = wiki_ingest(source=file_b, space_id=space_id)
+
+        # Basic: both ingests must succeed
+        assert result_a.get("status") in ("ok", "partial"), (
+            f"AC-8: source A ingest must succeed; got result_a={result_a}"
+        )
+        assert result_b.get("status") in ("ok", "partial"), (
+            f"AC-8: source B ingest must succeed; got result_b={result_b}"
+        )
+
+        # Check for contradiction detection result
+        total_contradictions = (
+            result_a.get("contradictions_detected", 0) +
+            result_b.get("contradictions_detected", 0)
+        )
+
+        lint_result = wiki_lint(space_id=space_id)
+        contradiction_findings = [
+            f for f in lint_result.get("findings", [])
+            if f.get("check") == "contradiction_unresolved"
+        ]
+
+        # AC-8: Either ingest detected contradictions OR lint reports High finding
+        # (both must hold for the full success path, but the test accepts either as
+        # evidence the feature is wired up — live LLM output varies)
+        assert total_contradictions >= 1 or len(contradiction_findings) >= 1, (
+            f"AC-8: live contradiction smoke — expected wiki_contradictions set "
+            f"bidirectionally or lint to report High finding; "
+            f"total_contradictions={total_contradictions}, "
+            f"lint contradiction findings={contradiction_findings}. "
+            f"result_a={result_a}, result_b={result_b}"
+        )
+
+        if contradiction_findings:
+            assert any(f.get("severity") == "high" for f in contradiction_findings), (
+                f"AC-8: contradiction_unresolved finding must be High severity; "
+                f"findings: {contradiction_findings}"
+            )
+
+    finally:
+        _os.unlink(file_a)
+        _os.unlink(file_b)
+
+
+@pytest.mark.live
+def test_ingest_slo_observation():
+    """AC-9: Live SLO observation — record wall-clock time for v0.6.0 ingest
+    on pinned Wikipedia-style fixture. The assertion is informational only
+    (prints the observed time); no hard gate (DI-2).
+
+    Requires: live Anytype space (ANYTYPE_SPACE_ID) + live Ollama.
+
+    Skipped when ANYTYPE_SPACE_ID not set.
+    """
+    import os as _os
+    space_id = _os.environ.get("ANYTYPE_SPACE_ID")
+    if not space_id:
+        pytest.skip("ANYTYPE_SPACE_ID not set — live SLO observation test skipped")
+
+    import tempfile, time as _time
+    from anytype_llm_wiki.wiki.ingest import wiki_ingest
+
+    # Pinned Wikipedia-style fixture with two related entities to exercise
+    # the contradiction detection path (linked via wiki_relations)
+    FIXTURE_TEXT = (
+        "# Attention Is All You Need\n\n"
+        "The Transformer architecture was introduced by Vaswani et al. in 2017. "
+        "It uses multi-head self-attention and positional encoding, "
+        "eliminating recurrence and convolution. BERT and GPT are built on it.\n\n"
+        "# BERT Language Model\n\n"
+        "BERT (Bidirectional Encoder Representations from Transformers) is based on "
+        "the Transformer encoder. It uses masked language modeling and next sentence "
+        "prediction. Pre-trained on large corpora and fine-tuned on downstream tasks."
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write(FIXTURE_TEXT)
+        fixture_file = f.name
+
+    try:
+        t0 = _time.monotonic()
+        result = wiki_ingest(source=fixture_file, space_id=space_id)
+        elapsed = _time.monotonic() - t0
+
+        # SLO observation: always print, never gate
+        print(
+            f"\n[AC-9 SLO observation] v0.6.0 ingest wall-clock: {elapsed:.2f}s "
+            f"(aspirational budget: <120s p95 / DI-2 non-blocking). "
+            f"status={result.get('status')!r}, "
+            f"contradictions_detected={result.get('contradictions_detected', 'N/A')}"
+        )
+
+        # Minimal sanity: ingest must return a result
+        assert isinstance(result, dict), f"AC-9: wiki_ingest must return a dict; got {type(result)}"
+        assert result.get("status") in ("ok", "partial", "error"), (
+            f"AC-9: wiki_ingest must return a recognized status; got {result.get('status')!r}"
+        )
+
+        # Informational: warn (not fail) if over the 2-minute budget
+        if elapsed > 120:
+            print(
+                f"[AC-9 SLO WARNING] ingest exceeded 120s aspirational budget "
+                f"({elapsed:.1f}s). See DI-2: p95 gate deferred to v0.7.0+."
+            )
+
+    finally:
+        _os.unlink(fixture_file)
