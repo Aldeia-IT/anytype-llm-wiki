@@ -36,7 +36,12 @@ from . import bootstrap as _bootstrap
 from .. import indexer
 from .extraction import _DETERMINISTIC_OPTS, _is_model_not_pulled, sanitize_name
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
-from .util import read_patch_decision, scrub_credentials, strip_control_chars
+from .util import (
+    _parse_relation_elements,
+    read_patch_decision,
+    scrub_credentials,
+    strip_control_chars,
+)
 from ..anytype_client import AnytypeReadClient
 from .wiki_client import WikiClient
 
@@ -64,31 +69,9 @@ _CONFIG_ERROR_PREFIX = "[CONFIG ERROR]"
 _API_ERROR_PREFIX = "[API ERROR]"
 
 
-# ---------------------------------------------------------------------------
-# Relation parsing (SF5 — dual-shape)
-# ---------------------------------------------------------------------------
-
-
-def _parse_relation_elements(elements) -> list[str]:
-    """Normalize a relation ``objects`` array to a list of id strings (SF5).
-
-    Accepts BOTH element shapes — a bare id string (``"id1"``) and an object
-    (``{"id": "id1", ...}``) — via ``e if isinstance(e, str) else e.get("id")``,
-    dropping ``None``. Exported (module-level) so the direct parser test runs.
-    """
-    if not elements:
-        return []
-    out: list[str] = []
-    for e in elements:
-        if isinstance(e, str):
-            val = e
-        elif isinstance(e, dict):
-            val = e.get("id")
-        else:
-            val = None
-        if val:
-            out.append(val)
-    return out
+# _parse_relation_elements (SF5 — dual-shape) now lives in util.py (LD5,
+# circular-import-safe) and is re-exported via the `from .util import` above so
+# existing importers (lint.py) and the direct parser test keep working unchanged.
 
 
 # ---------------------------------------------------------------------------

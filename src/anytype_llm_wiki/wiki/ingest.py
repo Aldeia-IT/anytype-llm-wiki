@@ -12,23 +12,35 @@ unavailable or returns junk. LLM ``extract()`` is a best-effort enrichment
 layer merged on top, never a hard dependency.
 """
 
+import json
 import os
 import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from pathlib import Path
 
 import httpx
 
 from . import types_schema
 from . import bootstrap as _bootstrap
+from ..anytype_client import AnytypeReadClient
 from .extraction import (
+    _call_ollama_prompt,
+    _ollama_url,
     check_remote_endpoint_consent,
     extract,
     sanitize_name,
     sanitize_property_value,
 )
 from .fetch import fetch_url
-from .util import normalize_title, read_patch_decision, scrub_credentials, space_ingest_lock
+from .util import (
+    _existing_text,
+    _relation_ids,
+    normalize_title,
+    read_patch_decision,
+    scrub_credentials,
+    space_ingest_lock,
+)
 from .wiki_client import WikiClient
 
 # Wiki object types authored by ingest (created with EMPTY body — AC-P7/AC-L1).

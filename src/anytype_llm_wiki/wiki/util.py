@@ -91,6 +91,69 @@ def strip_control_chars(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Property readers — text-format vs objects-format (LD5)
+# ---------------------------------------------------------------------------
+
+
+def _existing_text(target: dict, prop_key: str) -> str:
+    """Read the current text-format property (wiki_facts / wiki_definition).
+
+    Reads ``p.get("text")`` for an objects/list shape and the bare value for a
+    dict shape. Returns "" when absent. NOT for objects-format relations — use
+    ``_relation_ids`` for those (LD5).
+    """
+    props = target.get("properties")
+    if isinstance(props, list):
+        for p in props:
+            if isinstance(p, dict) and p.get("key") == prop_key:
+                val = p.get("text")
+                if isinstance(val, str):
+                    return val
+    if isinstance(props, dict):
+        val = props.get(prop_key)
+        if isinstance(val, str):
+            return val
+    return ""
+
+
+def _parse_relation_elements(elements) -> list[str]:
+    """Normalize a relation ``objects`` array to a list of id strings (SF5).
+
+    Accepts BOTH element shapes — a bare id string (``"id1"``) and an object
+    (``{"id": "id1", ...}``) — via ``e if isinstance(e, str) else e.get("id")``,
+    dropping ``None``.
+    """
+    if not elements:
+        return []
+    out: list[str] = []
+    for e in elements:
+        if isinstance(e, str):
+            val = e
+        elif isinstance(e, dict):
+            val = e.get("id")
+        else:
+            val = None
+        if val:
+            out.append(val)
+    return out
+
+
+def _relation_ids(obj: dict, prop_key: str) -> list[str]:
+    """Read an objects-format relation property as a list of id strings (LD5).
+
+    Finds the prop by key in ``obj["properties"]`` and returns
+    ``_parse_relation_elements(prop.get("objects"))``. Returns [] when absent.
+    NOT for text-format props — use ``_existing_text`` for those.
+    """
+    props = obj.get("properties")
+    if isinstance(props, list):
+        for p in props:
+            if isinstance(p, dict) and p.get("key") == prop_key:
+                return _parse_relation_elements(p.get("objects"))
+    return []
+
+
+# ---------------------------------------------------------------------------
 # scrub_credentials — strip secrets from URLs before logging (AC #15)
 # ---------------------------------------------------------------------------
 
