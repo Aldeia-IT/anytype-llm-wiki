@@ -448,6 +448,76 @@ def detect_contradictions(
     return out
 
 
+def _write_contradiction_links(
+    client: WikiClient,
+    read_client: AnytypeReadClient,
+    space_id: str,
+    obj_id: str,
+    target: dict,
+    peer_ids: list[str],
+) -> tuple[int, list[str]]:
+    """Write wiki_contradictions bidirectionally with the A/B rollback pattern.
+
+    A-side existing contradictions come from the in-memory ``target`` dict (no
+    target GET). Peer (B-side) existing contradictions are read via get_object
+    before merge. Dedup makes an already-present link a no-op (not counted, no
+    PATCH). On a B-side failure the A-side is reverted. Returns
+    (links_written, rollback_notes) where links_written counts only newly written
+    links. Never touches wiki_last_reviewed.
+    """
+    links_written = 0
+    rollback_notes: list[str] = []
+    a_list = _relation_ids(target, "wiki_contradictions")
+
+    for peer_id in peer_ids:
+        if peer_id == obj_id:
+            continue
+
+        # A-side dedup: if already linked, no change → skip entirely (AC-14).
+        if peer_id in a_list:
+            continue
+
+        prior_a_list = list(a_list)
+        new_a_list = prior_a_list + [peer_id]
+        try:
+            _patch_relation(client, space_id, obj_id, "wiki_contradictions", new_a_list)
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            rollback_notes.append(
+                f"contradiction_rollback: A-side PATCH {obj_id} (-> {peer_id}) "
+                f"failed: {type(exc).__name__}: {scrub_credentials(str(exc))[:120]}"
+            )
+            continue
+        a_list = new_a_list
+
+        # B-side: read peer's existing contradictions, append obj_id (dedup), PATCH.
+        try:
+            peer_obj = read_client.get_object(space_id, peer_id)
+            b_list = _relation_ids(peer_obj, "wiki_contradictions")
+            if obj_id not in b_list:
+                _patch_relation(
+                    client, space_id, peer_id, "wiki_contradictions", b_list + [obj_id]
+                )
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            # B-side failed — revert A-side to its prior value.
+            try:
+                _patch_relation(
+                    client, space_id, obj_id, "wiki_contradictions", prior_a_list
+                )
+                a_list = prior_a_list
+            except (httpx.HTTPError, KeyError, ValueError, TypeError):
+                pass
+            rollback_notes.append(
+                f"contradiction_rollback: reverted {obj_id}.wiki_contradictions "
+                f"(-> {peer_id}) after B-side failed: {type(exc).__name__}: "
+                f"{scrub_credentials(str(exc))[:120]}"
+            )
+            continue
+
+        links_written += 1
+
+    return links_written, rollback_notes
+
+
 # ---------------------------------------------------------------------------
 # Domain hint validation (AC#10)
 # ---------------------------------------------------------------------------
@@ -558,136 +628,164 @@ def _run_ingest(
     result["warnings"].extend(schema_warnings)
     status = "ok"
 
-    # 6. fetch. Any fetch [DATA ERROR] (ssrf_blocked, file_not_found,
-    # file_read_failed, fetch_failed) short-circuits — never fabricate a junk
-    # entity from an error string.
-    markdown = fetch_url(source)
-    if isinstance(markdown, str) and markdown.startswith("[DATA ERROR]"):
-        return _error_result(markdown)
+    # Read-plane client (WikiClient has no get_object) for peer reads in the
+    # contradiction path. Closed in the finally below (mirrors query.py/lint.py).
+    read_client = AnytypeReadClient()
+    try:
+        # 6. fetch. Any fetch [DATA ERROR] (ssrf_blocked, file_not_found,
+        # file_read_failed, fetch_failed) short-circuits — never fabricate a junk
+        # entity from an error string.
+        markdown = fetch_url(source)
+        if isinstance(markdown, str) and markdown.startswith("[DATA ERROR]"):
+            return _error_result(markdown)
 
-    # 7. derive candidates.
-    candidates = _derive_candidates(markdown, fallback_name=_source_name(source))
+        # 7. derive candidates.
+        candidates = _derive_candidates(markdown, fallback_name=_source_name(source))
 
-    if not candidates:
-        # Empty source → create Source, write WikiLog, return ok with empty_source.
-        result["warnings"].append("empty_source")
-        source_id, _was_resumed = _create_source(client, space_id, source, markdown, result)
+        if not candidates:
+            # Empty source → create Source, write WikiLog, return ok with empty_source.
+            result["warnings"].append("empty_source")
+            source_id, _was_resumed = _create_source(client, space_id, source, markdown, result)
+            result["source_object_id"] = source_id
+            action_tag_id, degraded = _resolve_wiki_action_tag(client, space_id)
+            if degraded:
+                result["warnings"].append("wiki_action_tag_not_found")
+            result["wiki_log_id"] = _write_wikilog(
+                client, space_id,
+                subject=source, created=0, updated=0,
+                notes="empty_source", action_tag_id=action_tag_id,
+            )
+            result["status"] = "ok"
+            _maybe_reindex(space_id, result)
+            return result
+
+        # 8. enrich via best-effort extract().
+        try:
+            extracted = extract(markdown=markdown, space_id=space_id)
+            # AC#11: ollama model not pulled must abort BEFORE Source creation.
+            if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
+                "[CONFIG ERROR] ollama_model_not_pulled"
+            ):
+                return _error_result(str(extracted["error"]))
+            if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
+                "[CONFIG ERROR]"
+            ):
+                result["warnings"].append("extraction_degraded")
+            else:
+                _merge_extraction(candidates, extracted)
+                if isinstance(extracted, dict) and extracted.get("error"):
+                    result["warnings"].append("extraction_degraded")
+        except Exception:  # noqa: BLE001 — enrichment is best-effort
+            result["warnings"].append("extraction_degraded")
+
+        # 9. create Source object.
+        source_id, was_resumed = _create_source(client, space_id, source, markdown, result)
         result["source_object_id"] = source_id
+
+        # 10. resolve + create/update each candidate. A candidate's ``kind`` maps to
+        # its object type: entity → wiki_entity (wiki_facts); concept → wiki_concept
+        # (wiki_definition).
+        name_to_id: dict[str, str] = {}
+        kind_by_id: dict[str, str] = {}
+        contradiction_rollback_notes: list[str] = []
+        for cand in candidates:
+            clean_name = sanitize_name(cand["name"])
+            if clean_name is None:
+                result["warnings"].append(f"name_policy_rejected: {cand['name']!r}")
+                continue
+            kind = cand.get("kind", "entity")
+            facts = sanitize_property_value(cand.get("facts", "") or "")
+            if kind == "concept":
+                type_key = "wiki_concept"
+                type_label = "concept"
+                props = [{"key": "wiki_definition", "text": facts}]
+            else:
+                type_key = "wiki_entity"
+                type_label = "entity"
+                props = [{"key": "wiki_facts", "text": facts}]
+            try:
+                resolution = resolve_entity(client, space_id, type_key, clean_name)
+                if resolution["action"] == "update":
+                    target = resolution["target"]
+                    # Properties-only PATCH — NEVER a body/markdown key (AC-L1).
+                    updated = client.update_object(
+                        space_id, target["id"], {"properties": props}
+                    )
+                    obj_id = updated.get("id", target.get("id"))
+                    result["objects_updated"].append(
+                        {"title": clean_name, "type": type_label, "object_id": obj_id}
+                    )
+                    name_to_id[normalize_title(clean_name)] = obj_id
+                    kind_by_id[obj_id] = kind
+
+                    # Cross-object contradiction detection (#287) — entity-only
+                    # (LD1), update branch only (LD3), MUST NOT block ingest.
+                    if kind == "entity":
+                        try:
+                            peers = detect_contradictions(
+                                facts, obj_id, target, space_id, client, read_client
+                            )
+                        except Exception:  # noqa: BLE001 — detection MUST NOT block ingest
+                            result["warnings"].append("contradiction_detection_degraded")
+                            peers = []
+                        if peers:
+                            peer_ids = [p["object_id"] for p in peers]
+                            links_written, c_rollback = _write_contradiction_links(
+                                client, read_client, space_id, obj_id, target, peer_ids
+                            )
+                            result["contradictions_detected"] += links_written
+                            if c_rollback:
+                                status = "partial"
+                                contradiction_rollback_notes.extend(c_rollback)
+                                result["warnings"].extend(c_rollback)
+                else:
+                    # Create with EMPTY body (properties only — AC-P7/AC-L1).
+                    created = client.create_object(
+                        space_id, type_key=type_key, name=clean_name, properties=props
+                    )
+                    obj_id = created.get("id")
+                    result["objects_created"].append(
+                        {"title": clean_name, "type": type_label, "object_id": obj_id}
+                    )
+                    name_to_id[normalize_title(clean_name)] = obj_id
+                    kind_by_id[obj_id] = kind
+            except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+                status = "partial"
+                result["warnings"].append(f"object_failed: {clean_name!r}: {exc}")
+
+        # 11. bidirectional relations (AC#13).
+        relations = _derive_relations(candidates, name_to_id)
+        rel_created, rollback_notes = _write_bidirectional_relations(
+            client, space_id, relations, kind_by_id
+        )
+        result["relations_created"] = rel_created
+        if rollback_notes:
+            status = "partial"
+            result["warnings"].extend(rollback_notes)
+
+        # 12. WikiLog always (AC#3/T4/T5).
         action_tag_id, degraded = _resolve_wiki_action_tag(client, space_id)
         if degraded:
             result["warnings"].append("wiki_action_tag_not_found")
+        notes_parts = list(rollback_notes) + list(contradiction_rollback_notes)
+        if was_resumed:
+            notes_parts.append("resumed_partial_ingest")
+        notes = "; ".join(notes_parts) if notes_parts else "ingest"
         result["wiki_log_id"] = _write_wikilog(
             client, space_id,
-            subject=source, created=0, updated=0,
-            notes="empty_source", action_tag_id=action_tag_id,
+            subject=source,
+            created=len(result["objects_created"]),
+            updated=len(result["objects_updated"]),
+            notes=notes,
+            action_tag_id=action_tag_id,
         )
-        result["status"] = "ok"
+
+        result["status"] = status
+
+        # 13. auto-reindex (AC#9).
         _maybe_reindex(space_id, result)
-        return result
-
-    # 8. enrich via best-effort extract().
-    try:
-        extracted = extract(markdown=markdown, space_id=space_id)
-        # AC#11: ollama model not pulled must abort BEFORE Source creation.
-        if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
-            "[CONFIG ERROR] ollama_model_not_pulled"
-        ):
-            return _error_result(str(extracted["error"]))
-        if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
-            "[CONFIG ERROR]"
-        ):
-            result["warnings"].append("extraction_degraded")
-        else:
-            _merge_extraction(candidates, extracted)
-            if isinstance(extracted, dict) and extracted.get("error"):
-                result["warnings"].append("extraction_degraded")
-    except Exception:  # noqa: BLE001 — enrichment is best-effort
-        result["warnings"].append("extraction_degraded")
-
-    # 9. create Source object.
-    source_id, was_resumed = _create_source(client, space_id, source, markdown, result)
-    result["source_object_id"] = source_id
-
-    # 10. resolve + create/update each candidate. A candidate's ``kind`` maps to
-    # its object type: entity → wiki_entity (wiki_facts); concept → wiki_concept
-    # (wiki_definition).
-    name_to_id: dict[str, str] = {}
-    kind_by_id: dict[str, str] = {}
-    for cand in candidates:
-        clean_name = sanitize_name(cand["name"])
-        if clean_name is None:
-            result["warnings"].append(f"name_policy_rejected: {cand['name']!r}")
-            continue
-        kind = cand.get("kind", "entity")
-        facts = sanitize_property_value(cand.get("facts", "") or "")
-        if kind == "concept":
-            type_key = "wiki_concept"
-            type_label = "concept"
-            props = [{"key": "wiki_definition", "text": facts}]
-        else:
-            type_key = "wiki_entity"
-            type_label = "entity"
-            props = [{"key": "wiki_facts", "text": facts}]
-        try:
-            resolution = resolve_entity(client, space_id, type_key, clean_name)
-            if resolution["action"] == "update":
-                target = resolution["target"]
-                # Properties-only PATCH — NEVER a body/markdown key (AC-L1).
-                updated = client.update_object(
-                    space_id, target["id"], {"properties": props}
-                )
-                obj_id = updated.get("id", target.get("id"))
-                result["objects_updated"].append(
-                    {"title": clean_name, "type": type_label, "object_id": obj_id}
-                )
-                name_to_id[normalize_title(clean_name)] = obj_id
-                kind_by_id[obj_id] = kind
-            else:
-                # Create with EMPTY body (properties only — AC-P7/AC-L1).
-                created = client.create_object(
-                    space_id, type_key=type_key, name=clean_name, properties=props
-                )
-                obj_id = created.get("id")
-                result["objects_created"].append(
-                    {"title": clean_name, "type": type_label, "object_id": obj_id}
-                )
-                name_to_id[normalize_title(clean_name)] = obj_id
-                kind_by_id[obj_id] = kind
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-            status = "partial"
-            result["warnings"].append(f"object_failed: {clean_name!r}: {exc}")
-
-    # 11. bidirectional relations (AC#13).
-    relations = _derive_relations(candidates, name_to_id)
-    rel_created, rollback_notes = _write_bidirectional_relations(
-        client, space_id, relations, kind_by_id
-    )
-    result["relations_created"] = rel_created
-    if rollback_notes:
-        status = "partial"
-        result["warnings"].extend(rollback_notes)
-
-    # 12. WikiLog always (AC#3/T4/T5).
-    action_tag_id, degraded = _resolve_wiki_action_tag(client, space_id)
-    if degraded:
-        result["warnings"].append("wiki_action_tag_not_found")
-    notes_parts = list(rollback_notes)
-    if was_resumed:
-        notes_parts.append("resumed_partial_ingest")
-    notes = "; ".join(notes_parts) if notes_parts else "ingest"
-    result["wiki_log_id"] = _write_wikilog(
-        client, space_id,
-        subject=source,
-        created=len(result["objects_created"]),
-        updated=len(result["objects_updated"]),
-        notes=notes,
-        action_tag_id=action_tag_id,
-    )
-
-    result["status"] = status
-
-    # 13. auto-reindex (AC#9).
-    _maybe_reindex(space_id, result)
+    finally:
+        read_client.close()
     return result
 
 
