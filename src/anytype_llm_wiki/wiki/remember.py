@@ -44,6 +44,7 @@ from .ingest import (
 )
 from .ingest import _maybe_reindex as _ingest_maybe_reindex
 from .util import (
+    _existing_text,
     normalize_title,
     read_patch_decision,
     scrub_credentials,
@@ -624,22 +625,6 @@ def _run_remember(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _existing_text(target: dict, prop_key: str) -> str:
-    """Read the current wiki_facts / wiki_definition text off a resolved object."""
-    props = target.get("properties")
-    if isinstance(props, list):
-        for p in props:
-            if isinstance(p, dict) and p.get("key") == prop_key:
-                val = p.get("text")
-                if isinstance(val, str):
-                    return val
-    if isinstance(props, dict):
-        val = props.get(prop_key)
-        if isinstance(val, str):
-            return val
-    return ""
 
 
 def _same_type_candidates(
