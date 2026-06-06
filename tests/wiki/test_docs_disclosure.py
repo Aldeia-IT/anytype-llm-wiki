@@ -75,26 +75,13 @@ class TestReadmeDetectionScopeDisclosure:
         It will pass after impl replaces "passive until v0.6.0" with the new
         scoped-but-active disclosure.
         """
-        readme_text = _readme_text()
-        readme = readme_text.lower()
+        readme = _readme_text().lower()
 
-        # ONE cohesive gate: look for "linked entities" in conjunction with
-        # contradiction detection context. The phrase "linked entities only" or
+        # ONE cohesive gate: "linked entities" must appear in conjunction with
+        # contradiction detection context. The phrase "linked entities only" /
         # "between linked entities" is the addendum-mandated operator language.
-        # The current README does NOT have "linked entities" in the contradiction
-        # section — it has "interlinked" (a different word in a different context).
-        linked_entities_disclosed = (
-            "linked entities only" in readme
-            or "between linked entities" in readme
-            or ("linked entities" in readme and "contradiction" in readme
-                and "unlinked" in readme
-                and readme.index("linked entities") > readme.rfind("passive until v0.6.0", 0, len(readme)) - 10000)
-        )
-
-        # Verify the current README does NOT already satisfy this (it uses
-        # "interlinked" not "linked entities" in the contradiction context)
-        # If it somehow does, the test should still enforce the new copy was added.
-        # The simpler check: "linked entities" as a phrase is the key gate.
+        # The current README uses "interlinked" in a different context and does
+        # NOT contain "linked entities" as a disclosure phrase.
         assert "linked entities" in readme and "contradiction" in readme, (
             "README.md must contain 'linked entities' in the contradiction detection "
             "section (addendum item 3 / CPO-A-1): v0.6.0 detects contradictions "
