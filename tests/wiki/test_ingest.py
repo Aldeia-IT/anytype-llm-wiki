@@ -44,7 +44,14 @@ FAKE_API_VERSION = "2025-11-08"
 
 
 @pytest.fixture(autouse=True)
-def set_anytype_env(monkeypatch):
+def set_anytype_env(monkeypatch, request):
+    # Live tests (@pytest.mark.live, e.g. the AC-8/AC-9 pre-tag smoke) MUST reach
+    # the real Anytype daemon using the operator's real ANYTYPE_API_KEY from the
+    # environment. Without this guard the module-level autouse fixture clobbers the
+    # key with FAKE_API_KEY, so every live test in this module 401s (write path) or
+    # passes vacuously by accepting an error status — defeating the pre-tag gate.
+    if request.node.get_closest_marker("live"):
+        return
     monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
     monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
     monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
