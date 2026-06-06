@@ -376,8 +376,11 @@ def _default_emit_banner(endpoint: str, ack_path: str) -> None:
     """Print a one-time consent warning and self-ack by writing the ack file."""
     host = httpx.URL(endpoint).host if endpoint else endpoint
     logging.getLogger().warning(
-        "wiki extraction will transmit source content off-machine to %s. "
-        "Set WIKI_EXTRACT_ENDPOINT to a local endpoint to keep data on-device.",
+        "wiki extraction will transmit source and previously-stored wiki content "
+        "off-machine to %s. As of v0.6.0 this includes the wiki_facts of "
+        "already-linked peer entities (distilled from earlier ingests), not only "
+        "the current source. Set WIKI_EXTRACT_ENDPOINT to a local endpoint to keep "
+        "data on-device.",
         host,
     )
     try:

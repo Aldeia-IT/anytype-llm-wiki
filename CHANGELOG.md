@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-06
+
+### User-visible changes
+
+- **Automated cross-object contradiction detection.** On an entity update, the
+  `wiki_ingest` pipeline now compares the entity's new facts against the
+  `wiki_facts` of its already-linked peer entities via the LLM and records any
+  contradiction by setting `wiki_contradictions` **bidirectionally** on both
+  objects. Neither object's facts are ever overwritten (both positions are
+  retained), and `wiki_last_reviewed` is left null to signal the contradiction
+  awaits operator review. The result dict gains a `contradictions_detected` count.
+- **`contradiction_unresolved` lint check is now active.** Because the pipeline
+  populates `wiki_contradictions`, the `wiki_lint` `contradiction_unresolved`
+  (High) check is no longer passive — it fires on auto-detected contradictions.
+  The in-product "PASSIVE" caveat is removed from the finding detail and report
+  notes.
+- **Detection scope limitations (read before trusting a clean result).**
+  v0.6.0 detects contradictions between **linked entities only** — contradictions
+  between unlinked entities are not yet caught (planned via a semantic
+  pre-filter). Detection is **entity-only**; `wiki_concept` scope is deferred. A
+  green contradiction column therefore does not guarantee no contradictions exist.
+- **Widened off-machine egress disclosure.** Enabling a remote
+  `WIKI_EXTRACT_ENDPOINT` now also transmits the `wiki_facts` of already-linked
+  peer entities (content distilled from earlier ingests), not only the current
+  source. The existing remote-extraction consent gate continues to govern **all**
+  off-machine egress including this new peer-fact class; no new gate is added and
+  no re-consent is forced (banner copy updated for the widened scope). See the
+  README "Privacy and data flow" section.
+- **`resumed_partial_ingest` WikiLog marker.** When a re-ingest reuses an existing
+  Source object, the WikiLog `notes` now record `resumed_partial_ingest`.
+
+### Internal changes
+
+- No schema change: `WIKI_SCHEMA_VERSION` stays at `0.4.1`. Detection uses the
+  existing `wiki_contradictions` / `wiki_last_reviewed` properties; the
+  `resumed_partial_ingest` marker is a WikiLog notes string, not a new property.
+- Text/relation property readers (`_existing_text`, `_parse_relation_elements`,
+  and a new `_relation_ids`) consolidated into `wiki/util.py` to keep the new
+  contradiction readers circular-import-safe; `query.py` re-exports
+  `_parse_relation_elements`.
+
 ## [0.5.0] - 2026-06-05
 
 ### User-visible changes
