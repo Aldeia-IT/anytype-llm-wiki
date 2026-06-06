@@ -401,6 +401,9 @@ def detect_contradictions(
     is found (incl. a well-formed empty result and malformed LLM output). Raises on
     hard I/O failure (LLM/Anytype error) — the caller converts it to the degraded
     warning.
+
+    ``client`` is part of the spec §3.3 signature (write-plane handle reserved for
+    future use); peer reads go through ``read_client`` only.
     """
     ollama_base = (os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()).rstrip("/")
 
