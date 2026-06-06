@@ -2387,88 +2387,137 @@ class TestExtractionDeterministicOptions:
 
 @pytest.mark.live
 def test_contradiction_smoke():
-    """AC-8: Live smoke test — ingest two conflicting sources, assert wiki_contradictions
-    set bidirectionally and wiki_lint reports High contradiction_unresolved finding.
+    """AC-8: Live smoke — #287 cross-object contradiction detection, end-to-end.
 
-    Requires: live Anytype space (ANYTYPE_SPACE_ID) + live Ollama (default or
-    WIKI_EXTRACT_ENDPOINT).
+    Seeds two DISTINCT wiki_entity objects with directly contradictory wiki_facts,
+    links them via wiki_relations, then drives the real production path against
+    live Anytype: resolve_entity (search) -> detect_contradictions (live LLM) ->
+    _write_contradiction_links -> wiki_lint. Asserts the cross-object contradiction
+    is detected, wiki_contradictions is set BIDIRECTIONALLY, and wiki_lint reports a
+    High contradiction_unresolved finding on a seeded object (active check, no
+    PASSIVE caveat).
 
-    Skipped when ANYTYPE_SPACE_ID not set.
+    NOTE: a prior design ingested two SAME-heading sources, which merely updates a
+    single entity twice — an *intra-entity* fact conflict (#289's wiki_status
+    domain), never #287's *cross-object* path — so it could not detect a #287
+    contradiction. This version seeds two genuinely distinct, linked entities.
+
+    Requires: live Anytype space (ANYTYPE_SPACE_ID) + live Ollama. Self-cleaning.
     """
     import os as _os
+    import time as _time
     space_id = _os.environ.get("ANYTYPE_SPACE_ID")
     if not space_id:
         pytest.skip("ANYTYPE_SPACE_ID not set — live contradiction smoke test skipped")
 
-    import tempfile
-    from anytype_llm_wiki.wiki.ingest import wiki_ingest
+    from anytype_llm_wiki.wiki.wiki_client import WikiClient
+    from anytype_llm_wiki.anytype_client import AnytypeReadClient
+    from anytype_llm_wiki.wiki.ingest import (
+        resolve_entity,
+        detect_contradictions,
+        _write_contradiction_links,
+        _patch_relation,
+    )
+    from anytype_llm_wiki.wiki.util import _relation_ids
     from anytype_llm_wiki.wiki.lint import wiki_lint
 
-    # Two conflicting entities with the same heading but contradictory facts
-    ENTITY_NAME = "Contradiction Smoke Test Entity 287"
-    source_a_text = (
-        f"# {ENTITY_NAME}\n\n"
-        "The speed of light in vacuum is exactly 299,792,458 metres per second. "
-        "This is a fixed physical constant defined by the SI unit system."
+    # Two distinct entities making directly opposite claims about the same subject.
+    NAME_A = "AC8 XObj Probe Vulcan-exists 287"
+    NAME_B = "AC8 XObj Probe Vulcan-disproven 287"
+    FACTS_A = (
+        "Planet Vulcan is a confirmed planet that orbits the Sun inside the orbit "
+        "of Mercury. Its existence is well established and undisputed."
     )
-    source_b_text = (
-        f"# {ENTITY_NAME}\n\n"
-        "The speed of light in vacuum is approximately 300,000 kilometres per second. "
-        "This is an approximation commonly used in everyday physics education."
+    FACTS_B = (
+        "Planet Vulcan does not exist. The hypothesised intra-Mercurial planet was "
+        "conclusively disproven; no such planet orbits the Sun."
     )
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as fa:
-        fa.write(source_a_text)
-        file_a = fa.name
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as fb:
-        fb.write(source_b_text)
-        file_b = fb.name
-
+    client = WikiClient()
+    read_client = AnytypeReadClient()
+    a_id = None
+    b_id = None
     try:
-        result_a = wiki_ingest(source=file_a, space_id=space_id)
-        result_b = wiki_ingest(source=file_b, space_id=space_id)
+        # Seed the peer (B) and the target (A); link A -> B via wiki_relations.
+        b_id = client.create_object(
+            space_id, type_key="wiki_entity", name=NAME_B,
+            properties=[{"key": "wiki_facts", "text": FACTS_B}],
+        ).get("id")
+        a_id = client.create_object(
+            space_id, type_key="wiki_entity", name=NAME_A,
+            properties=[{"key": "wiki_facts", "text": FACTS_A}],
+        ).get("id")
+        assert a_id and b_id, f"AC-8: entity creation failed (a_id={a_id}, b_id={b_id})"
+        _patch_relation(client, space_id, a_id, "wiki_relations", [b_id])
 
-        # Basic: both ingests must succeed
-        assert result_a.get("status") in ("ok", "partial"), (
-            f"AC-8: source A ingest must succeed; got result_a={result_a}"
-        )
-        assert result_b.get("status") in ("ok", "partial"), (
-            f"AC-8: source B ingest must succeed; got result_b={result_b}"
-        )
-
-        # Check for contradiction detection result
-        total_contradictions = (
-            result_a.get("contradictions_detected", 0) +
-            result_b.get("contradictions_detected", 0)
-        )
-
-        lint_result = wiki_lint(space_id=space_id)
-        contradiction_findings = [
-            f for f in lint_result.get("findings", [])
-            if f.get("check") == "contradiction_unresolved"
-        ]
-
-        # AC-8: Either ingest detected contradictions OR lint reports High finding
-        # (both must hold for the full success path, but the test accepts either as
-        # evidence the feature is wired up — live LLM output varies)
-        assert total_contradictions >= 1 or len(contradiction_findings) >= 1, (
-            f"AC-8: live contradiction smoke — expected wiki_contradictions set "
-            f"bidirectionally or lint to report High finding; "
-            f"total_contradictions={total_contradictions}, "
-            f"lint contradiction findings={contradiction_findings}. "
-            f"result_a={result_a}, result_b={result_b}"
-        )
-
-        if contradiction_findings:
-            assert any(f.get("severity") == "high" for f in contradiction_findings), (
-                f"AC-8: contradiction_unresolved finding must be High severity; "
-                f"findings: {contradiction_findings}"
+        # Re-fetch A via the production SEARCH path so wiki_relations is objects-format
+        # (the no-target-GET candidate path, CTO-ADV-1). Tolerate brief index lag.
+        target = None
+        for _ in range(8):
+            res = resolve_entity(
+                client, space_id, type_key="wiki_entity", candidate_title=NAME_A
             )
+            cand = res.get("target")
+            if cand and cand.get("id") == a_id and b_id in _relation_ids(cand, "wiki_relations"):
+                target = cand
+                break
+            _time.sleep(1.5)
+        assert target is not None, (
+            "AC-8: seeded target A not resolvable via search with its wiki_relations "
+            f"peer (a_id={a_id}, b_id={b_id}); the no-target-GET candidate path needs "
+            "search to hydrate objects-format relation arrays (CTO-ADV-1)."
+        )
+
+        # #287 cross-object detection (real LLM) must flag the linked peer B.
+        detected = detect_contradictions(
+            new_facts=FACTS_A, obj_id=a_id, target=target,
+            space_id=space_id, client=client, read_client=read_client,
+        )
+        assert any(d.get("object_id") == b_id for d in detected), (
+            f"AC-8: cross-object detection must flag linked peer B; got {detected}"
+        )
+
+        # Bidirectional wiki_contradictions write.
+        written, notes = _write_contradiction_links(
+            client, read_client, space_id, a_id, target, [b_id],
+        )
+        assert written >= 1, f"AC-8: expected a link written; got {written}, notes={notes}"
+        a_after = read_client.get_object(space_id, a_id)
+        b_after = read_client.get_object(space_id, b_id)
+        assert b_id in _relation_ids(a_after, "wiki_contradictions"), "AC-8: A-side link missing"
+        assert a_id in _relation_ids(b_after, "wiki_contradictions"), (
+            "AC-8: B-side link missing — not bidirectional"
+        )
+
+        # Active lint check: High finding on a seeded object, no PASSIVE caveat.
+        lint_result = wiki_lint(space_id=space_id)
+        seeded = {a_id, b_id}
+        contra = [
+            f for f in lint_result.get("findings", [])
+            if f.get("check") == "contradiction_unresolved" and f.get("object_id") in seeded
+        ]
+        assert contra, (
+            "AC-8: wiki_lint must report contradiction_unresolved on a seeded object; "
+            f"all contradiction findings="
+            f"{[f for f in lint_result.get('findings', []) if f.get('check') == 'contradiction_unresolved']}"
+        )
+        assert all(f.get("severity") == "high" for f in contra), (
+            f"AC-8: contradiction_unresolved must be High severity; got {contra}"
+        )
+        assert all("PASSIVE" not in (f.get("detail") or "") for f in contra), (
+            f"AC-8: active check must not carry a PASSIVE caveat; got {contra}"
+        )
 
     finally:
-        _os.unlink(file_a)
-        _os.unlink(file_b)
+        # Best-effort cleanup so re-runs stay clean (throwaway space).
+        for oid in (a_id, b_id):
+            if oid:
+                try:
+                    client.delete_object(space_id, oid)
+                except Exception:
+                    pass
+        client.close()
+        read_client.close()
 
 
 @pytest.mark.live
