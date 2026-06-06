@@ -192,9 +192,11 @@ def wiki_lint(
     (sweep-off) path; the opt-in sweep embeds the wiki and can exceed that budget
     (and is hard-skipped above WIKI_LINT_MAX_OBJECTS).
 
-    The ``contradiction_unresolved`` check is PASSIVE until v0.6.0/#287 —
-    ``wiki_contradictions`` is not yet auto-populated, so a green contradiction
-    result is NOT a guarantee that no contradictions exist.
+    The ``contradiction_unresolved`` check is ACTIVE as of v0.6.0/#287 — the
+    ingest pipeline auto-populates ``wiki_contradictions`` on cross-object
+    conflict, and this check fires a High finding for any contradiction lacking
+    a ``wiki_last_reviewed`` timestamp. Detection is scoped to linked entities
+    only (see README), so a green result is not an exhaustive guarantee.
 
     Args:
         space_id: Target Anytype space ID (must be bootstrapped at the current schema).
