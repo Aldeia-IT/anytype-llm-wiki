@@ -43,7 +43,7 @@ anytype-llm-wiki runs locally on your machine. By default, nothing leaves your c
 
 - **Anytype, Qdrant, and Ollama** are accessed over `localhost` only.
 - **Source URL fetching (v0.3.0+)**: when you call `wiki.ingest` with a URL, an HTTP request is sent to that URL from your machine. The server hosting the URL sees your IP and standard User-Agent. No other party is involved.
-- **Hosted-LLM extraction (optional, v0.3.0+)**: if you set `WIKI_EXTRACT_ENDPOINT` to point at a hosted LLM API (e.g., OpenAI, Anthropic), the **source content you ingest is transmitted to that provider** as part of the extraction prompt. `WIKI_EXTRACT_MODEL` only selects which model name is requested at that endpoint — it does not by itself cause any off-machine transmission. With `WIKI_EXTRACT_ENDPOINT` unset (the default), extraction runs on your local Ollama instance and sends nothing to third parties; the first off-machine endpoint you configure triggers a one-time consent banner before any source content is transmitted. The startup log prints the active extraction endpoint so you can confirm where extraction runs.
+- **Hosted-LLM extraction (optional, v0.3.0+)**: if you set `WIKI_EXTRACT_ENDPOINT` to point at a hosted LLM API (e.g., OpenAI, Anthropic), the **source content you ingest is transmitted to that provider** as part of the extraction prompt. As of v0.6.0, the same endpoint **also receives the `wiki_facts` of already-linked peer entities** — content distilled from *earlier* ingests, not just the current source — whenever contradiction detection runs on an entity update with linked relations. `WIKI_EXTRACT_MODEL` only selects which model name is requested at that endpoint — it does not by itself cause any off-machine transmission. With `WIKI_EXTRACT_ENDPOINT` unset (the default), extraction runs on your local Ollama instance and sends nothing to third parties; the first off-machine endpoint you configure triggers a one-time consent banner before any source or previously-stored wiki content is transmitted. The startup log prints the active extraction endpoint so you can confirm where extraction runs.
 - **Hosted-LLM provider terms (v0.3.0+)**: When you configure `WIKI_EXTRACT_ENDPOINT` to point at a hosted LLM API, your ingested source content is processed under that provider's Terms of Service and data-handling policies — including their training-on-input, data-retention, and data-residency terms. Review those terms before configuring a hosted endpoint, and prefer providers that offer opt-out-from-training or enterprise no-train defaults when your ingest content is sensitive. The anytype-llm-wiki maintainers have no visibility into or control over third-party provider policies.
 - **Qdrant / Ollama endpoints off-localhost**: if you change `QDRANT_URL` or `OLLAMA_URL` to anything other than `127.0.0.1` / `localhost`, your embeddings (for Qdrant) and the plaintext input to embedding / extraction (for Ollama) are transmitted to that endpoint. Embeddings are not one-way: published embedding-inversion attacks can reconstruct source fragments from vectors alone. Treat the Qdrant data directory as sensitive, and keep Ollama on localhost unless you deliberately intend otherwise.
 - **Content rights and PII**: you are responsible for ensuring you have the right to ingest and store the content you provide. This module does not perform PII classification. If you ingest content containing personal data (of yourself or others), that data is stored in your local Anytype space and, if a hosted LLM is configured, transmitted to that provider. Treat the wiki as you would any personal note-taking system with the additional awareness that extraction may involve third-party processing.
@@ -182,8 +182,12 @@ treat retrieved wiki text as instructions to an LLM.
 entirely on your local Ollama and no source content leaves your machine. If you
 point `WIKI_EXTRACT_ENDPOINT` at a non-local provider, a one-time consent banner
 is shown (and an acknowledgement file written under
-`~/.local/share/anytype-llm-wiki/`) before any source content is transmitted
-off-machine; switching to a different endpoint re-prompts. See
+`~/.local/share/anytype-llm-wiki/`) before any source or previously-stored wiki
+content is transmitted off-machine; switching to a different endpoint re-prompts.
+As of v0.6.0 the off-machine data class is broader than the single source under
+ingest: contradiction detection also transmits the `wiki_facts` of already-linked
+peer entities (content distilled from earlier ingests). The existing consent gate
+governs all of this egress; no separate gate is added. See
 [Privacy and data flow](#privacy-and-data-flow) for the full data-flow notice.
 
 Indexing is incremental and automatic: the first `semantic_search` triggers a reindex when the collection is empty, and only changed objects are re-embedded afterward. To index continuously in the background, see [Auto-reindex](#auto-reindex).
@@ -345,7 +349,7 @@ The same flow is available to an agent over MCP via the `wiki_lint` tool
 | `asymmetric_relation` | Critical | A → B relation with no reciprocal B → A link |
 | `orphan` | High | Object with no inbound/outbound relations, older than the grace period |
 | `pipeline_orphan` | High | Zero-relation Object created near a recorded ingest `relation_rollback` failure (±300s heuristic) |
-| `contradiction_unresolved` | High | Entity with unresolved `wiki_contradictions` and no review timestamp — **passive (see below)** |
+| `contradiction_unresolved` | High | Entity with unresolved `wiki_contradictions` and no review timestamp — **active in v0.6.0; scoped (see below)** |
 | `unreviewed_needs_review` | High | Object still marked `needs-review` (any age) |
 | `stale` | Medium | `last_modified` predates the source ingest timestamp by > 90 days |
 | `stale_needs_review` | Medium | `needs-review` Object whose source is older than the cutoff |
@@ -365,13 +369,24 @@ a wiki of ≤500 Objects) describes the **default, sweep-off path only** — the
 sweep can exceed that budget and is hard-skipped entirely above `WIKI_LINT_MAX_OBJECTS`
 (with a warning).
 
-### `contradiction_unresolved` is passive until v0.6.0
+### `contradiction_unresolved` is active in v0.6.0 — but scoped
 
-The `contradiction_unresolved` check is **passive** in v0.5.0: `wiki_contradictions`
-is not yet auto-populated by the ingest/remember pipelines (that lands in v0.6.0 /
-[#287](https://github.com/Aldeia-IT/aldeia-box/issues/287)). A green contradiction
-result is therefore **not a guarantee** that no contradictions exist — it only means
-none have been manually recorded. Do not over-trust a clean contradiction column.
+As of v0.6.0 ([#287](https://github.com/Aldeia-IT/aldeia-box/issues/287)) the ingest
+pipeline auto-populates `wiki_contradictions` bidirectionally at ingest time, so the
+`contradiction_unresolved` lint check is now **active**. Detection never overwrites
+either object's facts: both positions are retained, the link is recorded on both
+objects, and `wiki_last_reviewed` is left null until an operator reviews.
+
+Two scope limitations matter — do not over-trust a clean contradiction column:
+
+- **Linked entities only.** v0.6.0 detects contradictions between linked entities
+  only; contradictions between unlinked entities are not yet caught (planned via a
+  semantic pre-filter). The candidate set is bounded by each entity's existing
+  `wiki_relations`, so an entity that contradicts another it is not linked to will
+  not surface a finding.
+- **Entity-only; concept scope deferred.** Detection runs for `wiki_entity` objects
+  only. `wiki_concept` objects are out of scope in v0.6.0 (the `wiki_last_reviewed`
+  property is absent from the Concept type).
 
 ## Auto-reindex
 
