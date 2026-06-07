@@ -11,7 +11,9 @@ It takes Andrej Karpathy's *LLM-wiki* idea — let an LLM compile your sources i
 - **Cited synthesis, not just search.** `wiki_query` returns a prose answer drawn **only from your wiki**, citing the exact Objects it used — and can file the answer back so the wiki gets a little better every time it's used.
 - **Local-first.** Anytype + Ollama (embeddings & extraction) + Qdrant (vectors), all on `localhost`. Nothing leaves your machine by default. See [Security & data flow](docs/security-and-data-flow.md).
 
-<!-- TODO(maintainers): add a screenshot of the typed graph + contradiction links in the Anytype UI here — the single highest-value visual for the "typed relations" pitch. -->
+![A real anytype-llm-wiki knowledge graph, viewed in Anytype](docs/images/knowledge-graph.png)
+
+*A live wiki built by ingesting public AI sources — typed entities (🧩), concepts (💡), and sources (📚) interlinked as a navigable Anytype graph.*
 
 ## Use cases
 
