@@ -1,6 +1,6 @@
 """wiki/ingest.py — the wiki_ingest compile pipeline (v0.3.0).
 
-Orchestrates: patch-decision precheck → schema-compat → domain_hint validation
+Orchestrates: schema-compat → domain_hint validation
 → remote-endpoint consent → per-space lock → fetch → derive heading candidates
 → best-effort LLM enrichment → create Source → resolve + create/update entities
 → bidirectional relations (with rollback) → WikiLog (always) → auto-reindex.
@@ -37,7 +37,6 @@ from .util import (
     _existing_text,
     _relation_ids,
     normalize_title,
-    read_patch_decision,
     scrub_credentials,
     space_ingest_lock,
 )
@@ -551,16 +550,6 @@ def _domain_taxonomy(client: WikiClient, space_id: str) -> set[str]:
 
 def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> dict:
     """Ingest a source URL/file into the wiki, creating/updating typed objects."""
-    # 1. patch-decision precheck (AC#15) — before any Anytype write.
-    decision = read_patch_decision()
-    if decision is None or not (
-        "patch_body_updates" in decision and "implementation_path" in decision
-    ):
-        return _error_result(
-            "[CONFIG ERROR] patch_decision_missing_or_invalid: a valid "
-            "patch-decision.md with patch_body_updates and implementation_path is required"
-        )
-
     client = WikiClient()
     try:
         # 2. schema-compat (AC-M4).

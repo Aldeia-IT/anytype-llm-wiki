@@ -1679,59 +1679,6 @@ class TestPreChecks:
             f"WikiLog must be written when schema is newer (warn-and-continue); posts: {post_called}"
         )
 
-    @respx.mock
-    def test_pre_check_patch_decision_missing_fires_before_write(self, monkeypatch, tmp_path):
-        """Missing patch-decision.md (ALDEIA_DIR pointing to empty dir) →
-        '[CONFIG ERROR] patch_decision_missing_or_invalid: ...'; no Anytype call.
-        AC10.
-        """
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))  # no patch-decision.md here
-
-        get_called = []
-        post_called = []
-
-        def tracking_get(request, **kwargs):
-            get_called.append(str(request.url))
-            return httpx.Response(200, json=_schema_current_response())
-
-        def tracking_post(request, **kwargs):
-            post_called.append(str(request.url))
-            return httpx.Response(201, json={"object": {"id": "log-001"}})
-
-        respx.get().mock(side_effect=tracking_get)
-        respx.post().mock(side_effect=tracking_post)
-
-        from anytype_llm_wiki.wiki.lint import wiki_lint
-        result = wiki_lint(space_id=FAKE_SPACE_ID)
-
-        result_str = str(result)
-        assert "[CONFIG ERROR] patch_decision_missing_or_invalid" in result_str, (
-            f"Expected '[CONFIG ERROR] patch_decision_missing_or_invalid'; got: {result_str!r}"
-        )
-        # No Anytype network calls when QA#30 fires
-        assert len(get_called) == 0, (
-            f"Must not call Anytype GET when QA#30 fires; calls: {get_called}"
-        )
-        assert len(post_called) == 0, (
-            f"Must not call Anytype POST when QA#30 fires; calls: {post_called}"
-        )
-
-    @respx.mock
-    def test_pre_checks_fire_before_wikilog_write(self, monkeypatch, tmp_path):
-        """Both pre-check failure paths assert zero POST calls. AC10."""
-        # Test 1: missing patch-decision.md
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
-        post_called_qp = []
-        respx.get().mock(return_value=httpx.Response(200, json=_schema_current_response()))
-        respx.post().mock(side_effect=lambda req, **kw: post_called_qp.append(str(req.url)) or
-                          httpx.Response(201, json={"object": {"id": "x"}}))
-
-        from anytype_llm_wiki.wiki.lint import wiki_lint
-        wiki_lint(space_id=FAKE_SPACE_ID)
-        assert len(post_called_qp) == 0, (
-            f"QA#30 failure must produce zero POST calls; got: {post_called_qp}"
-        )
-
 
 class TestStatusLifecycle:
     """AC11: WikiLog receipt + status lifecycle (SF6)."""
@@ -1855,27 +1802,6 @@ class TestStatusLifecycle:
         assert notes == [], (
             f"post-v0.6.0: _empty_report notes must be empty [] — the passive-contradiction "
             f"note is removed (§3.7 change 2); got notes: {notes}"
-        )
-
-    @respx.mock
-    def test_wikilog_skipped_on_pre_check_failure(self, monkeypatch, tmp_path):
-        """Pre-check failure → zero POST calls (WikiLog NOT written). AC11/SF6."""
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
-        post_called = []
-
-        respx.get().mock(return_value=httpx.Response(200, json=_schema_current_response()))
-        respx.post().mock(side_effect=lambda req, **kw: post_called.append(str(req.url)) or
-                          httpx.Response(201, json={"object": {"id": "x"}}))
-
-        from anytype_llm_wiki.wiki.lint import wiki_lint
-        result = wiki_lint(space_id=FAKE_SPACE_ID)
-
-        # QA#30 fires → status=error → no WikiLog
-        assert result.get("status") == "error", (
-            f"status must be 'error' on QA#30 failure; got {result.get('status')!r}"
-        )
-        assert len(post_called) == 0, (
-            f"WikiLog POST must not be called on pre-check failure; posts: {post_called}"
         )
 
 

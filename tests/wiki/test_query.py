@@ -341,42 +341,6 @@ class TestPreChecks:
         assert not post_called["called"], "No POST when schema missing"
 
     @respx.mock
-    def test_pre_check_patch_decision_missing_fires_before_write(self, monkeypatch, tmp_path):
-        """AC#10 / QA#30: missing patch-decision.md returns
-        [CONFIG ERROR] patch_decision_missing_or_invalid before any write or Qdrant call.
-        """
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))  # empty dir — no patch-decision.md
-        post_called = {"called": False}
-        patch_called = {"called": False}
-
-        def track_post(request, **kwargs):
-            post_called["called"] = True
-            return httpx.Response(201, json={"object": {"id": "x"}})
-
-        def track_patch(request, **kwargs):
-            patch_called["called"] = True
-            return httpx.Response(200, json={"object": {"id": "x"}})
-
-        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
-        respx.post().mock(side_effect=track_post)
-        respx.patch().mock(side_effect=track_patch)
-
-        from anytype_llm_wiki.wiki.query import wiki_query
-        result = wiki_query(question="What is X?", space_id=FAKE_SPACE_ID)
-
-        assert "patch_decision_missing_or_invalid" in str(result.get("error", "")), (
-            f"Expected patch_decision_missing_or_invalid in error, got: {result}"
-        )
-        assert "[CONFIG ERROR]" in str(result.get("error", "")), (
-            f"Expected [CONFIG ERROR] prefix, got: {result}"
-        )
-        assert result.get("error_category") == "config_error", (
-            f"Expected error_category='config_error', got: {result}"
-        )
-        assert not post_called["called"], "No POST when patch-decision pre-check fails"
-        assert not patch_called["called"], "No PATCH when patch-decision pre-check fails"
-
-    @respx.mock
     def test_pre_check_schema_newer_warns_and_continues(self, monkeypatch):
         """Finding 6a / AC#9 edge case: space schema version > code version →
         warning 'wiki_schema_newer: ...' is added to warnings but the query

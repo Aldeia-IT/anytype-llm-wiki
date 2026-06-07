@@ -38,7 +38,6 @@ from .extraction import _DETERMINISTIC_OPTS, _is_model_not_pulled, sanitize_name
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .util import (
     _parse_relation_elements,
-    read_patch_decision,
     scrub_credentials,
     strip_control_chars,
 )
@@ -364,26 +363,13 @@ def _empty_result(retrieval_mode="index_navigation", count=0):
 def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> dict:
     """Query the wiki and return a synthesized QueryResult dict.
 
-    Pipeline: pre-checks (patch-decision QA#30, schema QA#25 — both before any
+    Pipeline: pre-check (schema QA#25 — before any
     Qdrant call or Anytype write) → enumerate + count → tier select → 1-hop
     neighborhood (per-run cache) → bounded synthesis → file-back gate → WikiLog.
     """
     safe_question = _sanitize_question(question)
     result = _empty_result()
 
-    # --- Pre-check QA#30: patch-decision (no network) ---
-    decision = read_patch_decision()
-    if decision is None or not (
-        "patch_body_updates" in decision and "implementation_path" in decision
-    ):
-        result["status"] = "error"
-        result["error"] = (
-            f"{_CONFIG_ERROR_PREFIX} patch_decision_missing_or_invalid: a valid "
-            "patch-decision.md with patch_body_updates and implementation_path is required"
-        )
-        result["error_category"] = "config_error"
-        # No Anytype calls made yet; cannot write WikiLog.
-        return _log_error(result)
 
     read_client = AnytypeReadClient()
     write_client = WikiClient()

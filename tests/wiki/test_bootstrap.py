@@ -815,24 +815,6 @@ class TestBootstrapPatchDecisionScaffolding:
         from anytype_llm_wiki.wiki.util import read_patch_decision
         assert callable(read_patch_decision)
 
-    def test_wiki_ingest_returns_error_on_missing_patch_decision(self, monkeypatch, tmp_path):
-        """wiki_ingest must return [CONFIG ERROR] patch_decision_missing_or_invalid when patch-decision.md is absent."""
-        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
-        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
-        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
-        # Point ALDEIA_DIR to a tmp dir where patch-decision.md does not exist
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
-        from anytype_llm_wiki.wiki.ingest import wiki_ingest
-        import respx as _respx, httpx as _httpx
-        with _respx.mock:
-            _respx.post().mock(return_value=_httpx.Response(200, json={}))
-            _respx.get().mock(return_value=_httpx.Response(200, json={
-                "data": [], "pagination": {"has_more": False}
-            }))
-            result = wiki_ingest(source="https://example.com/paper", space_id=FAKE_SPACE_ID)
-        result_str = str(result)
-        assert "patch_decision_missing_or_invalid" in result_str
-
 
 class TestBootstrapLiveAPI:
     """Live API test — requires ANYTYPE_API_KEY set in environment.

@@ -31,7 +31,7 @@ from .. import indexer
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .query import _parse_relation_elements, _fetch_cached
 from .remember import _resolve_select_tag
-from .util import read_patch_decision, scrub_credentials, strip_control_chars
+from .util import scrub_credentials, strip_control_chars
 from ..anytype_client import AnytypeReadClient
 from .wiki_client import WikiClient
 
@@ -187,7 +187,7 @@ def wiki_lint(
 ) -> dict:
     """Run the structural health check over a bootstrapped wiki space.
 
-    Sequential pipeline: QA#30 patch-decision pre-check (no network) → enumerate
+    Sequential pipeline: enumerate
     once → QA#25 schema gate (3 branches) → filter content objects + counts →
     resolve the needs-review tag → fetch each object (per-run cache, D1 backlinks)
     → run the ten-check battery → opt-in duplicate sweep → severity post-filter →
@@ -204,17 +204,6 @@ def wiki_lint(
         report["elapsed_ms"] = max(0, int((time.monotonic() - start) * 1000))
         return report
 
-    # --- Step 0: QA#30 patch-decision pre-check (no network, before any client) ---
-    decision = read_patch_decision()
-    if decision is None or not (
-        "patch_body_updates" in decision and "implementation_path" in decision
-    ):
-        report["error"] = (
-            f"{_CONFIG_ERROR_PREFIX} patch_decision_missing_or_invalid: a valid "
-            "patch-decision.md with patch_body_updates and implementation_path is required"
-        )
-        report["error_category"] = "config_error"
-        return _finish("error")
 
     read_client = write_client = None
     try:

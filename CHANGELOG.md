@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-07
+
+### Fixed
+
+- **Removed a leftover precondition that made the wiki tools unusable for any
+  client.** `wiki_ingest`, `wiki_query`, `wiki_remember`, and `wiki_lint` each
+  ran a `read_patch_decision()` precheck and hard-failed with
+  `[CONFIG ERROR] patch_decision_missing_or_invalid` unless a
+  `patch-decision.md` was found in the server's working directory (under
+  `$ALDEIA_DIR` or `./.aldeia/140-…/`). That file only exists inside this
+  repo's own working tree, so every MCP client running the server from any
+  other directory was blocked from all write/query paths. The precheck was a
+  `#140` migration-era scaffold that should never have gated normal operation;
+  it is now removed from all four tool paths.
+
 ## [0.6.0] - 2026-06-06
 
 ### User-visible changes
@@ -252,7 +267,8 @@ This release builds on the existing semantic-search foundation:
   re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
   `semantic_search` also prompts a reindex when the collection is empty).
 
-[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.0...v0.4.1
