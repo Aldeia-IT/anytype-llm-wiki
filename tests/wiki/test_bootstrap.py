@@ -572,14 +572,21 @@ class TestBootstrapReadmePrivacyNotice:
         readme_text = readme_path.read_text(encoding="utf-8")
         assert readme_text, "README.md is empty or unreadable"
 
-    def test_readme_contains_verbatim_privacy_notice(self):
-        """README.md must contain the verbatim privacy-and-data-flow block (fixture-gated)."""
+    def test_security_doc_contains_verbatim_privacy_notice(self):
+        """docs/security-and-data-flow.md must contain the verbatim privacy-and-data-flow block.
+
+        The detailed privacy/data-flow disclosure — including the GDPR Art. 4(7) /
+        LGPD Art. 5(VI) controller statement — lives in docs/security-and-data-flow.md
+        (linked prominently from the README). It is byte-gated against the fixture so
+        the disclosure cannot silently regress.
+        """
         from pathlib import Path
-        readme_text = self._readme_path().read_text(encoding="utf-8")
+        doc_text = (Path(__file__).parent.parent.parent / "docs" / "security-and-data-flow.md").read_text(encoding="utf-8")
         fixture = Path(__file__).parent / "fixtures" / "readme_privacy_notice_verbatim.md"
-        assert fixture.read_text(encoding="utf-8") in readme_text, (
-            "README.md does not contain the verbatim privacy-and-data-flow block "
-            "from tests/wiki/fixtures/readme_privacy_notice_verbatim.md"
+        assert fixture.read_text(encoding="utf-8").strip() in doc_text, (
+            "docs/security-and-data-flow.md does not contain the verbatim "
+            "privacy-and-data-flow block from "
+            "tests/wiki/fixtures/readme_privacy_notice_verbatim.md"
         )
 
 
