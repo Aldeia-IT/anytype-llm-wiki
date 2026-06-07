@@ -1,5 +1,9 @@
 # anytype-llm-wiki
 
+<p align="center">
+  <img src="docs/images/knowledge-graph.png" alt="Example Anytype graph" width="100%">
+</p>
+
 **A local-first, typed "second brain" on [Anytype](https://anytype.io) — for humans *and* AI agents.**
 
 It takes Andrej Karpathy's *LLM-wiki* idea — let an LLM compile your sources into a curated, interlinked knowledge base you can then query — and builds it on Anytype's native **Objects, Types, and Relations** instead of flat Markdown files. Everything is exposed over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude Code, Cursor, any MCP client — or your own autonomous agents — can both read *and* write it. It runs entirely on your machine.
@@ -10,8 +14,6 @@ It takes Andrej Karpathy's *LLM-wiki* idea — let an LLM compile your sources i
 - **It detects contradictions.** When newly ingested facts conflict with an already-linked entity, **both positions are kept and cross-linked** (`wiki_contradictions`) and flagged for review — never silently overwritten. Your knowledge base tells you when it disagrees with itself. Flat wikis and vector stores can't.
 - **Cited synthesis, not just search.** `wiki_query` returns a prose answer drawn **only from your wiki**, citing the exact Objects it used — and can file the answer back so the wiki gets a little better every time it's used.
 - **Local-first.** Anytype + Ollama (embeddings & extraction) + Qdrant (vectors), all on `localhost`. Nothing leaves your machine by default. See [Security & data flow](docs/security-and-data-flow.md).
-
-![Example Anytype graph](docs/images/knowledge-graph.png)
 
 ## Use cases
 
