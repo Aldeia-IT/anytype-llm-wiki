@@ -1423,33 +1423,6 @@ class TestCorePipeline:
         # No writes must have happened
         mock_extract.assert_not_called()
 
-    def test_patch_decision_missing_returns_config_error(self, monkeypatch, tmp_path):
-        """AC-R11 — missing patch-decision.md → [CONFIG ERROR] patch_decision_missing_or_invalid."""
-        # Point ALDEIA_DIR to an empty dir (no patch-decision.md)
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
-        mock_extract = MagicMock()
-        monkeypatch.setattr("anytype_llm_wiki.wiki.remember.extract", mock_extract, raising=False)
-
-        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
-            router.get("/v1/spaces/space-remember-test-001/objects").mock(
-                return_value=httpx.Response(200, json=_schema_current_response())
-            )
-            router.post("/v1/spaces/space-remember-test-001/search").mock(
-                return_value=httpx.Response(200, json=_empty_search_response())
-            )
-            router.post("/v1/spaces/space-remember-test-001/objects").mock(
-                return_value=httpx.Response(201, json={"object": {"id": "x"}})
-            )
-
-            from anytype_llm_wiki.wiki.remember import wiki_remember
-            result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="Something happened.")
-
-        result_str = str(result)
-        assert "patch_decision_missing_or_invalid" in result_str or "[CONFIG ERROR]" in result_str, (
-            f"Missing patch-decision must return config error; got {result_str}"
-        )
-        assert result.get("status") == "error", f"Expected status=error; got {result}"
-
     def test_schema_outdated_returns_config_error(self, monkeypatch, tmp_path):
         """AC-R11 — live version 0.3.0 with code at 0.3.1 → wiki_schema_outdated."""
         _patch_decision_ok(monkeypatch, tmp_path)

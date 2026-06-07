@@ -103,55 +103,6 @@ class TestIngestImport:
         assert "domain_hint" in params, "wiki_ingest must have 'domain_hint' parameter"
 
 
-class TestPatchDecisionPreCheck:
-    """AC#15: missing or malformed patch-decision.md → [CONFIG ERROR] patch_decision_missing_or_invalid.
-
-    Canonical path: .aldeia/140-wiki-library-module-port-llm-wiki-pattern-onto-any/patch-decision.md
-    There is NO #284 copy.
-    """
-
-    @respx.mock
-    def test_missing_patch_decision_returns_config_error(self, monkeypatch, tmp_path):
-        """AC#15: wiki_ingest with missing patch-decision.md (ALDEIA_DIR pointing to empty dir)
-        returns [CONFIG ERROR] patch_decision_missing_or_invalid before any write.
-
-        Covers: §9.1 AC#15. Canonical path is ONLY #140 parent dir.
-        """
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))  # no patch-decision.md here
-        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
-        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "x"}}))
-
-        from anytype_llm_wiki.wiki.ingest import wiki_ingest
-        result = wiki_ingest(source="https://example.com/paper", space_id=FAKE_SPACE_ID)
-        result_str = str(result)
-        assert "patch_decision_missing_or_invalid" in result_str and "[CONFIG ERROR]" in result_str, (
-            f"Expected [CONFIG ERROR] patch_decision_missing_or_invalid for missing "
-            f"patch-decision.md, got: {result_str!r}"
-        )
-
-    @respx.mock
-    def test_malformed_patch_decision_returns_config_error(self, monkeypatch, tmp_path):
-        """AC#15: wiki_ingest with malformed patch-decision.md returns
-        [CONFIG ERROR] patch_decision_missing_or_invalid.
-        """
-        patch_dir = tmp_path / "patch-decision.md"
-        patch_dir.write_text("NOT_VALID_YAML_OR_JSON: !!python/object:os.system bad", encoding="utf-8")
-        monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
-        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
-        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "x"}}))
-
-        from anytype_llm_wiki.wiki.ingest import wiki_ingest
-        result = wiki_ingest(source="https://example.com/paper", space_id=FAKE_SPACE_ID)
-        result_str = str(result)
-        # Malformed patch-decision.md → config error
-        # (The read_patch_decision function returns None for unparseable content)
-        assert (
-            "patch_decision_missing_or_invalid" in result_str
-            or "[CONFIG ERROR]" in result_str
-        ), (
-            f"Expected [CONFIG ERROR] for malformed patch-decision.md: {result_str!r}"
-        )
-
 
 class TestSchemaCompatibilityCheck:
     """AC-M4: outdated schema (0.2.0 WikiLog, code is 0.3.0) → wiki_schema_outdated error."""

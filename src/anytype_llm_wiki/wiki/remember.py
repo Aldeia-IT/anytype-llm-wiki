@@ -3,7 +3,7 @@
 Mirrors ``ingest.py``'s orchestration but for narrated, conversational knowledge
 rather than a fetched document. The pipeline is:
 
-  entry validation (empty/oversize knowledge) → patch-decision → schema-compat →
+  entry validation (empty/oversize knowledge) → schema-compat →
   domain-tag validation → remote-endpoint consent → per-space lock → LLM extract →
   resolve subjects → per-subject create/consolidate (conflict-flag FIRST, then the
   D3 idempotency PATCH gate) → lazy Source creation + wiki_sources back-link →
@@ -46,7 +46,6 @@ from .ingest import _maybe_reindex as _ingest_maybe_reindex
 from .util import (
     _existing_text,
     normalize_title,
-    read_patch_decision,
     scrub_credentials,
     space_ingest_lock,
 )
@@ -266,12 +265,6 @@ def wiki_remember(
     if len(knowledge) > _KNOWLEDGE_MAX_CHARS:
         return _error_remember_result("[DATA ERROR] knowledge_too_large")
 
-    # b. patch-decision precheck (looser than ingest — presence is enough).
-    if read_patch_decision() is None:
-        return _error_remember_result(
-            "[CONFIG ERROR] patch_decision_missing_or_invalid: a valid "
-            "patch-decision.md is required"
-        )
 
     client = WikiClient()
     try:
