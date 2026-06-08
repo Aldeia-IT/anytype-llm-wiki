@@ -12,6 +12,7 @@ unavailable or returns junk. LLM ``extract()`` is a best-effort enrichment
 layer merged on top, never a hard dependency.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -602,10 +603,9 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
         )
 
         def _locked_ingest():
-            try:
+            # A queued-remember drain failure must not block an operator ingest.
+            with contextlib.suppress(Exception):
                 _drain_pending(client, space_id, [])
-            except Exception:  # noqa: BLE001 — a queued-remember failure must not block an ingest
-                pass
             return _run_ingest(client, source, space_id, domain_hint, schema_warnings)
 
         result = _acquire_and_run(
