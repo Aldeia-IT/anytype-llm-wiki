@@ -257,16 +257,23 @@ clean-synthesis precondition and the file-back gate — see
 A read-only battery over a bootstrapped space (mutates nothing but one WikiLog
 receipt):
 
-- `asymmetric_relation` (Critical) — an outbound relation whose target doesn't
-  reciprocate. Reciprocity is confirmed by **either** the target appearing in
-  `backlinks` **or** the target's symmetric outbound containing the source
-  (either signal suffices — neither is trusted alone).
+- `asymmetric_relation` (High) — an outbound relation `A → B` whose reverse is
+  not **reachable** from `B`. A directed `A → B` written only on `A`'s forward
+  array still produces an Anytype backlink on `B`, so reciprocity holds when
+  **any** of: `B`'s `backlinks` list `A` (the auto-reverse — the authoritative
+  signal), `B`'s symmetric outbound contains `A`, or `A`'s `backlinks` list `B`.
+  Only a genuinely dangling edge (target gone / no reverse at all) is reported.
+  *(v0.7.2: was Critical, and the pre-v0.7.2 check read the **source's** backlinks
+  instead of the target's, false-flagging every backlink-only directed edge.)*
 - `stale_citation_edge` (High) — an entity/concept relation pointing at a
   `wiki_query` object (a leftover from old file-back); remove with the
   `prune-citations` command (§8).
-- `orphan` / `pipeline_orphan`, `contradiction_unresolved` (#287),
-  `staleness`, oversized descriptions, `empty_type`, unreviewed/stale
-  `needs-review`, and the opt-in `potential_duplicate` sweep (§5).
+- `contradiction_unresolved` (Critical, #287) — a `wiki_entity` carrying
+  unresolved `wiki_contradictions` with no `wiki_last_reviewed`. *(v0.7.2:
+  reranked from High — a semantic conflict outranks structural checks.)*
+- `orphan` / `pipeline_orphan`, `staleness`, oversized descriptions,
+  `empty_type`, unreviewed/stale `needs-review`, and the opt-in
+  `potential_duplicate` sweep (§5).
 
 The default (sweep-off) path targets ≤ 60 s / ≤ 500 objects; the opt-in duplicate
 sweep embeds objects and can exceed that.

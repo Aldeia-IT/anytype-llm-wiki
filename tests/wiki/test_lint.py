@@ -448,7 +448,8 @@ class TestLintConfigResolvers:
 # ---------------------------------------------------------------------------
 
 class TestAsymmetricRelationCheck:
-    """AC1/AC5: asymmetric_relation check — Critical severity."""
+    """AC1/AC5: asymmetric_relation check — High severity (v0.7.2: was Critical;
+    reranked below contradiction_unresolved, which is the user-visible defect)."""
 
     @respx.mock
     def test_asymmetric_relation_check_fires(self, monkeypatch):
@@ -477,8 +478,81 @@ class TestAsymmetricRelationCheck:
         assert len(asymmetric) >= 1, (
             f"Expected at least one asymmetric_relation finding; findings: {findings}"
         )
-        assert asymmetric[0]["severity"] == "critical", (
-            f"asymmetric_relation must be Critical; got {asymmetric[0]['severity']!r}"
+        assert asymmetric[0]["severity"] == "high", (
+            f"asymmetric_relation must be High (v0.7.2); got {asymmetric[0]['severity']!r}"
+        )
+
+    @respx.mock
+    def test_backlink_only_reverse_is_reciprocal(self, monkeypatch):
+        """v0.7.2 regression (the 22-false-positive fix): a directed edge A->B
+        written only on A's forward array is REACHABLE in reverse via the Anytype
+        auto-backlink on B. Even though B has NO forward relation back to A, B's
+        ``backlinks`` list contains A — so the edge is reciprocal and must NOT be
+        flagged. This is the exact live-graph shape (e.g. Mac Mini M4 -> IronClaw)
+        that the pre-v0.7.2 check false-flagged because it never read the target's
+        backlinks.
+        """
+        # A -> B forward; B has no reverse FORWARD edge, but B.backlinks lists A
+        # (Anytype's auto-reverse of the A->B write). A's own backlinks are empty.
+        obj_a = _make_entity("obj-a", name="A", relations=["obj-b"], backlinks=[])
+        obj_b = _make_entity("obj-b", name="B (hub)", relations=[], backlinks=["obj-a"])
+        objects = [obj_a, obj_b]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(obj_a)
+        register(obj_b)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        asymmetric = [f for f in result.get("findings", []) if f.get("check") == "asymmetric_relation"]
+        assert asymmetric == [], (
+            "A backlink-reachable directed edge must NOT be flagged asymmetric; "
+            f"got {asymmetric}"
+        )
+
+    @respx.mock
+    def test_backlinks_in_properties_shape_is_reciprocal(self, monkeypatch):
+        """Real-API shape guard (v0.7.2): live get_object serves backlinks as a
+        PROPERTY (``properties[key='backlinks'].objects``) and leaves the top-level
+        ``backlinks`` key ABSENT. A directed A->B whose reverse exists only as B's
+        property-backlink must be recognized as reciprocal. Pre-v0.7.2,
+        _backlinks_inbound read only the top-level key (None on the real API), so
+        the backlink signal was dead and this false-flagged — the live-graph bug
+        that fixtures (which used a top-level list) never exercised.
+        """
+        def ent(oid, name, relations, backlink_ids):
+            return {
+                "id": oid, "name": name, "type": {"key": "wiki_entity"},
+                "properties": [
+                    {"key": "wiki_description", "text": f"Description of {name}."},
+                    {"key": "wiki_relations", "objects": relations},
+                    {"key": "backlinks", "name": "Backlinks",
+                     "format": "objects", "objects": backlink_ids},
+                ],
+                # Deliberately NO top-level "backlinks" key — mirrors the live API.
+            }
+        obj_a = ent("obj-a", "A", ["obj-b"], [])         # A -> B forward only
+        obj_b = ent("obj-b", "B (hub)", [], ["obj-a"])   # reverse lives ONLY as B's property-backlink
+        objects = [obj_a, obj_b]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(obj_a)
+        register(obj_b)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        asymmetric = [f for f in result.get("findings", []) if f.get("check") == "asymmetric_relation"]
+        assert asymmetric == [], (
+            "A property-shaped backlink must confirm reciprocity (the real-API shape); "
+            f"got {asymmetric}"
         )
 
     @respx.mock
@@ -1062,7 +1136,8 @@ class TestNeedsReviewChecks:
 
 
 class TestContradictionCheck:
-    """AC3/AC4: contradiction_unresolved check — High severity, ACTIVE (no passive caveat) post-v0.6.0."""
+    """AC3/AC4: contradiction_unresolved check — Critical severity (v0.7.2: reranked
+    from High so semantic conflicts outrank structural checks), ACTIVE post-v0.6.0."""
 
     @respx.mock
     def test_contradiction_check_active(self, monkeypatch):
@@ -1116,6 +1191,12 @@ class TestContradictionCheck:
         # Finding fires for conflict entity
         assert any(f.get("object_id") == "obj-conflict" for f in contradictions), (
             f"Expected contradiction_unresolved for obj-conflict; findings: {contradictions}"
+        )
+        # v0.7.2: severity reranked to Critical (above structural checks like
+        # asymmetric_relation, which is High).
+        assert all(f.get("severity") == "critical" for f in contradictions), (
+            f"contradiction_unresolved must be Critical (v0.7.2); got "
+            f"{[f.get('severity') for f in contradictions]}"
         )
         # Normal entity (no contradictions) does not fire
         assert not any(f.get("object_id") == "obj-normal" for f in contradictions), (

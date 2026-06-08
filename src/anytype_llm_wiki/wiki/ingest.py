@@ -683,7 +683,19 @@ def _run_ingest(
             ):
                 result["warnings"].append("extraction_degraded")
             else:
-                _merge_extraction(candidates, extracted)
+                # v0.7.2: when LLM extraction yields real entities/concepts, use
+                # THOSE as the object set — the heading-derived candidates (the
+                # document title + section headings like "Overview"/"Open Questions"/
+                # "Migration Path") are the deterministic FALLBACK backbone only and
+                # are NOT promoted to wiki objects when extraction succeeds. This
+                # stops document scaffolding from polluting the graph (and inflating
+                # dedup/relation noise) while preserving the "works without the LLM"
+                # guarantee. Building the extracted set via _merge_extraction([], …)
+                # reuses the same name/kind/facts mapping and dedup.
+                extracted_cands: list[dict] = []
+                _merge_extraction(extracted_cands, extracted)
+                if extracted_cands:
+                    candidates = extracted_cands
                 if isinstance(extracted, dict) and extracted.get("error"):
                     result["warnings"].append("extraction_degraded")
         except Exception:  # noqa: BLE001 — enrichment is best-effort
