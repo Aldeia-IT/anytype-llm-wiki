@@ -50,13 +50,11 @@ from .util import (
     space_ingest_lock,
 )
 from .wiki_client import WikiClient
+from . import worklog
 
 # Hard cap on the narrated knowledge processed by the local generation model
 # (AC-L4 / B2). Measured in Python str length (characters).
 _KNOWLEDGE_MAX_CHARS = 32_000
-
-# Consolidation fan-out cap (D12): bounds worst-case lock-hold time.
-_MAX_SUBJECTS = 8
 
 
 # Module-level reindex seam so tests can patch remember._maybe_reindex without
@@ -346,26 +344,76 @@ def _run_remember(
         return _error_remember_result(str(extracted["error"]))
 
     # h. build subjects.
-    subjects = _build_subjects(extracted)
-    if not subjects:
-        if subject_hint:
-            hint_kind = "concept" if kind == "concept" else "entity"
-            subjects = [
-                {"name": subject_hint, "kind": hint_kind, "facts": knowledge}
-            ]
-        else:
-            result["warnings"].append("no_subjects: extraction empty and no subject_hint")
-            result["status"] = "partial"
-            _reindex_guarded(space_id, result)
-            return result
+    new_subjects = _build_subjects(extracted)
+    if not new_subjects and subject_hint:
+        hint_kind = "concept" if kind == "concept" else "entity"
+        new_subjects = [
+            {"name": subject_hint, "kind": hint_kind, "facts": knowledge}
+        ]
 
-    # i. cap subjects at _MAX_SUBJECTS.
-    if len(subjects) > _MAX_SUBJECTS:
-        result["warnings"].append(
-            f"subject_cap_exceeded: {_MAX_SUBJECTS} of {len(subjects)} processed"
+    # i. Durability — the no-drop guarantee (replaces the old fixed subject cap).
+    #    The previous design truncated the subject list to a hard limit and
+    #    SILENTLY DROPPED the remainder (unbounded data loss, no record of what
+    #    was lost). Instead: record every extracted subject in a durable per-space
+    #    work-log BEFORE draining, fold back any subjects left pending by an
+    #    interrupted prior run, and finish them here. Consolidation is idempotent,
+    #    so re-processing a partially-applied subject converges to a no-op. Nothing
+    #    is dropped; an interrupted drain resumes on the next run. See worklog.py.
+    pending = _safe_load_pending(space_id, result)
+    if pending:
+        result["warnings"].append(f"resumed_pending_subjects: {len(pending)}")
+
+    if not new_subjects and not pending:
+        result["warnings"].append("no_subjects: extraction empty and no subject_hint")
+        result["status"] = "partial"
+        _reindex_guarded(space_id, result)
+        return result
+
+    # Record THIS batch durably (fsync) before draining. On a work-log failure we
+    # still process everything in-process — we only warn that crash-resume isn't
+    # guaranteed for this run. We never drop a subject.
+    new_work_id = None
+    enriched_new = new_subjects
+    if new_subjects:
+        new_work_id, enriched_new = _safe_begin(
+            space_id, new_subjects,
+            meta={"relations": relations or [], "source": source},
+            result=result,
         )
-        status = "partial"
-        subjects = subjects[:_MAX_SUBJECTS]
+
+    # Unified work list: pending (prior interrupted runs) first, then this batch.
+    # De-duplicate by (normalized name, kind) to avoid redundant consolidations;
+    # each item carries _id/_work_id so completion is recorded per subject.
+    subjects: list[dict] = []
+    relations = list(relations or [])
+    seen: set[tuple[str, str]] = set()
+    seen_meta_work: set[str] = set()
+    for p in pending:
+        wid = p.get("_work_id")
+        if wid and wid not in seen_meta_work:
+            seen_meta_work.add(wid)
+            relations.extend((p.get("_meta") or {}).get("relations") or [])
+        key = (normalize_title(p.get("name", "")), p.get("kind", "entity"))
+        if key in seen:
+            _safe_mark_done(space_id, p.get("_work_id"), p.get("id"), result)
+            continue
+        seen.add(key)
+        subjects.append({
+            "name": p.get("name", ""), "kind": p.get("kind", "entity"),
+            "facts": p.get("facts", ""),
+            "_id": p.get("id"), "_work_id": p.get("_work_id"),
+        })
+    for s in enriched_new:
+        key = (normalize_title(s.get("name", "")), s.get("kind", "entity"))
+        if key in seen:
+            _safe_mark_done(space_id, new_work_id, s.get("id"), result)
+            continue
+        seen.add(key)
+        subjects.append({
+            "name": s.get("name", ""), "kind": s.get("kind", "entity"),
+            "facts": s.get("facts", ""),
+            "_id": s.get("id"), "_work_id": new_work_id,
+        })
 
     # j. per-subject create/consolidate.
     name_to_id: dict[str, str] = {}
@@ -608,11 +656,65 @@ def _run_remember(
         action_name="remember",
     )
 
+    # Every subject in this run's work list was attempted exactly once above, so
+    # mark them all done and compact the durable work-log. If the drain had been
+    # interrupted before reaching here, the log would persist and the next run
+    # would resume the outstanding subjects (no loss).
+    for subj in subjects:
+        _safe_mark_done(space_id, subj.get("_work_id"), subj.get("_id"), result)
+    _safe_compact(space_id, result)
+
     result["status"] = status
 
     # n. auto-reindex (non-fatal).
     _reindex_guarded(space_id, result)
     return result
+
+
+def _safe_load_pending(space_id: str, result: dict) -> list[dict]:
+    """worklog.load_pending guarded — a work-log read failure never breaks a run."""
+    try:
+        return worklog.load_pending(space_id)
+    except OSError as exc:
+        result["warnings"].append(
+            f"worklog_load_failed: {scrub_credentials(str(exc))}"
+        )
+        return []
+
+
+def _safe_begin(space_id: str, subjects: list[dict], meta: dict, result: dict):
+    """worklog.begin guarded. On failure, process all subjects in-process anyway
+    (no drop) — only crash-resume is forfeited for this run."""
+    try:
+        return worklog.begin(space_id, subjects, meta=meta)
+    except OSError as exc:
+        result["warnings"].append(
+            "worklog_begin_failed (crash-resume not guaranteed this run): "
+            f"{scrub_credentials(str(exc))}"
+        )
+        return None, subjects
+
+
+def _safe_mark_done(space_id: str, work_id, subject_id, result: dict) -> None:
+    """worklog.mark_done guarded; no-op when ids are absent (durability disabled)."""
+    if not work_id or not subject_id:
+        return
+    try:
+        worklog.mark_done(space_id, work_id, subject_id)
+    except OSError as exc:
+        result["warnings"].append(
+            f"worklog_mark_done_failed: {scrub_credentials(str(exc))}"
+        )
+
+
+def _safe_compact(space_id: str, result: dict) -> None:
+    """worklog.compact guarded — a compaction failure never breaks a run."""
+    try:
+        worklog.compact(space_id)
+    except OSError as exc:
+        result["warnings"].append(
+            f"worklog_compact_failed: {scrub_credentials(str(exc))}"
+        )
 
 
 # ---------------------------------------------------------------------------

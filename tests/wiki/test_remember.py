@@ -2348,8 +2348,9 @@ class TestCorePipeline:
             f"Ambiguous subject must yield status=partial; got {result.get('status')}"
         )
 
-    def test_subject_cap_bounds_consolidation_calls(self, monkeypatch, tmp_path):
-        """AC-R30/SF6 — >8 candidates → ≤8 consolidate calls; subject_cap_exceeded warning; status=partial."""
+    def test_all_subjects_processed_no_cap(self, monkeypatch, tmp_path):
+        """No-drop guarantee: >8 extracted subjects are ALL processed — no fixed
+        subject cap, no subject_cap_exceeded warning, no cap-induced partial."""
         _patch_decision_ok(monkeypatch, tmp_path)
         # Extract returns 10 entities (>8)
         entities = [
@@ -2399,16 +2400,93 @@ class TestCorePipeline:
                 knowledge=" ".join(f"Entity{i} does things." for i in range(10)),
             )
 
-        # consolidate must be called at most 8 times
-        assert mock_consolidate.call_count <= 8, (
-            f"consolidate must be called ≤8 times; called {mock_consolidate.call_count}"
+        # All 10 subjects must be processed — the cap (which dropped >8) is gone.
+        assert len(result.get("objects", [])) == 10, (
+            f"All 10 subjects must be processed; got {len(result.get('objects', []))} "
+            f"objects: {result.get('objects')}"
         )
         warnings = result.get("warnings", [])
-        assert any("subject_cap_exceeded" in str(w) for w in warnings), (
-            f"Must warn subject_cap_exceeded; warnings={warnings}"
+        assert not any("subject_cap_exceeded" in str(w) for w in warnings), (
+            f"subject_cap_exceeded must NOT be warned anymore; warnings={warnings}"
         )
-        assert result.get("status") == "partial", (
-            f"Subject cap must yield status=partial; got {result.get('status')}"
+
+    def test_interrupted_drain_resumes_pending_subjects(self, monkeypatch, tmp_path):
+        """No-loss across interruption: a drain that crashes mid-way leaves its
+        subjects in the durable work-log; the next run folds them back in and
+        finishes them. Nothing is dropped."""
+        _patch_decision_ok(monkeypatch, tmp_path)
+        from anytype_llm_wiki.wiki import worklog
+
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False
+        )
+
+        entities = [
+            {"name": "Xeno", "kind": "entity", "facts": "about Xeno"},
+            {"name": "Yara", "kind": "entity", "facts": "about Yara"},
+        ]
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value={"entities": entities, "concepts": []}),
+            raising=False,
+        )
+
+        # ---- Phase 1: crash mid-drain (resolve_entity raises an uncaught error) ----
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.resolve_entity",
+            MagicMock(side_effect=RuntimeError("simulated crash")),
+            raising=False,
+        )
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            wiki_remember(space_id=FAKE_SPACE_ID, knowledge="Xeno and Yara exist.")
+
+        pending = worklog.load_pending(FAKE_SPACE_ID)
+        assert sorted(p["name"] for p in pending) == ["Xeno", "Yara"], (
+            f"Both subjects must survive the crash in the durable log; got {pending}"
+        )
+
+        # ---- Phase 2: a fresh run resumes and finishes the pending subjects ----
+        # New extraction is empty, so the ONLY work is the resumed pending pair.
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value={"entities": [], "concepts": []}),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.resolve_entity",
+            MagicMock(return_value={"action": "create"}),
+            raising=False,
+        )
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            result = wiki_remember(
+                space_id=FAKE_SPACE_ID, knowledge="(nothing new to extract)"
+            )
+
+        assert any("resumed_pending_subjects" in str(w) for w in result.get("warnings", [])), (
+            f"Resume must be announced; warnings={result.get('warnings')}"
+        )
+        processed = {o["title"] for o in result.get("objects", [])}
+        assert processed == {"Xeno", "Yara"}, (
+            f"Both pending subjects must be processed on resume; got {processed}"
+        )
+        assert worklog.load_pending(FAKE_SPACE_ID) == [], (
+            "Work-log must be drained (and compacted) after a successful resume"
         )
 
     def test_source_type_conversation_branch(self, monkeypatch, tmp_path):

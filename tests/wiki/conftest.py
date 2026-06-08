@@ -61,6 +61,17 @@ def _make_wiki_log_response(space_id: str = FAKE_SPACE_ID) -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _isolate_wiki_worklog_dir(monkeypatch, tmp_path):
+    """Point the durable subject work-log at a per-test tmp dir.
+
+    The worklog is local state under ~/.local/share by default; isolating it per
+    test keeps runs hermetic and prevents one test's pending subjects from
+    leaking into another that shares a space_id.
+    """
+    monkeypatch.setenv("WIKI_WORKLOG_DIR", str(tmp_path / "wiki-worklog"))
+
+
 @pytest.fixture
 def anytype_env(monkeypatch):
     """Set Anytype env vars to point at the test base URL with a fake API key."""

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`wiki_remember` no longer silently drops subjects.** Previously a narration
+  that extracted more than a fixed number of subjects (a hard `_MAX_SUBJECTS = 8`
+  "fan-out cap") had the remainder **truncated and discarded** with only a
+  `subject_cap_exceeded` warning — unbounded, irrecoverable data loss with no
+  record of *what* was lost, and applied inconsistently (`wiki_ingest` had no
+  such cap). The cap is removed. Every extracted subject is now recorded in a
+  durable per-space **work-log** (`wiki/worklog.py`) before the drain begins, and
+  any subjects left pending by an interrupted run (crash, kill, timeout) are
+  folded back in and finished on the next run. Consolidation is idempotent, so
+  resuming a partially-applied subject converges to a no-op. **No subject is ever
+  dropped.** The work-log is a stdlib-only JSONL file under `WIKI_WORKLOG_DIR`
+  (defaults beside the lock dir) — no new runtime dependency and no service.
+
+### Fixed
+
+- **`wiki_query` file-back no longer pollutes the graph with citation edges that
+  `wiki_lint` flags as critical.** Filing a query answer back used to write a
+  reciprocal back-reference from every cited entity/concept into its
+  `wiki_relations`/`wiki_related` set. That conflated "semantically relates to"
+  with "was cited by", surfaced query objects as entity neighbours / duplicate
+  candidates, and — because the reverse edge lives under a different key
+  (`wiki_drew_from`) than lint's symmetry check reads — produced a wave of false
+  `asymmetric_relation` findings (one per cited-object × query). File-back now
+  writes only the forward `wiki_drew_from` on the query object; the reverse
+  "cited by" direction is served by Anytype backlinks (auto-derived).
+- **`wiki_lint` no longer false-flags genuinely symmetric relations** when an
+  object's `backlinks` list is non-empty but omits the peer. The
+  `asymmetric_relation` check now treats backlinks and symmetric-outbound as two
+  independent confirmations (either suffices) instead of trusting backlinks
+  alone when present.
+
 ## [0.6.1] - 2026-06-07
 
 ### Fixed

@@ -14,6 +14,11 @@ from pathlib import Path
 # Default lock directory (resolved at call time via lock_dir()).
 DEFAULT_WIKI_LOCK_DIR = os.path.expanduser("~/.local/share/anytype-llm-wiki/locks")
 
+# Default work-log directory (resolved at call time via worklog_dir()). Holds the
+# durable per-space subject work-log that guarantees no extracted subject is lost
+# if a remember/ingest drain is interrupted (crash, kill, timeout).
+DEFAULT_WIKI_WORKLOG_DIR = os.path.expanduser("~/.local/share/anytype-llm-wiki/worklog")
+
 # Placeholder extraction model for the v0.3.0 extraction pipeline.
 DEFAULT_WIKI_EXTRACT_MODEL = "qwen2.5:7b"
 
@@ -250,3 +255,12 @@ def fetch_extra_ports() -> list[int]:
 def lock_dir_path() -> Path:
     """Convenience: WIKI_LOCK_DIR resolved to a pathlib.Path at call time."""
     return Path(lock_dir())
+
+
+def worklog_dir() -> str:
+    """Resolve WIKI_WORKLOG_DIR from the environment at call time.
+
+    Falls back to the default under ~/.local/share when unset. Resolved per-call
+    (not cached) so tests can monkeypatch ``WIKI_WORKLOG_DIR``.
+    """
+    return os.environ.get("WIKI_WORKLOG_DIR", DEFAULT_WIKI_WORKLOG_DIR)
