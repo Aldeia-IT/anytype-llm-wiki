@@ -615,14 +615,28 @@ def _run_remember(
         for rel in relations:
             if not isinstance(rel, dict):
                 continue
-            from_id = name_to_id.get(normalize_title(rel.get("from", "")))
-            to_id = name_to_id.get(normalize_title(rel.get("to", "")))
+            from_name = rel.get("from", "")
+            to_name = rel.get("to", "")
             label = rel.get("label", "related")
+            from_id = name_to_id.get(normalize_title(from_name))
+            to_id = name_to_id.get(normalize_title(to_name))
+            # Cross-batch / resume: an endpoint may name a subject that was
+            # written by a PRIOR (interrupted) run, so it isn't in this run's
+            # name_to_id. Resolve it against existing objects before giving up,
+            # otherwise a relation spanning a crash boundary would be lost.
+            if from_id is None:
+                from_id = _resolve_existing_endpoint(
+                    client, space_id, from_name, name_to_id, kind_by_id
+                )
+            if to_id is None:
+                to_id = _resolve_existing_endpoint(
+                    client, space_id, to_name, name_to_id, kind_by_id
+                )
             if from_id and to_id:
                 rel_tuples.append((from_id, to_id, label))
                 endpoint_objs.extend([from_id, to_id])
             else:
-                for endpoint_name in (rel.get("to"), rel.get("from")):
+                for endpoint_name in (to_name, from_name):
                     if endpoint_name and normalize_title(endpoint_name) not in name_to_id:
                         result["warnings"].append(
                             f"relation_endpoint_unresolved: {endpoint_name}"
@@ -664,8 +678,13 @@ def _run_remember(
 
     # Every subject in this run's work list was attempted exactly once above, so
     # mark them all done and compact the durable work-log. If the drain had been
-    # interrupted before reaching here, the log would persist and the next run
-    # would resume the outstanding subjects (no loss).
+    # interrupted (crash/kill/timeout) before reaching here, the log persists and
+    # the next run resumes the outstanding subjects — that is the no-drop scope.
+    # NOTE: a subject whose write hit a per-subject API error above (action=
+    # "error", status=partial) is ALSO marked done here, on purpose: the error is
+    # reported (not silently dropped), and leaving it pending would re-run a
+    # deterministically-failing subject forever. Crash-resume covers process
+    # death; per-subject API errors are surfaced, not retried.
     for subj in subjects:
         _safe_mark_done(space_id, subj.get("_work_id"), subj.get("_id"), result)
     _safe_compact(space_id, result)
@@ -675,6 +694,37 @@ def _run_remember(
     # n. auto-reindex (non-fatal).
     _reindex_guarded(space_id, result)
     return result
+
+
+def _resolve_existing_endpoint(
+    client: WikiClient,
+    space_id: str,
+    name: str,
+    name_to_id: dict[str, str],
+    kind_by_id: dict[str, str],
+) -> str | None:
+    """Resolve a relation-endpoint name to an EXISTING object id (entity or
+    concept) for cross-batch / resume relations whose endpoint was written by a
+    prior run. Returns the id or None; caches a hit into name_to_id/kind_by_id so
+    the unresolved-warning check and _write_bidirectional_relations see it.
+    """
+    if not name:
+        return None
+    key = normalize_title(name)
+    if key in name_to_id:
+        return name_to_id[key]
+    for type_key, subj_kind in (("wiki_entity", "entity"), ("wiki_concept", "concept")):
+        try:
+            res = resolve_entity(client, space_id, type_key, name)
+        except (httpx.HTTPError, KeyError, ValueError, TypeError):
+            continue
+        if res.get("action") == "update":
+            tid = (res.get("target") or {}).get("id")
+            if tid:
+                name_to_id[key] = tid
+                kind_by_id[tid] = subj_kind
+                return tid
+    return None
 
 
 def _safe_load_pending(space_id: str, result: dict) -> list[dict]:

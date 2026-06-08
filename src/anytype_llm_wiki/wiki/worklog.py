@@ -17,12 +17,17 @@ Design notes
   the same local-state model the server already uses). It is *not* a database
   and *not* a service.
 - **Crash safety.** Each record is a single appended line followed by
-  ``flush + os.fsync``. A process that dies mid-append can only corrupt the
-  trailing line; the replay skips an unparseable final line. Once a ``begin``
-  record is durably written, its subjects survive a crash.
-- **Serialization.** Writers always hold the per-space ingest lock (the caller's
-  responsibility), so there is never more than one concurrent writer per file.
-  ``load_pending`` is a read-only replay and is safe without the lock.
+  ``flush + os.fsync``; the **first** write to a new log also fsyncs the parent
+  directory so the new directory entry itself is durable. A process that dies
+  mid-append can corrupt at most one line — replay skips *any* unparseable line
+  (a torn trailing write is the common case, but a mid-file partial — e.g. a
+  degraded-mode short write — is skipped just the same). Once a ``begin`` record
+  is durably written (and ``begin`` returns), its subjects survive a crash.
+- **Serialization.** ALL operations — ``begin``, ``mark_done``, ``clear``,
+  ``compact``, and even the read-only ``load_pending`` — must be called while
+  holding the per-space ingest lock. The lock is what guarantees a single writer
+  per file and makes ``compact``'s read-then-remove atomic with respect to a
+  concurrent ``begin``. (The current call sites in ``remember.py`` all hold it.)
 - **Append-only with tombstones.** ``done`` and ``clear`` are appended, never
   rewritten in place. ``compact`` deletes the file once nothing is pending.
 """
@@ -75,9 +80,35 @@ def log_path(space_id: str) -> str:
     return os.path.join(_worklog_dir(), f"work-{_safe_space_id(space_id)}.jsonl")
 
 
+def _fsync_dir(dir_path: str) -> None:
+    """fsync a directory so a newly-created entry within it is crash-durable.
+
+    An ``fsync`` on a file descriptor flushes the file's *data*, not the parent
+    directory metadata that makes the file findable after a crash — so the first
+    write to a brand-new log needs this to honor the no-drop guarantee. Best
+    effort: platforms that disallow opening a directory for fsync just skip it;
+    a failure here never breaks the append (the file data is already fsync'd).
+    """
+    try:
+        dfd = os.open(dir_path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dfd)
+
+
 def _append(space_id: str, record: dict) -> None:
-    """Append one JSON record as a line, durably (flush + fsync)."""
+    """Append one JSON record as a line, durably (flush + fsync).
+
+    On first creation of the log file, the parent directory is fsync'd too so the
+    new directory entry survives a crash (see ``_fsync_dir``).
+    """
     path = log_path(space_id)
+    newly_created = not os.path.exists(path)
     line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
     fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
     try:
@@ -85,6 +116,8 @@ def _append(space_id: str, record: dict) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+    if newly_created:
+        _fsync_dir(os.path.dirname(path))
 
 
 def begin(space_id: str, subjects: list[dict], meta: dict | None = None) -> tuple[str, list[dict]]:
@@ -203,6 +236,12 @@ def compact(space_id: str) -> None:
     """Delete the log file when nothing is pending (all batches cleared or done).
 
     A no-op if any subject is still outstanding. Safe to call after every drain.
+
+    MUST hold the per-space ingest lock: this does a non-atomic
+    ``load_pending`` → ``os.remove``, so a concurrent ``begin`` between the check
+    and the remove would delete a file that just gained pending work. The lock
+    serializes them. (This matters for any future chunked-release design that
+    releases the lock mid-drain.)
     """
     if load_pending(space_id):
         return

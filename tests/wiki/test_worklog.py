@@ -115,3 +115,18 @@ def test_resume_after_restart_returns_only_undone():
 
 def test_load_pending_absent_file_is_empty():
     assert worklog.load_pending("space-never-written") == []
+
+
+def test_first_append_fsyncs_parent_directory(monkeypatch):
+    """The first write to a new log fsyncs the parent dir (so the new directory
+    entry is crash-durable); subsequent appends to the existing file do not."""
+    calls = []
+    monkeypatch.setattr(worklog, "_fsync_dir", lambda d: calls.append(d))
+
+    work_id, enriched = worklog.begin(
+        SPACE, [{"name": "A", "kind": "entity", "facts": ""}]
+    )
+    assert len(calls) == 1, f"first append (file creation) must fsync the dir; got {calls}"
+
+    worklog.mark_done(SPACE, work_id, enriched[0]["id"])
+    assert len(calls) == 1, "appends to an existing file must NOT re-fsync the dir"

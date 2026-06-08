@@ -2423,6 +2423,11 @@ class TestCorePipeline:
         monkeypatch.setattr(
             "anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False
         )
+        # Keep the test hermetic — no live qdrant/indexer reindex on the success phase.
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember._maybe_reindex",
+            lambda *a, **k: None, raising=False,
+        )
 
         entities = [
             {"name": "Xeno", "kind": "entity", "facts": "about Xeno"},
@@ -2487,6 +2492,101 @@ class TestCorePipeline:
         )
         assert worklog.load_pending(FAKE_SPACE_ID) == [], (
             "Work-log must be drained (and compacted) after a successful resume"
+        )
+
+    def test_worklog_failure_degrades_without_dropping_subjects(self, monkeypatch, tmp_path):
+        """Degraded mode (M4): when the durable work-log itself fails (OSError on
+        begin), every subject is STILL processed in-process — never dropped — and
+        the run only warns that crash-resume isn't guaranteed."""
+        _patch_decision_ok(monkeypatch, tmp_path)
+
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False
+        )
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember._maybe_reindex", lambda *a, **k: None, raising=False
+        )
+        entities = [
+            {"name": f"Deg{i}", "kind": "entity", "facts": f"facts {i}"} for i in range(5)
+        ]
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value={"entities": entities, "concepts": []}), raising=False,
+        )
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.resolve_entity",
+            MagicMock(return_value={"action": "create"}), raising=False,
+        )
+        # The work-log is unavailable: begin raises OSError.
+        import anytype_llm_wiki.wiki.remember as _rmod
+        monkeypatch.setattr(
+            _rmod.worklog, "begin",
+            MagicMock(side_effect=OSError("disk full")), raising=False,
+        )
+
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="five degraded subjects")
+
+        # All 5 subjects processed despite the work-log being down — NO drop.
+        assert len(result.get("objects", [])) == 5, (
+            f"Degraded work-log must not drop subjects; got {result.get('objects')}"
+        )
+        assert any("worklog_begin_failed" in str(w) for w in result.get("warnings", [])), (
+            f"Degraded run must warn worklog_begin_failed; warnings={result.get('warnings')}"
+        )
+
+    def test_errored_subject_marked_done_does_not_resume_forever(self, monkeypatch, tmp_path):
+        """A subject whose write hits a deterministic, caught API error (M4) is
+        marked done and does NOT linger in the work-log to be retried forever."""
+        _patch_decision_ok(monkeypatch, tmp_path)
+        from anytype_llm_wiki.wiki import worklog
+
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False
+        )
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember._maybe_reindex", lambda *a, **k: None, raising=False
+        )
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value={"entities": [
+                {"name": "Boom", "kind": "entity", "facts": "f"}], "concepts": []}),
+            raising=False,
+        )
+        # resolve_entity raises a CAUGHT error (ValueError) → per-subject error path.
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.resolve_entity",
+            MagicMock(side_effect=ValueError("deterministic API error")), raising=False,
+        )
+
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="boom")
+
+        assert result.get("status") == "partial", result
+        assert any(o.get("action") == "error" for o in result.get("objects", [])), result
+        # The errored subject must be marked done + compacted away — not resumed.
+        assert worklog.load_pending(FAKE_SPACE_ID) == [], (
+            "A deterministically-erroring subject must be marked done, not left pending"
         )
 
     def test_source_type_conversation_branch(self, monkeypatch, tmp_path):
