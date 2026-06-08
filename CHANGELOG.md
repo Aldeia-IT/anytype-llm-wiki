@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-08
+
+### Fixed
+
+- **`asymmetric_relation` lint no longer false-flags backlink-reachable directed
+  edges.** The check confirmed reciprocity by reading the **source** object's
+  `backlinks` (plus the target's forward outbound) — but a directed `A → B`
+  relation written only on `A`'s forward array surfaces its reverse as an Anytype
+  **backlink on `B`**, which the check never read. Result: every healthy directed
+  edge whose reverse lived only as a backlink (common on merge-target hub
+  entities) was reported as a false Critical. The check now confirms reciprocity
+  when the **target** references the source via its `backlinks` **or** its forward
+  outbound (the source-side backlink remains an additional signal). Only genuinely
+  dangling edges (target gone / no reverse at all) are reported. On a real
+  4-document space this took the count from 22 false Criticals to 0.
+
+### Changed
+
+- **Severity recalibration.** `asymmetric_relation` is now **High** (was Critical)
+  and `contradiction_unresolved` is now **Critical** (was High) — a semantic
+  conflict in asserted knowledge is the most user-visible defect and now outranks
+  structural plumbing. (`check` names are unchanged.)
+- **Document headings are no longer promoted to wiki objects when LLM extraction
+  succeeds.** `wiki_ingest` derived one candidate entity per markdown heading
+  (the document title + every section heading like "Overview"/"Open Questions").
+  That heading-derived set is now the deterministic **fallback** only: when
+  `extract()` returns real entities/concepts, those become the object set and the
+  scaffolding is dropped — removing document-structure noise from the graph and
+  from dedup. When extraction is unavailable/empty, heading candidates are
+  retained, preserving the "works without the LLM" durability guarantee.
+
 ## [0.7.1] - 2026-06-08
 
 ### Fixed

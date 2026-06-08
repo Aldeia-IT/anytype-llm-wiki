@@ -2216,6 +2216,130 @@ class TestReingestIdempotency:
         )
 
 
+class TestHeadingFallbackSuppression:
+    """v0.7.2: heading-derived candidates are the deterministic FALLBACK only. When
+    extract() yields real entities/concepts, document scaffolding (the title + section
+    headings like 'Overview'/'Open Questions') must NOT be promoted to wiki objects."""
+
+    @respx.mock
+    def test_extracted_entities_replace_heading_candidates(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        # Extraction succeeds with a real entity → heading scaffolding is dropped.
+        monkeypatch.setattr(
+            _ingest, "extract",
+            lambda **kw: {"entities": [{"name": "Gnosis Chain",
+                                        "description": "An EVM-compatible L1."}],
+                          "concepts": []},
+        )
+
+        store: dict = {}
+        counter = {"n": 0}
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            import json as _json
+            from anytype_llm_wiki.wiki.util import normalize_title
+            url = str(request.url)
+            if "/search" in url:
+                q = normalize_title(_json.loads(request.content).get("query", ""))
+                data = [
+                    {"id": o["id"], "name": o["name"], "type": {"key": tk}, "properties": []}
+                    for (n, tk), o in store.items() if n == q
+                ]
+                return httpx.Response(200, json={"data": data, "pagination": {"has_more": False}})
+            if "/objects" in url:
+                payload = _json.loads(request.content)
+                name = payload.get("name", "")
+                tk = payload.get("type_key", "")
+                counter["n"] += 1
+                oid = f"obj-{counter['n']}"
+                store[(normalize_title(name), tk)] = {"id": oid, "name": name}
+                return httpx.Response(201, json={"object": {"id": oid, "name": name}})
+            return httpx.Response(200, json={"response": "not-json"})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        md_file = tmp_path / "doc.md"
+        md_file.write_text(
+            "# My Document Title\n\nintro paragraph.\n\n"
+            "## Overview\n\nsome overview text about the system.\n\n"
+            "## Open Questions\n\n- a question\n"
+        )
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=str(md_file), space_id=FAKE_SPACE_ID)
+
+        assert result["status"] == "ok", result
+        created = {o["title"] for o in result.get("objects_created", [])}
+        assert "Gnosis Chain" in created, (
+            f"extracted entity must be created; got {created}"
+        )
+        for heading in ("My Document Title", "Overview", "Open Questions"):
+            assert heading not in created, (
+                f"heading {heading!r} must NOT be promoted to an entity when extraction "
+                f"succeeds; got {created}"
+            )
+
+    @respx.mock
+    def test_headings_still_used_when_extraction_empty(self, monkeypatch, tmp_path):
+        """Fallback guard: with NO extracted entities, heading-derived candidates are
+        retained (the 'works without the LLM' durability guarantee is preserved)."""
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setattr(_ingest, "extract", lambda **kw: {"entities": [], "concepts": []})
+
+        store: dict = {}
+        counter = {"n": 0}
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            import json as _json
+            from anytype_llm_wiki.wiki.util import normalize_title
+            url = str(request.url)
+            if "/search" in url:
+                q = normalize_title(_json.loads(request.content).get("query", ""))
+                data = [
+                    {"id": o["id"], "name": o["name"], "type": {"key": tk}, "properties": []}
+                    for (n, tk), o in store.items() if n == q
+                ]
+                return httpx.Response(200, json={"data": data, "pagination": {"has_more": False}})
+            if "/objects" in url:
+                payload = _json.loads(request.content)
+                name = payload.get("name", "")
+                tk = payload.get("type_key", "")
+                counter["n"] += 1
+                oid = f"obj-{counter['n']}"
+                store[(normalize_title(name), tk)] = {"id": oid, "name": name}
+                return httpx.Response(201, json={"object": {"id": oid, "name": name}})
+            return httpx.Response(200, json={"response": "not-json"})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=lambda request, **kw: httpx.Response(200, json={"object": {"id": "patched"}}))
+
+        md_file = tmp_path / "doc.md"
+        md_file.write_text("# Sole Section\n\ndurable body text.\n")
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=str(md_file), space_id=FAKE_SPACE_ID)
+
+        created = {o["title"] for o in result.get("objects_created", [])}
+        assert "Sole Section" in created, (
+            f"with empty extraction, the heading-derived candidate must still be "
+            f"created (fallback durability); got {created}"
+        )
+
+
 class TestWriteWikilogRegressionGuards:
     """AC-R12b/B6, SF15 — regression guards for #284 shipped behavior (MUST PASS now)."""
 

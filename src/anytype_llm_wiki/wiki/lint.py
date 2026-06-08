@@ -154,13 +154,25 @@ def _outbound(obj: dict) -> list[str]:
 
 
 def _backlinks_inbound(obj: dict) -> tuple[bool, set[str]]:
-    """D1 inbound resolution from the get_object ``backlinks`` field.
+    """Inbound resolution from the get_object ``backlinks`` data.
 
-    Returns ``(primary_available, inbound_ids)``. A non-empty list backlinks is the
-    PRIMARY path. Anything else (absent / empty / None / dict / scalar) → fallback
+    Returns ``(primary_available, inbound_ids)``. A non-empty backlinks list is the
+    PRIMARY path; anything else (absent / empty / None / dict / scalar) → fallback
     needed (``(False, set())``); a malformed value must never raise (SF10).
+
+    The live Anytype ``get_object`` serves backlinks as a PROPERTY
+    (``properties[key="backlinks"].objects``), NOT a top-level ``backlinks`` key —
+    so the reverse direction of a directed relation lives "through properties." We
+    read the top-level form first (the historical/D1 fixture shape) and fall back
+    to the property form (the real API shape). Reading only the top-level key left
+    this signal dead against the real API, false-flagging every backlink-only
+    directed edge as ``asymmetric_relation``.
     """
     bl = obj.get("backlinks")
+    if not (isinstance(bl, list) and bl):
+        prop = _prop(obj, "backlinks")
+        if isinstance(prop, dict):
+            bl = prop.get("objects")
     if isinstance(bl, list) and bl:
         return True, set(_parse_relation_elements(bl))
     return False, set()
@@ -376,7 +388,7 @@ def wiki_lint(
             tk = _type_of(o)
             has_primary, inbound = _backlinks_inbound(o)
 
-            # (a) asymmetric_relation (Critical) + stale_citation_edge (High)
+            # (a) asymmetric_relation (High) + stale_citation_edge (High)
             for target in _outbound(o):
                 t_obj = by_id.get(target)
                 # Stale citation edge: an OLD wiki_query file-back wrote query ids
@@ -392,24 +404,35 @@ def wiki_lint(
                         "(see docs/known-limitations §11 / the prune-citations command)",
                     ))
                     continue
-                # Two independent signals confirm reciprocity; either suffices.
-                # The backlinks (primary) signal is NOT authoritative on its own:
-                # a populated backlinks list may carry unrelated inbound links
-                # (e.g. citation provenance) and omit a genuinely symmetric peer.
-                # So when backlinks doesn't confirm, fall through to the
-                # symmetric-outbound check rather than flagging immediately.
-                reciprocal = has_primary and target in inbound
+                # Reciprocity == the reverse direction is REACHABLE by any mechanism.
+                # A directed A->B relation written only on A's forward array still
+                # produces an Anytype BACKLINK on B (the reverse lives "through
+                # properties" on the target), so the authoritative question is
+                # whether the TARGET references the source — via its forward outbound
+                # OR its backlinks. Three signals, any one suffices:
+                #   (1) source's backlinks list the target   (symmetric double-write)
+                #   (2) target's forward outbound lists source (target -> source)
+                #   (3) target's backlinks list the source   (source -> target, the
+                #       Anytype auto-reverse — the signal the old check never read,
+                #       which false-flagged every backlink-only directed edge).
+                # Only a genuinely dangling edge (target gone, or no reverse at all)
+                # survives all three and is reported.
+                reciprocal = has_primary and target in inbound          # (1)
                 if not reciprocal:
                     t_obj = t_obj or _fetch_cached(
                         read_client, space_id, target, cache, enum_map
                     )
-                    reciprocal = (
-                        isinstance(t_obj, dict) and o["id"] in set(_outbound(t_obj))
-                    )
+                    if isinstance(t_obj, dict):
+                        if o["id"] in set(_outbound(t_obj)):            # (2)
+                            reciprocal = True
+                        else:
+                            t_has_primary, t_inbound = _backlinks_inbound(t_obj)
+                            reciprocal = t_has_primary and o["id"] in t_inbound  # (3)
                 if not reciprocal:
                     findings.append(_finding(
-                        "critical", "asymmetric_relation", o, space_id,
-                        f"relation {o['id']} -> {target} is not reciprocated",
+                        "high", "asymmetric_relation", o, space_id,
+                        f"relation {o['id']} -> {target} is not reciprocated "
+                        "(target has no forward relation or backlink to the source)",
                     ))
 
             # inbound presence (for orphan / pipeline_orphan)
@@ -432,10 +455,11 @@ def wiki_lint(
                     ))
 
             # (c) pipeline_orphan (High) — timestamp heuristic; zero-relation AND
-            # zero-backlink (parse-empty backlinks), near an ingest failure log.
+            # zero-backlink, near an ingest failure log. Use _backlinks_inbound so
+            # the real-API property-shaped backlinks are read (not just top-level).
             if not _outbound(o):
-                bl = o.get("backlinks")
-                backlinks_empty = not (isinstance(bl, list) and _parse_relation_elements(bl))
+                bl_present, _bl_ids = _backlinks_inbound(o)
+                backlinks_empty = not bl_present
                 if backlinks_empty:
                     ts = _effective_source_ts(o)
                     if ts is None:
@@ -449,7 +473,9 @@ def wiki_lint(
                                 f"{window}s of an ingest relation_rollback failure",
                             ))
 
-            # (d) contradiction_unresolved (High) — active; wiki_entity only (SF9)
+            # (d) contradiction_unresolved (Critical) — active; wiki_entity only (SF9).
+            # Severity ranks ABOVE structural checks (asymmetric/orphan are High): a
+            # semantic conflict in asserted knowledge is the most user-visible defect.
             if tk == "wiki_entity":
                 contra_prop = _prop(o, "wiki_contradictions")
                 contradictions = (
@@ -460,7 +486,7 @@ def wiki_lint(
                 last_reviewed = reviewed_prop.get("date") if reviewed_prop else None
                 if contradictions and not last_reviewed:
                     findings.append(_finding(
-                        "high", "contradiction_unresolved", o, space_id,
+                        "critical", "contradiction_unresolved", o, space_id,
                         f"{len(contradictions)} unresolved contradiction(s) — set "
                         "wiki_last_reviewed to resolve",
                     ))
