@@ -1250,6 +1250,100 @@ class TestDuplicateSweep:
         )
 
     @respx.mock
+    def test_title_duplicate_cross_kind_identical(self, monkeypatch):
+        """Title-based pass flags an entity and a concept that share a normalized
+        title — the cross-kind twin that type-scoped resolution never merges."""
+        entity = _make_entity("obj-reg-entity", name="Capoeira Genealogy Registry",
+                              relations=[], backlinks=[])
+        concept = _make_concept("obj-reg-concept", name="capoeira genealogy registry",
+                               relations=[], backlinks=[])
+        objects = [entity, concept]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(entity)
+        register(concept)
+
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(
+            _idx_mod, "semantic_search_core",
+            lambda *a, **k: [],  # isolate the title-based pass from the vector pass
+        )
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID, include_duplicates=True)
+
+        dups = result.get("potential_duplicates", [])
+        pair = {"obj-reg-entity", "obj-reg-concept"}
+        assert any({d["object_a"], d["object_b"]} == pair for d in dups), (
+            f"Cross-kind identical-title twin must be flagged; got {dups}"
+        )
+
+    @respx.mock
+    def test_title_duplicate_token_subset(self, monkeypatch):
+        """Title-based pass flags 'AXE' vs 'AXE token' (abbreviation/expansion) —
+        the false-negative the 0.92 fuzzy threshold and the vector sweep missed."""
+        a = _make_entity("obj-axe", name="AXE", relations=[], backlinks=[])
+        b = _make_entity("obj-axe-token", name="AXE token", relations=[], backlinks=[])
+        objects = [a, b]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(a)
+        register(b)
+
+        import anytype_llm_wiki.indexer as _idx_mod
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", lambda *a, **k: [])
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID, include_duplicates=True)
+
+        dups = result.get("potential_duplicates", [])
+        pair = {"obj-axe", "obj-axe-token"}
+        assert any({d["object_a"], d["object_b"]} == pair for d in dups), (
+            f"Token-subset duplicate must be flagged; got {dups}"
+        )
+
+    @respx.mock
+    def test_query_objects_excluded_from_duplicate_sweep(self, monkeypatch):
+        """A wiki_query object that shares a title with an entity must NOT be
+        flagged as a duplicate — Query objects are Q&A artifacts, not subjects."""
+        entity = _make_entity("obj-foo", name="Foo", relations=[], backlinks=[])
+        query_obj = {
+            "id": "obj-foo-query",
+            "name": "Foo",
+            "type": {"key": "wiki_query"},
+            "properties": [{"key": "wiki_answer", "text": "An answer mentioning Foo."}],
+            "backlinks": [],
+        }
+        objects = [entity, query_obj]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(entity)
+        register(query_obj)
+
+        import anytype_llm_wiki.indexer as _idx_mod
+        # Even if the vector backend returned the query as a candidate, the scoped
+        # sweep must exclude it. Return it to prove exclusion is by type, not luck.
+        monkeypatch.setattr(
+            _idx_mod, "semantic_search_core",
+            lambda *a, **k: [{"object_id": "obj-foo-query", "type": "wiki_query",
+                              "score": 0.78, "name": "Foo"}],
+        )
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID, include_duplicates=True)
+
+        dups = result.get("potential_duplicates", [])
+        assert not any(
+            "obj-foo-query" in (d["object_a"], d["object_b"]) for d in dups
+        ), f"Query objects must be excluded from the duplicate sweep; got {dups}"
+
+    @respx.mock
     def test_duplicate_sweep_excludes_outside_band(self, monkeypatch):
         """include_duplicates=True; score 0.60 (below floor) and 0.95 (>= 0.85 upper bound)
         both excluded from potential_duplicates[]. AC8.
