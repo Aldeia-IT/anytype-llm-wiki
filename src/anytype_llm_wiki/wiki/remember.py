@@ -305,7 +305,11 @@ def wiki_remember(
         if endpoint:
             check_remote_endpoint_consent(endpoint)
 
-        # f. per-space lock (HARD GATE AC-R-S2).
+        # f. per-space lock (HARD GATE AC-R-S2). Extraction runs INSIDE the lock
+        #    (in _run_remember) on purpose: a contender on a held lock then fails
+        #    fast WITHOUT first paying for a multi-minute extraction. See
+        #    docs/architecture.md "Concurrency model" for the lock-hold trade-off
+        #    and the (deferred) chunked-release design.
         try:
             with space_ingest_lock(space_id, knowledge[:50]):
                 return _run_remember(
@@ -332,7 +336,9 @@ def _run_remember(
     result["warnings"].extend(schema_warnings)
     status = "ok"
 
-    # g. extract (inside lock). model-not-pulled aborts before any write.
+    # g. extract (inside lock). model-not-pulled aborts before any write. Kept
+    #    under the lock so a contender fails fast without paying for extraction
+    #    first (see docs/architecture.md "Concurrency model").
     extracted = extract(markdown=knowledge, space_id=space_id)
     if isinstance(extracted, str):
         if "ollama_model_not_pulled" in extracted:

@@ -109,8 +109,15 @@ match) then resolves to the existing objects. Verified live and pinned by
 Residual caveats:
 - If `WIKI_EXTRACT_ENDPOINT` points at a non-deterministic remote model, re-extraction may vary and produce near-duplicate entities on re-ingest.
 - Resolution is title-based (exact + fuzzy ≥ 0.92; the embedding sweep is not yet implemented), so genuinely different surface forms of the same concept across *different* sources can still create separate objects.
+- Resolution is also **type-scoped**: the same normalized title as both a `wiki_entity` and a `wiki_concept` (a cross-kind twin) is never merged, and an abbreviation/expansion pair like "AXE" vs "AXE token" falls below the 0.92 threshold.
 
-Both are surfaced by the v0.5.0 lint potential-duplicate sweep (aldeia-box#286).
+These are now **detected** by the lint potential-duplicate sweep, which runs an
+embedding-independent **title pass** (identical normalized titles incl. cross-kind,
+plus token-subset pairs) alongside the vector pass, scoped to entity/concept
+objects so Query objects are never flagged. **Prevention at write time** (an
+embedding nearest-neighbour check inside `resolve_entity`) remains the deferred
+follow-up (aldeia-box#286); see
+[architecture §5](./architecture.md#5-entity-resolution--duplicate-handling).
 
 ## 7. Filed `wiki_query` answers surface only after the next reindex (compounding latency)
 
@@ -174,3 +181,38 @@ objects). The fix is deferred to **v0.5.0**: cache the object count / index size
 re-enumeration on every call. Tracked here rather than as a separate ticket
 (per maintainer decision); raised by the post-impl council and prior #285
 councils.
+
+## 10. `wiki_remember` holds the per-space lock for the whole (uncapped) drain
+
+`wiki_remember` no longer caps or drops subjects — every extracted subject is
+processed and durably logged (see [architecture §7](./architecture.md#7-the-no-drop-work-log-wikiworklog)).
+The per-space write lock is held for that whole drain, and it is **fail-fast**
+(`LOCK_EX | LOCK_NB`): a concurrent same-space `wiki_remember`/`wiki_ingest`
+gets `[DATA ERROR] ingest_in_progress` rather than queuing. For a large narration
+this hold can last as long as N sequential consolidations (each an LLM call).
+
+This is accepted: on a single-user / single-agent vault, concurrent same-space
+writes are rare, and the contender gets a clear, retryable error (no data is at
+risk — the no-drop work-log makes any interrupted drain resumable). The complete
+fairness fix — a **blocking-with-timeout** acquire plus **chunked lock release**
+(release every K subjects so writers interleave; K as a fairness boundary, not a
+data ceiling) — is **deferred on purpose**: it is an invasive refactor of the
+most critical path for marginal single-user benefit, and the work-log already
+makes mid-drain release safe to add later. See
+[architecture §6](./architecture.md#6-concurrency-model--the-per-space-lock).
+
+**Status:** accepted; revisit if multi-writer concurrency on one space becomes a
+real workload.
+
+## 11. Duplicate prevention is detect-only; cross-kind merges are deliberately not automatic
+
+The lint duplicate sweep now *detects* cross-kind twins and abbreviation/expansion
+pairs (§6 above), but `resolve_entity` does not yet *prevent* them at write time
+(the embedding-resolve step is the deferred aldeia-box#286 follow-up). Note that
+automatic merging across the entity↔concept boundary is intentionally **not**
+done even once embedding-resolve lands — consolidating a concept's definition
+into an entity (or vice-versa) changes meaning — so cross-kind twins will always
+be surfaced for human/agent merge rather than merged silently.
+
+**Status:** detection shipped; write-time prevention for same-kind near-dupes
+tracked (aldeia-box#286); cross-kind auto-merge intentionally out of scope.

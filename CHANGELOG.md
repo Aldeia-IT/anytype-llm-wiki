@@ -39,6 +39,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `asymmetric_relation` check now treats backlinks and symmetric-outbound as two
   independent confirmations (either suffices) instead of trusting backlinks
   alone when present.
+- **`wiki_lint` duplicate sweep catches real duplicates instead of Query
+  objects.** The sweep is now scoped to knowledge objects (entity/concept) — a
+  filed Query is never a source or a candidate (and a non-knowledge candidate is
+  dropped defensively even if the search backend ignores the type scope) — which
+  removes the false-positive class where every filed query looked like a
+  near-duplicate of its subject. A new embedding-independent **title pass** flags
+  identical normalized titles (including cross-kind entity/concept twins) and
+  token-subset pairs ("axe" ⊂ "axe token") that the 0.92 fuzzy threshold and the
+  vector pass miss. Detection only — it never mutates.
+
+### Documentation
+
+- Added [`docs/architecture.md`](docs/architecture.md) — the internals/architecture
+  orientation for contributors and agents: the write pipeline, consolidation and
+  how reality gets corrected, entity-resolution & duplicate handling, the
+  concurrency model (and why extraction stays inside the lock, plus the deferred
+  blocking-acquire/chunked-release design), the no-drop work-log, the file-back
+  citation model, and structural-health checks. `docs/known-limitations.md`
+  updated for the cap removal, the new dedup detection, and the lock-fairness
+  trade-off.
 
 ## [0.6.1] - 2026-06-07
 
