@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`wiki_remember` no longer caps at 8 subjects or emits the
+  `subject_cap_exceeded` warning.** It now processes *every* extracted subject
+  and writes a durable work-log under `WIKI_WORKLOG_DIR`. Anything depending on
+  the ≤8-object ceiling or that warning must adapt. (Mechanism under *Changed*.)
+
+### Added
+
+- **`prune-citations` CLI command** (`anytype-llm-wiki prune-citations
+  --space-id <id>`) — a one-time, idempotent sweep that removes stale
+  `wiki_query` citation edges left in entity/concept relation arrays by old
+  file-back. See *Migration* below.
+
+### Migration
+
+- If you ran `wiki_query` file-back on a space **before** this release, run
+  `prune-citations` once to clear the stale citation edges (now reported by
+  `wiki_lint` as `stale_citation_edge`). Fresh spaces need no action. Full steps
+  in [MIGRATIONS.md](MIGRATIONS.md).
+
 ### Changed
 
 - **`wiki_remember` no longer silently drops subjects.** Previously a narration
@@ -47,7 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   near-duplicate of its subject. A new embedding-independent **title pass** flags
   identical normalized titles (including cross-kind entity/concept twins) and
   token-subset pairs ("axe" ⊂ "axe token") that the 0.92 fuzzy threshold and the
-  vector pass miss. Detection only — it never mutates.
+  vector pass miss (with a stopword/length floor so generic single-token subsets
+  like "the" ⊂ "the project" don't generate noise). Detection only — it never
+  mutates.
+- **`wiki_lint` flags stale citation edges.** A new `stale_citation_edge` (High)
+  check reports entity/concept relations that point at a `wiki_query` object —
+  the leftover pollution from old file-back — and no longer double-reports them
+  as `asymmetric_relation`. Remediated by `prune-citations` (see *Added*).
+- **No-drop work-log hardening.** The first write to a new work-log now fsyncs
+  the parent directory (so the new file survives a crash, not just its data);
+  `wiki_remember` resume now resolves relation endpoints against existing objects
+  so a relation spanning a crash boundary is rewritten rather than lost; and the
+  work-log's locking contract (all ops under the per-space lock) is documented.
 
 ### Documentation
 

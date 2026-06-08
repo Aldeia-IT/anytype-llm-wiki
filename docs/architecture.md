@@ -138,13 +138,34 @@ blocks a concurrent same-space writer — is:
    between chunks so other writers interleave. K becomes a *fairness* boundary,
    not a data ceiling.
 
-This is **deferred on purpose**. It is an invasive refactor of the most critical,
-most-tested path, its real-world benefit is marginal on a single-user/single-
-agent vault (concurrent same-space writes are rare), and the no-loss work-log
-(§7) already makes mid-drain release *safe to add later* (an interrupted chunk
-just resumes). The current fail-fast behavior is correct and bounded; the
-contender gets a clear, retryable error. Revisit if multi-writer concurrency on
-one space becomes a real workload.
+This is **deferred on purpose**: it is an invasive refactor of the most critical,
+most-tested path, and its real-world benefit is marginal on a single-user/single-
+agent vault (concurrent same-space writes are rare). The current fail-fast
+behavior is correct and bounded; the contender gets a clear, retryable error.
+
+The work-log (§7) makes the *subject* side of mid-drain release safe — a
+released/re-acquired chunk re-runs `resolve_entity` under the lock, so a
+between-chunks create by another writer is re-resolved and converges without
+duplicates, and an interrupted chunk resumes. But "safe to add later" is **not**
+unconditional; chunked release additionally requires three things the current
+code does **not** yet provide, and they are prerequisites, not afterthoughts:
+
+1. **Relation-resume across chunk boundaries.** Resume now resolves relation
+   endpoints against existing objects (not just this-run writes), so a relation
+   spanning a boundary can be rewritten — but this path must be exercised at
+   every chunk boundary, not only after a crash.
+2. **A locked compaction contract.** `worklog.compact`/`load_pending` are
+   correct only while the per-space lock is held (a lockless `compact` could race
+   a `begin`); mid-drain release is exactly where that contract must be enforced.
+3. **Consolidation idempotency is best-effort, not guaranteed.** Re-processing a
+   resumed subject converges to a no-op only because the LLM consolidation
+   returns `changed=false`/equal text — it is not a code-level invariant (same
+   caveat as re-ingest determinism, known-limitations §6). A
+   released-and-reacquired chunk can therefore emit a spurious PATCH.
+
+So: deferral is justified, the subject-resume foundation is in place, but the
+chunked-release work must land these three before it is truly "safe." Revisit if
+multi-writer concurrency on one space becomes a real workload.
 
 ## 7. The no-drop work-log (`wiki/worklog.py`)
 
@@ -160,22 +181,33 @@ knowledge.
 
 The replacement is a **write-ahead log**:
 
-- A JSONL file per space under `WIKI_WORKLOG_DIR` (stdlib only — `json`/`os`; no
-  database, no service, no new dependency).
+- A JSONL file per space under `WIKI_WORKLOG_DIR` (stdlib only — `json`/`os`/
+  `uuid`/`hashlib`/`re`; no database, no service, no new dependency).
 - `begin()` records **every** extracted subject (with stable ids) and an
   `fsync` **before** the drain starts; `mark_done()` per subject; `compact()`
   deletes the file once all subjects are done.
-- Records are append-only single lines, each `flush + fsync`. A crash can only
-  corrupt the trailing line, which replay skips. Once `begin` returns, the
-  subjects are durable.
+- Records are append-only single lines, each `flush + fsync`; the **first** write
+  to a new log also fsyncs the parent directory so the new directory entry is
+  durable (an fd fsync flushes file data, not the metadata that makes the file
+  findable after a crash). Replay skips **any** unparseable line — a torn
+  trailing write is the common case, but a mid-file partial is skipped the same
+  way. Once `begin` returns, its subjects are durable.
 - On the next run, `load_pending()` replays the log and **folds any unfinished
   subjects back into the current batch**, finishing them. Consolidation is
-  idempotent, so re-processing a partially-applied subject converges to a no-op.
+  best-effort idempotent (it relies on the LLM returning equal text for an
+  already-applied subject — see §6 prerequisite 3), so re-processing converges to
+  a no-op in the normal case.
+- All work-log access **must hold the per-space lock** (it serializes writers and
+  makes `compact`'s read-then-remove atomic). The current call sites all do.
 
 All work-log calls in `remember.py` are guarded: a work-log failure degrades to
 in-process processing with a warning — never a dropped subject, never a broken
-run. The lock is held for the whole (now uncapped) drain; bounding that hold is
-the deferred §6 work, **not** a reason to cap or drop.
+run. **Scope of the no-drop guarantee:** it covers process death
+(crash/kill/timeout) and work-log I/O failure. A *per-subject* API error during a
+subject's write is reported (`status=partial`, `action="error"`) and that subject
+is marked done — it is surfaced, not silently dropped, and not retried forever.
+The lock is held for the whole (now uncapped) drain; bounding that hold is the
+deferred §6 work, **not** a reason to cap or drop.
 
 ## 8. Retrieval & the compounding loop (`wiki_query`)
 
@@ -200,6 +232,13 @@ flood of false `asymmetric_relation` (Critical) findings. The reverse "cited by"
 view is served for free by **Anytype backlinks**, auto-derived from
 `wiki_drew_from`.
 
+Older versions *did* write that reverse edge, so a space with pre-existing
+file-back history carries **stale citation edges** (query ids inside entity
+relation arrays). `wiki_lint` flags these as `stale_citation_edge` (High), and
+the one-time `prune-citations` CLI command (`query.prune_stale_citation_edges`)
+removes them idempotently — see [known-limitations §12](./known-limitations.md)
+and [MIGRATIONS](../MIGRATIONS.md).
+
 Injection note: the file-back loop is an amplifier (a poisoned synthesis,
 re-ingested, becomes future retrieval material). The structural bounds are the
 clean-synthesis precondition and the file-back gate — see
@@ -214,6 +253,9 @@ receipt):
   reciprocate. Reciprocity is confirmed by **either** the target appearing in
   `backlinks` **or** the target's symmetric outbound containing the source
   (either signal suffices — neither is trusted alone).
+- `stale_citation_edge` (High) — an entity/concept relation pointing at a
+  `wiki_query` object (a leftover from old file-back); remove with the
+  `prune-citations` command (§8).
 - `orphan` / `pipeline_orphan`, `contradiction_unresolved` (#287),
   `staleness`, oversized descriptions, `empty_type`, unreviewed/stale
   `needs-review`, and the opt-in `potential_duplicate` sweep (§5).

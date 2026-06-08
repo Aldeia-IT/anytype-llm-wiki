@@ -185,7 +185,7 @@ councils.
 ## 10. `wiki_remember` holds the per-space lock for the whole (uncapped) drain
 
 `wiki_remember` no longer caps or drops subjects — every extracted subject is
-processed and durably logged (see [architecture §7](./architecture.md#7-the-no-drop-work-log-wikiworklog)).
+processed and durably logged (see [architecture §7](./architecture.md#7-the-no-drop-work-log-wikiworklogpy)).
 The per-space write lock is held for that whole drain, and it is **fail-fast**
 (`LOCK_EX | LOCK_NB`): a concurrent same-space `wiki_remember`/`wiki_ingest`
 gets `[DATA ERROR] ingest_in_progress` rather than queuing. For a large narration
@@ -197,8 +197,11 @@ risk — the no-drop work-log makes any interrupted drain resumable). The comple
 fairness fix — a **blocking-with-timeout** acquire plus **chunked lock release**
 (release every K subjects so writers interleave; K as a fairness boundary, not a
 data ceiling) — is **deferred on purpose**: it is an invasive refactor of the
-most critical path for marginal single-user benefit, and the work-log already
-makes mid-drain release safe to add later. See
+most critical path for marginal single-user benefit, and the work-log makes the
+*subject* side of mid-drain release safe to add later — though chunked release
+additionally requires relation-resume at every boundary, a locked compaction
+contract, and acknowledges best-effort (not guaranteed) consolidation
+idempotency. See
 [architecture §6](./architecture.md#6-concurrency-model--the-per-space-lock).
 
 **Status:** accepted; revisit if multi-writer concurrency on one space becomes a
@@ -216,3 +219,26 @@ be surfaced for human/agent merge rather than merged silently.
 
 **Status:** detection shipped; write-time prevention for same-kind near-dupes
 tracked (aldeia-box#286); cross-kind auto-merge intentionally out of scope.
+
+## 12. Spaces with old `wiki_query` file-back history carry stale citation edges
+
+`wiki_query` file-back no longer writes a reciprocal citation edge into cited
+entities/concepts (it keeps only the forward `wiki_drew_from` on the Query
+object; the reverse "cited by" view is served by Anytype backlinks). But a space
+that ran file-back **before** this change still has query ids sitting inside
+entity/concept `wiki_relations`/`wiki_related` arrays. `wiki_lint` reports these
+as `stale_citation_edge` (High).
+
+Remediation is a one-time, idempotent CLI sweep:
+
+```bash
+uv run anytype-llm-wiki prune-citations --space-id <your-space-id>
+```
+
+It strips `wiki_query`-typed ids from entity/concept relation arrays and leaves
+all genuine relations untouched (a clean space reports `edges_pruned: 0`). See
+[MIGRATIONS](../MIGRATIONS.md) and
+[architecture §8](./architecture.md#8-retrieval--the-compounding-loop-wiki_query).
+
+**Status:** new file-back is clean; existing spaces need the one-time prune
+(detected by lint until run).
