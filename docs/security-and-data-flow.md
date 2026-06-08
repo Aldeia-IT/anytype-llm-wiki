@@ -28,3 +28,8 @@ The **file-back loop is itself an injection amplifier**: a poisoned synthesized 
 ## Secret hygiene
 
 Narrated `knowledge` passed to `wiki_remember` is stored as-is — only URL credentials in the optional `source` note are scrubbed. Do not narrate secrets you would not want stored in the wiki.
+
+**Local on-disk state.** Two local directories hold wiki state outside Anytype, on the same machine, created with restrictive permissions (dir `0700`, files `0600`):
+
+- `WIKI_LOCK_DIR` (default `~/.local/share/anytype-llm-wiki/locks`) — per-space advisory lock files; they carry only a holder pid/timestamp and a scrubbed source ref, no content.
+- `WIKI_WORKLOG_DIR` (default `~/.local/share/anytype-llm-wiki/worklog`) — the durable subject **work-log**. In the queue-submit model `wiki_remember` writes the extracted subjects (their names and `wiki_facts`/`wiki_definition` text — i.e. distilled fragments of your narrated `knowledge`) to a JSONL file here *before* they are drained into Anytype. Each record is deleted once its batch is fully applied (`compact`), but an interrupted/queued drain leaves the file on disk until the next drain (or a `wiki-drain` run) applies it. So narrated content lands transiently in this directory in plaintext; treat it as sensitive, the same as the vault. It never leaves the machine.

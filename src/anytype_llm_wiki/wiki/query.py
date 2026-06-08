@@ -52,9 +52,6 @@ _WIKI_TYPE_KEYS = ("wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query
 # Relation property keys carrying 1-hop neighbors per type.
 _RELATION_KEYS = ("wiki_relations", "wiki_related", "wiki_drew_from", "wiki_subjects")
 
-# Reciprocal back-reference relation key by cited-object type.
-_RECIPROCAL_REL_KEY = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
-
 # Slow-synthesis log signal threshold (seconds). WIKI_EXTRACT_TIMEOUT (600s) is the
 # deliberate accepted finite ceiling; this signals an unusually slow interactive call.
 _SLOW_SYNTH_SECONDS = 60.0
@@ -859,36 +856,93 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
         warnings.append(scrub_credentials(f"drew_from_write_failed: {exc}"))
         status = "partial"
 
-    # Reciprocal back-reference onto each pre-existing cited entity/concept via
-    # explicit READ-MERGE-WRITE (N1 — never a full overwrite, which would clobber
-    # the cited object's persisted relations down to just [query_id]).
-    for oid, type_key in cited_entries:
-        rel_key = _RECIPROCAL_REL_KEY.get(type_key)
-        if rel_key is None:
-            continue
-        obj = _refetch_for_writeback(read_client, space_id, oid, enum_map)
-        if obj is None:
-            warnings.append(f"reciprocal_read_failed: {oid}")
-            status = "partial"
-            continue
-        prior = _relation_objects_for_key(obj, rel_key)
-        merged = list(dict.fromkeys(prior + [query_id]))  # union, order-stable
-        try:
-            write_client.update_object(
-                space_id,
-                oid,
-                {"properties": [{"key": rel_key, "objects": merged}]},
-            )
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-            warnings.append(scrub_credentials(f"reciprocal_write_failed: {oid}: {exc}"))
-            status = "partial"
-
+    # NOTE: we deliberately do NOT write a reciprocal citation edge back onto the
+    # cited entities/concepts. A citation is directional provenance, not a
+    # bidirectional semantic relation — injecting query_ids into an entity's
+    # wiki_relations conflated "relates to that entity" with "was cited by that
+    # query", which (a) polluted the knowledge graph (queries surfaced as
+    # entity neighbours / duplicate-sweep candidates) and (b) produced a wave of
+    # false "asymmetric_relation" findings in wiki_lint, since the reverse edge
+    # lives under a different key (wiki_drew_from) than lint's symmetry check
+    # reads. The reverse "cited by" direction is served for free by Anytype
+    # backlinks, auto-derived from the query's wiki_drew_from above.
     return True, query_id, status, warnings
 
 
-def _relation_objects_for_key(obj: dict, rel_key: str) -> list[str]:
-    """Parse the current relation ``objects`` array for ``rel_key`` (dual-shape)."""
+def _relation_ids_for_key(obj: dict, rel_key: str) -> list[str]:
+    """Parse an object's relation ``objects`` array for ``rel_key`` (dual-shape)."""
     for prop in obj.get("properties", []) or []:
         if isinstance(prop, dict) and prop.get("key") == rel_key:
             return _parse_relation_elements(prop.get("objects"))
     return []
+
+
+_PRUNE_REL_KEY = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
+
+
+def prune_stale_citation_edges(space_id: str) -> dict:
+    """Remove stale citation edges left by the OLD ``wiki_query`` file-back.
+
+    Earlier versions wrote a filed Query object's id into each cited
+    entity/concept's ``wiki_relations``/``wiki_related`` array (a reciprocal
+    back-reference). That is graph pollution — a citation is directional
+    provenance served by Anytype backlinks, not a semantic relation — and on a
+    current wiki it shows up as ``stale_citation_edge`` lint findings. This
+    idempotent sweep strips any ``wiki_query``-typed id from entity/concept
+    relation arrays. Safe to re-run (a clean space yields 0 edges_pruned).
+
+    Returns ``{objects_scanned, objects_modified, edges_pruned, status, error,
+    warnings}``.
+    """
+    result: dict = {
+        "objects_scanned": 0,
+        "objects_modified": 0,
+        "edges_pruned": 0,
+        "status": "ok",
+        "error": None,
+        "warnings": [],
+    }
+    client = WikiClient()
+    try:
+        try:
+            objects = client.list_objects(space_id)
+        except (httpx.HTTPError, ConnectionError) as exc:
+            result["status"] = "error"
+            result["error"] = scrub_credentials(f"anytype_unavailable: {exc}")
+            return result
+
+        query_ids = {
+            o["id"] for o in objects
+            if isinstance(o, dict) and o.get("id") and _type_of(o) == "wiki_query"
+        }
+        if not query_ids:
+            return result  # nothing could be stale
+
+        for o in objects:
+            if not isinstance(o, dict):
+                continue
+            rel_key = _PRUNE_REL_KEY.get(_type_of(o))
+            if rel_key is None:
+                continue
+            result["objects_scanned"] += 1
+            current = _relation_ids_for_key(o, rel_key)
+            if not current:
+                continue
+            kept = [rid for rid in current if rid not in query_ids]
+            pruned = len(current) - len(kept)
+            if not pruned:
+                continue
+            try:
+                client.update_object(
+                    space_id, o["id"], {"properties": [{"key": rel_key, "objects": kept}]}
+                )
+                result["objects_modified"] += 1
+                result["edges_pruned"] += pruned
+            except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+                result["status"] = "partial"
+                result["warnings"].append(
+                    scrub_credentials(f"prune_failed {o['id']}: {exc}")
+                )
+        return result
+    finally:
+        client.close()

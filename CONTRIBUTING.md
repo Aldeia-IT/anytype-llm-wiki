@@ -34,8 +34,14 @@ src/anytype_llm_wiki/
     ├── wiki_client.py  # Anytype typed-schema REST client
     ├── config.py       # wiki-specific config
     ├── types_schema.py # Type/Property/tag schema definitions
+    ├── worklog.py      # durable subject work-log (no-drop / crash-resume)
     └── util.py         # shared helpers
 ```
+
+New to the codebase? Start with [**docs/architecture.md**](docs/architecture.md) —
+it explains the write pipeline, consolidation, entity-resolution & dedup, the
+concurrency model, and the no-drop work-log, with the rationale behind the
+load-bearing decisions. Keep it updated when you change behavior.
 
 ## How to contribute
 

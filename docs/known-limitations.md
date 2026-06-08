@@ -109,8 +109,15 @@ match) then resolves to the existing objects. Verified live and pinned by
 Residual caveats:
 - If `WIKI_EXTRACT_ENDPOINT` points at a non-deterministic remote model, re-extraction may vary and produce near-duplicate entities on re-ingest.
 - Resolution is title-based (exact + fuzzy ≥ 0.92; the embedding sweep is not yet implemented), so genuinely different surface forms of the same concept across *different* sources can still create separate objects.
+- Resolution is also **type-scoped**: the same normalized title as both a `wiki_entity` and a `wiki_concept` (a cross-kind twin) is never merged, and an abbreviation/expansion pair like "AXE" vs "AXE token" falls below the 0.92 threshold.
 
-Both are surfaced by the v0.5.0 lint potential-duplicate sweep (aldeia-box#286).
+These are now **detected** by the lint potential-duplicate sweep, which runs an
+embedding-independent **title pass** (identical normalized titles incl. cross-kind,
+plus token-subset pairs) alongside the vector pass, scoped to entity/concept
+objects so Query objects are never flagged. **Prevention at write time** (an
+embedding nearest-neighbour check inside `resolve_entity`) remains the deferred
+follow-up (aldeia-box#286); see
+[architecture §5](./architecture.md#5-entity-resolution--duplicate-handling).
 
 ## 7. Filed `wiki_query` answers surface only after the next reindex (compounding latency)
 
@@ -174,3 +181,69 @@ objects). The fix is deferred to **v0.5.0**: cache the object count / index size
 re-enumeration on every call. Tracked here rather than as a separate ticket
 (per maintainer decision); raised by the post-impl council and prior #285
 councils.
+
+## 10. Same-host-only concurrency; no read-after-write on submit
+
+`wiki_remember` uses a **queue-submit** model for fleet concurrency (see
+[architecture §6](./architecture.md#6-concurrency-model--queue-submit-single-drainer)):
+a submit appends its extracted subjects to the durable work-log lock-free and
+returns; whichever PID holds the per-space lock drains the queue (drain-until-dry).
+So independent agents (separate PIDs / terminals) on one host invoking
+`/wiki-learn` against the *same* space **never block and never lose writes** — the
+earlier fail-fast "rejected loser silently drops its learnings" gap is resolved.
+
+Two accepted constraints remain:
+
+- **No read-after-write.** A submit may return before its subjects are drained
+  (another writer is draining, or it queued). A `wiki_query` issued immediately
+  after a `wiki_remember` on the same agent may not see the just-submitted
+  subjects until they drain. This is intentional — the wiki is for the *next*
+  agent on a client/project, not for the submitter's own next line. A
+  `wiki-drain --space-id` CLI backstop forces a synchronous drain when needed.
+
+- **Cross-host: no protection.** `flock` is host-local. Agents writing the same
+  vault from *different* hosts or containers **without a shared `WIKI_LOCK_DIR`
+  and `WIKI_WORKLOG_DIR`** get no mutual exclusion → genuinely interleaved
+  `resolve→create` → duplicate entities and clobbered relation arrays.
+  **Operating constraint: write a shared vault from a single host** (agents may be
+  many PIDs, but one machine sharing the lock/worklog dirs). A cross-host guard
+  needs an Anytype-side compare-and-set, not a file lock.
+
+**Status:** queue-submit shipped (same-host fleet writes are safe); read-after-write
+intentionally not provided; cross-host single-writer-host constraint documented.
+
+## 11. Duplicate prevention is detect-only; cross-kind merges are deliberately not automatic
+
+The lint duplicate sweep now *detects* cross-kind twins and abbreviation/expansion
+pairs (§6 above), but `resolve_entity` does not yet *prevent* them at write time
+(the embedding-resolve step is the deferred aldeia-box#286 follow-up). Note that
+automatic merging across the entity↔concept boundary is intentionally **not**
+done even once embedding-resolve lands — consolidating a concept's definition
+into an entity (or vice-versa) changes meaning — so cross-kind twins will always
+be surfaced for human/agent merge rather than merged silently.
+
+**Status:** detection shipped; write-time prevention for same-kind near-dupes
+tracked (aldeia-box#286); cross-kind auto-merge intentionally out of scope.
+
+## 12. Spaces with old `wiki_query` file-back history carry stale citation edges
+
+`wiki_query` file-back no longer writes a reciprocal citation edge into cited
+entities/concepts (it keeps only the forward `wiki_drew_from` on the Query
+object; the reverse "cited by" view is served by Anytype backlinks). But a space
+that ran file-back **before** this change still has query ids sitting inside
+entity/concept `wiki_relations`/`wiki_related` arrays. `wiki_lint` reports these
+as `stale_citation_edge` (High).
+
+Remediation is a one-time, idempotent CLI sweep:
+
+```bash
+uv run anytype-llm-wiki prune-citations --space-id <your-space-id>
+```
+
+It strips `wiki_query`-typed ids from entity/concept relation arrays and leaves
+all genuine relations untouched (a clean space reports `edges_pruned: 0`). See
+[MIGRATIONS](../MIGRATIONS.md) and
+[architecture §8](./architecture.md#8-retrieval--the-compounding-loop-wiki_query).
+
+**Status:** new file-back is clean; existing spaces need the one-time prune
+(detected by lint until run).

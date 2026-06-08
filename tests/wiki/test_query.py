@@ -1969,13 +1969,14 @@ class TestRelationIntegrity:
         "TestReciprocalReadMergeWriteReplacement."
     )
     @respx.mock
-    def test_reciprocal_relation_read_merge_write(self, monkeypatch):
-        """AC#16 / SF11 / N1: pre-seed a cited entity's get_object with existing
-        wiki_relations=['e1','e2']; file back; assert the reciprocal PATCH onto that
-        entity carries ['e1','e2', query_id] (prior ids preserved, not clobbered).
+    def test_no_reciprocal_citation_edge_on_cited_entity(self, monkeypatch):
+        """File-back writes the forward wiki_drew_from on the query object but must
+        NOT inject the query_id back into a cited entity's wiki_relations/wiki_related.
 
-        Spec: 'explicit read-merge-write: (a) get_object; (b) parse current relation
-        objects; (c) compute union prior ∪ [query_id]; (d) update_object with merged.'
+        Citations are directional provenance, not bidirectional semantic relations;
+        the reverse "cited by" direction is served by Anytype backlinks (auto-derived
+        from wiki_drew_from). Writing the back-edge polluted entity relation sets and
+        produced false asymmetric_relation lint findings — so it was removed.
         """
         cited_id = "entity-cited-001"
         prior_relation_ids = ["e1", "e2"]
@@ -2053,31 +2054,35 @@ class TestRelationIntegrity:
         query_obj_id = result.get("query_object_id")
         assert query_obj_id is not None, f"Expected query_object_id in result: {result}"
 
-        # Find the PATCH onto the cited entity's wiki_relations
-        cited_patches = [
-            payload for (patched_id, payload) in patch_calls
+        # No PATCH may inject the query_id into a cited entity's relation set.
+        offending = [
+            (patched_id, prop)
+            for (patched_id, payload) in patch_calls
             if patched_id == cited_id
+            for prop in payload.get("properties", [])
+            if prop.get("key") in ("wiki_relations", "wiki_related")
+            and query_obj_id in (prop.get("objects") or [])
         ]
-        assert len(cited_patches) >= 1, (
-            f"Expected a PATCH onto cited entity {cited_id!r}. "
-            f"All patch targets: {[oid for oid, _ in patch_calls]}"
+        assert not offending, (
+            f"File-back must not write a reciprocal citation edge onto cited entity "
+            f"{cited_id!r}; offending PATCH props: {offending}"
         )
 
-        # The merged objects array must contain prior ids + the new query_id
-        for payload in cited_patches:
-            for prop in payload.get("properties", []):
-                if prop.get("key") in ("wiki_relations", "wiki_related"):
-                    merged_ids = prop.get("objects", [])
-                    assert "e1" in merged_ids, (
-                        f"Prior relation 'e1' must be preserved in merge. Got: {merged_ids}"
-                    )
-                    assert "e2" in merged_ids, (
-                        f"Prior relation 'e2' must be preserved in merge. Got: {merged_ids}"
-                    )
-                    assert query_obj_id in merged_ids, (
-                        f"New query_id={query_obj_id!r} must be in merged relations. "
-                        f"Got: {merged_ids}"
-                    )
+        # The forward provenance edge still lives on the query object.
+        drew_from_patches = [
+            prop
+            for (patched_id, payload) in patch_calls
+            if patched_id == query_obj_id
+            for prop in payload.get("properties", [])
+            if prop.get("key") == "wiki_drew_from"
+        ]
+        assert drew_from_patches, (
+            f"Expected a wiki_drew_from PATCH on the query object {query_obj_id!r}. "
+            f"Patch targets: {[oid for oid, _ in patch_calls]}"
+        )
+        assert cited_id in (drew_from_patches[0].get("objects") or []), (
+            f"wiki_drew_from must cite {cited_id!r}; got {drew_from_patches[0]}"
+        )
 
     @pytest.mark.skip(
         reason="respx 0.23.1 ordering: the catch-all respx.get() (returning list_resp) "

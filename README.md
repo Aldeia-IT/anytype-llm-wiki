@@ -144,7 +144,7 @@ wiki_query(space_id, "What do we know about Qdrant multi-tenancy?")
 | `reindex_anytype` | Trigger an incremental reindex. `space_id?` |
 | `wiki_bootstrap` | Provision the typed wiki schema in a space. `space_id`, `domain_tags?` |
 | `wiki_ingest` | Compile a source (URL or file) into curated, interlinked Objects with provenance; auto-reindex. `source`, `space_id`, `domain_hint?` |
-| `wiki_remember` | Consolidate an agent's natural-language narration into typed Objects (LLM merge/dedup/conflict-flag); auto-reindex. `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?` |
+| `wiki_remember` | Consolidate an agent's natural-language narration into typed Objects (LLM merge/dedup/conflict-flag). Fleet-safe **queue-submit**: concurrent writers never block or lose writes (no read-after-write). `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?` |
 | `wiki_query` | Query the wiki for a synthesized, source-cited answer (tiered retrieval + local synthesis); optionally file the answer back. `question`, `space_id`, `file_back?` |
 | `wiki_lint` | Read-only structural health check (contradictions, orphans, staleness, asymmetric relations, …), ranked by severity. `space_id`, `severity_threshold?`, `include_duplicates?` |
 
@@ -155,6 +155,7 @@ Extraction and synthesis run on local Ollama by default (`WIKI_EXTRACT_MODEL`, d
 - **Contradiction detection is automatic, but scoped.** At ingest, when an updated entity's new facts conflict with an already-linked peer, both are cross-linked via `wiki_contradictions` and left for review (`wiki_lint` flags them `High`). Today detection is **entity-only** and bounded to **linked entities** (`wiki_concept` scope deferred) — an entity that contradicts something it isn't linked to won't surface a finding yet. Don't over-trust a clean contradiction column.
 - **Cited synthesis + a compounding loop.** `wiki_query` answers only from retrieved Objects and cites them. A clean answer that meets the file-back gate (≥ 3 cited sources **and** ≥ 100 words, or `file_back=True`) is stored as a typed Query Object; after the next reindex it becomes retrievable itself — so the wiki improves with use. (Filed answers surface only after that reindex — see [known limitations](docs/known-limitations.md).)
 - **Safe repeated writes (`wiki_remember`).** Reworded duplicates merge, genuinely new facts append, superseding facts replace (the prior text is recorded in the WikiLog and recoverable), contradictions are flagged not overwritten, and re-asserting the same knowledge converges to a no-op.
+- **Fleet-safe concurrent writes (no read-after-write).** Independent agents on separate PIDs/terminals can `wiki_remember` the *same* space at once: each durably queues its subjects (a lock-free append to the work-log) and whichever process holds the per-space lock drains them — nobody blocks, nobody's learnings are dropped. A submit may return *before* its subjects are applied, so a `wiki_query` immediately afterward may not see them yet (the wiki is for the *next* agent, not the submitter's own next line). Same-host only — see [known limitations](docs/known-limitations.md). The `wiki-drain` CLI forces a synchronous drain when you need one.
 - **Tiered retrieval.** Below `WIKI_INDEX_THRESHOLD` (default 200) Objects, `wiki_query` reads the whole wiki directly (exhaustive and fast); above it, it uses vector search plus 1-hop neighborhood expansion.
 - **Incremental, schedulable indexing.** Only changed objects are re-embedded. For continuous indexing, run `reindex_anytype` on a schedule (cron/launchd — a sample plist ships in the repo). For high agent write-rates, set `WIKI_AUTO_REINDEX=false` and batch a scheduled reindex, since reindex cost scales with total space size.
 
@@ -182,6 +183,7 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_EXTRACT_ENDPOINT` | *(unset → local Ollama)* | Hosted LLM endpoint for extraction (off-machine; consent-gated) |
 | `WIKI_INDEX_THRESHOLD` | `200` | Object count at which `wiki_query` flips Tier 1 → Tier 2 |
 | `WIKI_AUTO_REINDEX` | `true` | Auto-reindex after each write (set `false` to batch via a scheduled reindex) |
+| `WIKI_LOCK_DIR` / `WIKI_WORKLOG_DIR` | `~/.local/share/anytype-llm-wiki/{locks,worklog}` | Host-local lock + durable subject work-log. A same-host agent fleet writing one shared vault **must share both** (see [known limitations §10](docs/known-limitations.md)); the work-log holds narrated content transiently — treat as sensitive ([data flow](docs/security-and-data-flow.md)) |
 
 Additional `WIKI_SYNTH_*` and `WIKI_LINT_*` tuning knobs exist with sensible defaults — you won't normally need them.
 
@@ -193,6 +195,8 @@ Additional `WIKI_SYNTH_*` and `WIKI_LINT_*` tuning knobs exist with sensible def
 - **Wiki pipeline** — LLM extraction → entity/concept resolution → typed Objects with bidirectional Relations → contradiction detection → cited synthesis.
 - **MCP server** — [FastMCP](https://github.com/jlowin/fastmcp) over stdio, exposing the seven tools above.
 - **doctor** — read-only preflight (Anytype, Qdrant, Ollama, embedding model).
+
+For the internals — the write pipeline, how consolidation corrects reality, entity-resolution & duplicate handling, the concurrency model, and the no-drop subject work-log — see [**Architecture & internals**](docs/architecture.md).
 
 ## Supply-chain posture
 

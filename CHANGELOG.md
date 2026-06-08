@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`wiki_remember` no longer caps at 8 subjects or emits the
+  `subject_cap_exceeded` warning.** It now processes *every* extracted subject
+  and writes a durable work-log under `WIKI_WORKLOG_DIR`. Anything depending on
+  the ≤8-object ceiling or that warning must adapt. (Mechanism under *Changed*.)
+- **`wiki_remember` is now queue-submit (no read-after-write); a held lock no
+  longer returns `ingest_in_progress`.** A concurrent same-space `wiki_remember`
+  now durably queues its subjects and returns `queued_for_drain` (status `ok`)
+  instead of erroring; a `wiki_query` issued immediately after may not see the
+  just-submitted subjects until they drain. `wiki_ingest` waits (bounded retry)
+  instead of failing fast, and only returns `ingest_in_progress` if the lock
+  stays held for the whole budget. (Concurrency model under *Changed*.)
+
+### Added
+
+- **Queue-submit concurrency for `wiki_remember`** — independent agents on
+  separate PIDs/terminals (a fleet running `/wiki-learn`) writing the *same*
+  space no longer block or lose writes. A submit appends its extracted subjects
+  to the durable work-log lock-free and returns; whichever PID holds the
+  per-space lock drains the queue **drain-until-dry**, sweeping up subjects other
+  PIDs appended mid-drain. `wiki_ingest` drains the queue before its own work
+  (holding the lock obligates draining). Same-host only — see *Migration* /
+  known-limitations §10 for the cross-host constraint.
+- **`wiki-drain` CLI command** (`anytype-llm-wiki wiki-drain --space-id <id>`) —
+  backstop that drains any queued `wiki_remember` subjects on demand (for the
+  pathological case where a submitter crashed between append and drain).
+- **`prune-citations` CLI command** (`anytype-llm-wiki prune-citations
+  --space-id <id>`) — a one-time, idempotent sweep that removes stale
+  `wiki_query` citation edges left in entity/concept relation arrays by old
+  file-back. See *Migration* below.
+
+### Migration
+
+- If you ran `wiki_query` file-back on a space **before** this release, run
+  `prune-citations` once to clear the stale citation edges (now reported by
+  `wiki_lint` as `stale_citation_edge`). Fresh spaces need no action. Full steps
+  in [MIGRATIONS.md](MIGRATIONS.md).
+
+### Changed
+
+- **`wiki_remember` no longer silently drops subjects.** Previously a narration
+  that extracted more than a fixed number of subjects (a hard `_MAX_SUBJECTS = 8`
+  "fan-out cap") had the remainder **truncated and discarded** with only a
+  `subject_cap_exceeded` warning — unbounded, irrecoverable data loss with no
+  record of *what* was lost, and applied inconsistently (`wiki_ingest` had no
+  such cap). The cap is removed. Every extracted subject is now recorded in a
+  durable per-space **work-log** (`wiki/worklog.py`) before the drain begins, and
+  any subjects left pending by an interrupted run (crash, kill, timeout) are
+  folded back in and finished on the next run. Consolidation is idempotent, so
+  resuming a partially-applied subject converges to a no-op. **No subject is ever
+  dropped.** The work-log is a stdlib-only JSONL file under `WIKI_WORKLOG_DIR`
+  (defaults beside the lock dir) — no new runtime dependency and no service.
+
+### Fixed
+
+- **`wiki_query` file-back no longer pollutes the graph with citation edges that
+  `wiki_lint` flags as critical.** Filing a query answer back used to write a
+  reciprocal back-reference from every cited entity/concept into its
+  `wiki_relations`/`wiki_related` set. That conflated "semantically relates to"
+  with "was cited by", surfaced query objects as entity neighbours / duplicate
+  candidates, and — because the reverse edge lives under a different key
+  (`wiki_drew_from`) than lint's symmetry check reads — produced a wave of false
+  `asymmetric_relation` findings (one per cited-object × query). File-back now
+  writes only the forward `wiki_drew_from` on the query object; the reverse
+  "cited by" direction is served by Anytype backlinks (auto-derived).
+- **`wiki_lint` no longer false-flags genuinely symmetric relations** when an
+  object's `backlinks` list is non-empty but omits the peer. The
+  `asymmetric_relation` check now treats backlinks and symmetric-outbound as two
+  independent confirmations (either suffices) instead of trusting backlinks
+  alone when present.
+- **`wiki_lint` duplicate sweep catches real duplicates instead of Query
+  objects.** The sweep is now scoped to knowledge objects (entity/concept) — a
+  filed Query is never a source or a candidate (and a non-knowledge candidate is
+  dropped defensively even if the search backend ignores the type scope) — which
+  removes the false-positive class where every filed query looked like a
+  near-duplicate of its subject. A new embedding-independent **title pass** flags
+  identical normalized titles (including cross-kind entity/concept twins) and
+  token-subset pairs ("axe" ⊂ "axe token") that the 0.92 fuzzy threshold and the
+  vector pass miss (with a stopword/length floor so generic single-token subsets
+  like "the" ⊂ "the project" don't generate noise). Detection only — it never
+  mutates.
+- **`wiki_lint` flags stale citation edges.** A new `stale_citation_edge` (High)
+  check reports entity/concept relations that point at a `wiki_query` object —
+  the leftover pollution from old file-back — and no longer double-reports them
+  as `asymmetric_relation`. Remediated by `prune-citations` (see *Added*).
+- **No-drop work-log hardening.** The first write to a new work-log now fsyncs
+  the parent directory (so the new file survives a crash, not just its data);
+  `wiki_remember` resume now resolves relation endpoints against existing objects
+  so a relation spanning a crash boundary is rewritten rather than lost; and the
+  work-log's locking contract (all ops under the per-space lock) is documented.
+
+### Documentation
+
+- Added [`docs/architecture.md`](docs/architecture.md) — the internals/architecture
+  orientation for contributors and agents: the write pipeline, consolidation and
+  how reality gets corrected, entity-resolution & duplicate handling, the
+  concurrency model (and why extraction stays inside the lock, plus the deferred
+  blocking-acquire/chunked-release design), the no-drop work-log, the file-back
+  citation model, and structural-health checks. `docs/known-limitations.md`
+  updated for the cap removal, the new dedup detection, and the lock-fairness
+  trade-off.
+
 ## [0.6.1] - 2026-06-07
 
 ### Fixed

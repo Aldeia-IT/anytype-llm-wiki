@@ -31,7 +31,7 @@ from .. import indexer
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .query import _parse_relation_elements, _fetch_cached
 from .remember import _resolve_select_tag
-from .util import scrub_credentials, strip_control_chars
+from .util import normalize_title, scrub_credentials, strip_control_chars
 from ..anytype_client import AnytypeReadClient
 from .wiki_client import WikiClient
 
@@ -64,6 +64,13 @@ _THRESHOLD_MIN_RANK = {
 # Duplicate band lower bound (fixed); upper bound is WIKI_LINT_DUPLICATE_MAX_SCORE.
 _DUPLICATE_LO = 0.70
 
+# Types eligible for the duplicate sweep. ONLY knowledge objects — Query (Q&A)
+# and Comparison objects are not "subjects" and must never be compared against
+# entities/concepts (doing so flagged every filed query as a near-duplicate of
+# whatever it was about). Restricting both the source object and the candidate
+# set to these types removes that whole false-positive class.
+_DEDUP_TYPES = ("wiki_entity", "wiki_concept")
+
 # WikiLog ingest-failure marker (mirrors ingest.py relation rollback note).
 _FAILURE_MARKER = "relation_rollback"
 
@@ -80,6 +87,42 @@ def _type_of(obj: dict) -> str:
     if isinstance(t, dict):
         return t.get("key", "")
     return t or ""
+
+
+# Generic/stopword tokens that, as the *sole* distinctive content of a shorter
+# title, make a token-subset match too noisy to flag (e.g. "the" ⊂ "the project").
+# A subset is only flagged when the shorter title carries at least one token that
+# is NOT in this set and is ≥ 3 chars — so "axe" ⊂ "axe token" still fires.
+_TITLE_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "with",
+    "new", "page", "note", "item", "list", "misc", "general", "other", "untitled",
+})
+
+
+def _title_duplicate_reason(title_a: str, title_b: str) -> str | None:
+    """Return a reason if two *normalized* titles likely denote the same subject.
+
+    Embedding-independent, so it catches near-duplicates the vector sweep misses:
+    - identical normalized title (e.g. an entity and a concept that share a name,
+      which type-scoped resolution never merges across the kind boundary); and
+    - one title's tokens being a proper subset of the other's (e.g. "axe" vs
+      "axe token"), the classic abbreviation/expansion duplicate — gated by a
+      distinctiveness floor so stopword-only subsets ("the" ⊂ "the project")
+      don't generate noise.
+
+    Returns None when the titles are unrelated. Informational only — it suggests a
+    review/merge, never an automatic mutation.
+    """
+    if not title_a or not title_b or title_a == title_b:
+        return "identical title" if title_a and title_a == title_b else None
+    tokens_a, tokens_b = set(title_a.split()), set(title_b.split())
+    if not tokens_a or not tokens_b:
+        return None
+    if tokens_a < tokens_b or tokens_b < tokens_a:
+        smaller = tokens_a if tokens_a < tokens_b else tokens_b
+        if any(len(t) >= 3 and t not in _TITLE_STOPWORDS for t in smaller):
+            return "one title is a token-subset of the other"
+    return None
 
 
 def _rel_key_for_type(type_key: str) -> str | None:
@@ -333,12 +376,31 @@ def wiki_lint(
             tk = _type_of(o)
             has_primary, inbound = _backlinks_inbound(o)
 
-            # (a) asymmetric_relation (Critical)
+            # (a) asymmetric_relation (Critical) + stale_citation_edge (High)
             for target in _outbound(o):
-                if has_primary:
-                    reciprocal = target in inbound
-                else:
-                    t_obj = by_id.get(target) or _fetch_cached(
+                t_obj = by_id.get(target)
+                # Stale citation edge: an OLD wiki_query file-back wrote query ids
+                # into entity/concept relation arrays. A citation is directional
+                # provenance (served by Anytype backlinks now), not a semantic
+                # relation — flag it for pruning, and do NOT also report it as
+                # asymmetric (it never reciprocates, by design).
+                if t_obj is not None and _type_of(t_obj) == "wiki_query":
+                    findings.append(_finding(
+                        "high", "stale_citation_edge", o, space_id,
+                        f"relation {o['id']} -> Query object {target}: stale "
+                        "file-back citation edge; prune it "
+                        "(see docs/known-limitations §11 / the prune-citations command)",
+                    ))
+                    continue
+                # Two independent signals confirm reciprocity; either suffices.
+                # The backlinks (primary) signal is NOT authoritative on its own:
+                # a populated backlinks list may carry unrelated inbound links
+                # (e.g. citation provenance) and omit a genuinely symmetric peer.
+                # So when backlinks doesn't confirm, fall through to the
+                # symmetric-outbound check rather than flagging immediately.
+                reciprocal = has_primary and target in inbound
+                if not reciprocal:
+                    t_obj = t_obj or _fetch_cached(
                         read_client, space_id, target, cache, enum_map
                     )
                     reciprocal = (
@@ -475,12 +537,47 @@ def wiki_lint(
                 lo = _DUPLICATE_LO
                 hi = config.lint_duplicate_max_score()
                 seen_pairs: set[tuple[str, str]] = set()
+
+                # (a) Title-based pass — embedding-independent, O(n^2) over the
+                #     (bounded) knowledge-object set. Catches identical-title
+                #     cross-kind twins and abbreviation/expansion pairs that the
+                #     0.92 fuzzy-resolution threshold and the vector sweep miss.
+                dedup_objs = [o for o in fetched if _type_of(o) in _DEDUP_TYPES]
+                for i in range(len(dedup_objs)):
+                    a = dedup_objs[i]
+                    ta = normalize_title(a.get("name", ""))
+                    for j in range(i + 1, len(dedup_objs)):
+                        b = dedup_objs[j]
+                        reason = _title_duplicate_reason(
+                            ta, normalize_title(b.get("name", ""))
+                        )
+                        if reason is None:
+                            continue
+                        pair = tuple(sorted((a["id"], b["id"])))
+                        if pair in seen_pairs:
+                            continue
+                        seen_pairs.add(pair)
+                        potential_duplicates.append({
+                            "object_a": pair[0],
+                            "object_b": pair[1],
+                            "similarity_score": None,
+                            "recommendation": f"review for possible merge ({reason})",
+                        })
+                        findings.append(_finding(
+                            "informational", "potential_duplicate", a, space_id,
+                            f"{a['id']} and {b['id']} are likely duplicates ({reason})",
+                        ))
+
+                # (b) Embedding-based pass — scoped to knowledge objects only, so
+                #     Query/Comparison objects are neither sources nor candidates.
                 for o in fetched:
+                    if _type_of(o) not in _DEDUP_TYPES:
+                        continue
                     desc_prop = _prop(o, "wiki_description")
                     q = (desc_prop.get("text") if desc_prop else "") or o.get("name", "")
                     try:
                         cands = indexer.semantic_search_core(
-                            q, space_id, list(_CONTENT_TYPES), 5
+                            q, space_id, list(_DEDUP_TYPES), 5
                         )
                     except Exception as exc:  # noqa: BLE001 — sweep is best-effort
                         report["warnings"].append(
@@ -490,6 +587,13 @@ def wiki_lint(
                     for cand in cands or []:
                         cid = cand.get("object_id") if isinstance(cand, dict) else None
                         if not cid or cid == o["id"]:
+                            continue
+                        # Defense-in-depth: never pair against a non-knowledge
+                        # candidate, even if the search backend ignored the type
+                        # scope. A candidate that declares a non-dedup type (e.g.
+                        # wiki_query) is dropped.
+                        cand_type = cand.get("type")
+                        if cand_type is not None and cand_type not in _DEDUP_TYPES:
                             continue
                         s = cand.get("score")
                         if not isinstance(s, (int, float)):

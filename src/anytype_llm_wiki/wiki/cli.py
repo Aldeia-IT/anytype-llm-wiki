@@ -250,6 +250,40 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return report.get("exit_code", 1)
 
 
+def _cmd_drain(args: argparse.Namespace) -> int:
+    from .remember import drain_pending
+
+    result = drain_pending(space_id=args.space_id)
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"[wiki-drain] space {args.space_id}: status={result.get('status')}")
+        print(f"  objects applied: {len(result.get('objects', []))}")
+        if result.get("wiki_log_id"):
+            print(f"  wiki_log:        {result['wiki_log_id']}")
+        for warning in result.get("warnings", []):
+            print(f"  warn:            {warning}")
+    return 0 if result.get("status") in ("ok", "partial") else 1
+
+
+def _cmd_prune_citations(args: argparse.Namespace) -> int:
+    from .query import prune_stale_citation_edges
+
+    result = prune_stale_citation_edges(space_id=args.space_id)
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"[prune-citations] space {args.space_id}: status={result.get('status')}")
+        print(f"  objects scanned:  {result.get('objects_scanned')}")
+        print(f"  objects modified: {result.get('objects_modified')}")
+        print(f"  edges pruned:     {result.get('edges_pruned')}")
+        if result.get("error"):
+            print(f"  error:            {result['error']}")
+        for warning in result.get("warnings", []):
+            print(f"  warn:             {warning}")
+    return 0 if result.get("status") in ("ok", "partial") else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anytype-llm-wiki",
@@ -342,6 +376,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lint_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     lint_p.set_defaults(func=_cmd_lint)
+
+    drain_p = sub.add_parser(
+        "wiki-drain",
+        help="Drain any queued wiki_remember subjects for a space (backstop for "
+             "the queue-submit model).",
+    )
+    drain_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
+    drain_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    drain_p.set_defaults(func=_cmd_drain)
+
+    prune_p = sub.add_parser(
+        "prune-citations",
+        help="Remove stale wiki_query citation edges from entity/concept "
+             "relations (one-time cleanup for spaces with old file-back history).",
+    )
+    prune_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
+    prune_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    prune_p.set_defaults(func=_cmd_prune_citations)
 
     doctor_p = sub.add_parser("doctor", help="Run preflight checks.")
     doctor_p.add_argument(

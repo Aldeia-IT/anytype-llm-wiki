@@ -38,7 +38,6 @@ from .util import (
     _relation_ids,
     normalize_title,
     scrub_credentials,
-    space_ingest_lock,
 )
 from .wiki_client import WikiClient
 
@@ -590,15 +589,35 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
         if endpoint:
             check_remote_endpoint_consent(endpoint)
 
-        # 5. lock (AC#5 / addendum HARD GATE 2) — entry path acquires it.
-        try:
-            with space_ingest_lock(space_id, source):
-                return _run_ingest(
-                    client, source, space_id, domain_hint, schema_warnings
-                )
-        except RuntimeError as exc:
-            # space_ingest_lock raises [DATA ERROR] ingest_in_progress when held.
-            return _error_result(str(exc))
+        # 5. lock — acquire with a bounded NB retry (wait politely instead of
+        #    fail-fast), and while holding it, drain any queued wiki_remember
+        #    subjects first: holding the per-space lock obligates draining the
+        #    work-log, so a long ingest never starves queued learnings. Lazy
+        #    imports avoid a circular dependency with remember.py.
+        from .remember import (
+            _DRAIN_ACQUIRE_ATTEMPTS,
+            _DRAIN_ACQUIRE_DELAY,
+            _acquire_and_run,
+            _drain_pending,
+        )
+
+        def _locked_ingest():
+            try:
+                _drain_pending(client, space_id, [])
+            except Exception:  # noqa: BLE001 — a queued-remember failure must not block an ingest
+                pass
+            return _run_ingest(client, source, space_id, domain_hint, schema_warnings)
+
+        result = _acquire_and_run(
+            space_id, source, _locked_ingest,
+            attempts=_DRAIN_ACQUIRE_ATTEMPTS * 8, delay=_DRAIN_ACQUIRE_DELAY,
+        )
+        if result is None:
+            return _error_result(
+                "[DATA ERROR] ingest_in_progress: per-space lock held by another "
+                "writer; retry shortly"
+            )
+        return result
     finally:
         client.close()
 
