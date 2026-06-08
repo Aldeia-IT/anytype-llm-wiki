@@ -2483,9 +2483,8 @@ class TestCorePipeline:
                 space_id=FAKE_SPACE_ID, knowledge="(nothing new to extract)"
             )
 
-        assert any("resumed_pending_subjects" in str(w) for w in result.get("warnings", [])), (
-            f"Resume must be announced; warnings={result.get('warnings')}"
-        )
+        # In the queue-submit model, resuming pending subjects IS the normal drain
+        # path — the next holder simply drains whatever's in the log.
         processed = {o["title"] for o in result.get("objects", [])}
         assert processed == {"Xeno", "Yara"}, (
             f"Both pending subjects must be processed on resume; got {processed}"
@@ -2588,6 +2587,88 @@ class TestCorePipeline:
         assert worklog.load_pending(FAKE_SPACE_ID) == [], (
             "A deterministically-erroring subject must be marked done, not left pending"
         )
+
+    def test_drain_until_dry_sweeps_concurrent_append(self, monkeypatch, tmp_path):
+        """The holder's drain-until-dry sweeps up a subject appended to the work-log
+        by another PID *during* the drain — the guarantee that a contender's queued
+        work is applied by the current holder, not left for a future submit."""
+        _patch_decision_ok(monkeypatch, tmp_path)
+        from anytype_llm_wiki.wiki import worklog
+
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False)
+        monkeypatch.setattr("anytype_llm_wiki.wiki.remember._maybe_reindex", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value={"entities": [
+                {"name": "First", "kind": "entity", "facts": "f"}], "concepts": []}),
+            raising=False,
+        )
+
+        # Simulate another PID appending to the work-log mid-drain: on the first
+        # resolve_entity call, append a second batch, then behave normally.
+        injected = {"done": False}
+
+        def resolve_side_effect(client, space_id, type_key, name):
+            if not injected["done"]:
+                injected["done"] = True
+                worklog.begin(space_id, [{"name": "LateArrival", "kind": "entity", "facts": "g"}],
+                              meta={"relations": [], "source": None, "subject": "late"})
+            return {"action": "create"}
+
+        monkeypatch.setattr("anytype_llm_wiki.wiki.remember.resolve_entity", resolve_side_effect, raising=False)
+
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="first")
+
+        titles = {o["title"] for o in result.get("objects", [])}
+        assert titles == {"First", "LateArrival"}, (
+            f"drain-until-dry must sweep up the concurrently-appended subject; got {titles}"
+        )
+        assert worklog.load_pending(FAKE_SPACE_ID) == [], "work-log must be fully drained"
+
+    def test_drain_pending_applies_queued_leftovers(self, monkeypatch, tmp_path):
+        """The wiki-drain backstop (remember.drain_pending) applies subjects left in
+        the work-log by a queued/crashed submit that nobody drained."""
+        _patch_decision_ok(monkeypatch, tmp_path)
+        from anytype_llm_wiki.wiki import remember, worklog
+
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(remember, "space_ingest_lock", mock_lock, raising=False)
+        monkeypatch.setattr(remember, "_maybe_reindex", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(remember, "resolve_entity", lambda *a, **k: {"action": "create"}, raising=False)
+
+        # A queued/crashed submit: subjects durable in the log, never drained.
+        worklog.begin(FAKE_SPACE_ID,
+                      [{"name": "Orphan1", "kind": "entity", "facts": "f"},
+                       {"name": "Orphan2", "kind": "entity", "facts": "g"}],
+                      meta={"relations": [], "source": None, "subject": "orphans"})
+
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post("/v1/spaces/space-remember-test-001/objects").mock(
+                return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            result = remember.drain_pending(space_id=FAKE_SPACE_ID)
+
+        titles = {o["title"] for o in result.get("objects", [])}
+        assert titles == {"Orphan1", "Orphan2"}, (
+            f"wiki-drain must apply queued leftovers; got {titles}"
+        )
+        assert worklog.load_pending(FAKE_SPACE_ID) == [], "leftovers must be drained + compacted"
 
     def test_source_type_conversation_branch(self, monkeypatch, tmp_path):
         """AC-R13/B4 — source containing 'conversation' → wiki_source_type = conversation tag."""
@@ -2889,38 +2970,45 @@ class TestHardGates:
         mock_lock.assert_not_called()
         mock_extract.assert_not_called()
 
-    def test_space_lock_held_returns_ingest_in_progress(self, monkeypatch, tmp_path):
-        """AC-R-S2 (HARD GATE) — space_ingest_lock mocked to simulate held lock;
-        wiki_remember returns error with '[DATA ERROR] ingest_in_progress'.
-        """
+    def test_space_lock_held_queues_for_drain(self, monkeypatch, tmp_path):
+        """Queue-submit model: when the per-space lock is held by another writer,
+        wiki_remember does NOT fail — it durably appends its subjects to the
+        work-log (lock-free) and returns `queued_for_drain`. The current holder's
+        drain-until-dry will apply them. Nothing is lost."""
         _patch_decision_ok(monkeypatch, tmp_path)
+        from anytype_llm_wiki.wiki import worklog
 
+        # Lock is permanently held → every acquire attempt is rejected.
         def lock_raises(space_id, source_ref):
             raise RuntimeError("[DATA ERROR] ingest_in_progress: space-remember-test-001")
 
         monkeypatch.setattr("anytype_llm_wiki.wiki.remember.space_ingest_lock", lock_raises, raising=False)
-        mock_extract = MagicMock()
-        monkeypatch.setattr("anytype_llm_wiki.wiki.remember.extract", mock_extract, raising=False)
+        # Speed: no real sleeps between retries.
+        monkeypatch.setattr("anytype_llm_wiki.wiki.remember.time.sleep", lambda *_: None, raising=False)
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value={"entities": [
+                {"name": "Held1", "kind": "entity", "facts": "f1"},
+                {"name": "Held2", "kind": "entity", "facts": "f2"}], "concepts": []}),
+            raising=False,
+        )
 
         with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
             router.get("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(200, json=_schema_current_response())
             )
-
             from anytype_llm_wiki.wiki.remember import wiki_remember
             result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="Some knowledge here.")
 
-        result_str = str(result)
-        assert "ingest_in_progress" in result_str, (
-            f"Held lock must return ingest_in_progress; got {result_str}"
+        # Not an error — queued, durable, to be drained by the holder.
+        assert result.get("status") == "ok", result
+        assert result.get("queued") == 2, result
+        assert any("queued_for_drain" in str(w) for w in result.get("warnings", [])), result
+        # The subjects are durably in the work-log despite never getting the lock.
+        pending = {p["name"] for p in worklog.load_pending(FAKE_SPACE_ID)}
+        assert pending == {"Held1", "Held2"}, (
+            f"Subjects must be durably queued even when the lock is held; got {pending}"
         )
-        assert "[DATA ERROR]" in result_str, (
-            f"Held lock must return [DATA ERROR]; got {result_str}"
-        )
-        assert result.get("status") == "error", (
-            f"Held lock must return status=error; got {result.get('status')}"
-        )
-        mock_extract.assert_not_called()
 
     def test_consent_banner_fires_on_live_path(self, monkeypatch, tmp_path):
         """AC-R-S1 (HARD GATE) — real wiki_remember entry with non-local WIKI_EXTRACT_ENDPOINT

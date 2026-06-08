@@ -967,26 +967,31 @@ class TestIngestEntryPathAcquiresLock:
     """
 
     @respx.mock
-    def test_entry_path_rejects_when_lock_held(self, monkeypatch, tmp_path):
+    def test_entry_path_errors_when_lock_persistently_held(self, monkeypatch, tmp_path):
+        """Queue-submit model: wiki_ingest acquires the per-space lock with a
+        bounded NB retry (via remember._acquire_and_run); if it stays held for the
+        whole budget, ingest surfaces ingest_in_progress (operator retries). The
+        lock now lives in the remember module's namespace."""
         _write_valid_patch_decision(tmp_path)
         monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
         respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "x"}}))
 
-        import anytype_llm_wiki.wiki.ingest as _ingest
+        import anytype_llm_wiki.wiki.remember as _rmod
 
         def fake_lock(space_id, source_ref=None):
             raise RuntimeError(
                 "[DATA ERROR] ingest_in_progress: another ingest is running"
             )
 
-        monkeypatch.setattr(_ingest, "space_ingest_lock", fake_lock)
+        monkeypatch.setattr(_rmod, "space_ingest_lock", fake_lock)
+        monkeypatch.setattr(_rmod.time, "sleep", lambda *_: None)  # no real retry delay
 
+        import anytype_llm_wiki.wiki.ingest as _ingest
         result = _ingest.wiki_ingest(source="https://example.com/x", space_id=FAKE_SPACE_ID)
         result_str = str(result)
         assert "ingest_in_progress" in result_str and "[DATA ERROR]" in result_str, (
-            f"Entry path must acquire space_ingest_lock and surface ingest_in_progress; "
-            f"got: {result_str!r}"
+            f"A persistently-held lock must surface ingest_in_progress; got: {result_str!r}"
         )
 
 

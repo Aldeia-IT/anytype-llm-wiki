@@ -20,6 +20,7 @@ check_remote_endpoint_consent, _write_bidirectional_relations, _maybe_reindex).
 """
 
 import os
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -305,131 +306,216 @@ def wiki_remember(
         if endpoint:
             check_remote_endpoint_consent(endpoint)
 
-        # f. per-space lock (HARD GATE AC-R-S2). Extraction runs INSIDE the lock
-        #    (in _run_remember) on purpose: a contender on a held lock then fails
-        #    fast WITHOUT first paying for a multi-minute extraction. See
-        #    docs/architecture.md "Concurrency model" for the lock-hold trade-off
-        #    and the (deferred) chunked-release design.
-        try:
-            with space_ingest_lock(space_id, knowledge[:50]):
-                return _run_remember(
-                    client, space_id, knowledge, subject_hint, kind,
-                    relations, source, schema_warnings,
+        # f. extract — LOCK-FREE (read-only LLM, no writes). In the queue-submit
+        #    model the per-space lock covers only draining, so extraction never
+        #    holds it. model-not-pulled aborts before any append or write.
+        extracted = extract(markdown=knowledge, space_id=space_id)
+        if isinstance(extracted, str):
+            if "ollama_model_not_pulled" in extracted:
+                return _error_remember_result(extracted)
+            extracted = {"entities": [], "concepts": []}
+        if isinstance(extracted, dict) and "ollama_model_not_pulled" in str(
+            extracted.get("error", "")
+        ):
+            return _error_remember_result(str(extracted["error"]))
+
+        new_subjects = _build_subjects(extracted)
+        if not new_subjects and subject_hint:
+            hint_kind = "concept" if kind == "concept" else "entity"
+            new_subjects = [
+                {"name": subject_hint, "kind": hint_kind, "facts": knowledge}
+            ]
+
+        base_warnings = list(schema_warnings)
+        meta = {"relations": relations or [], "source": source, "subject": knowledge[:50]}
+
+        # g. SUBMIT — durably append this batch to the per-space work-log,
+        #    LOCK-FREE. Once this returns the subjects are durable; whoever holds
+        #    the lock drains them (drain-until-dry), so independent PIDs never
+        #    block and never lose writes. If the work-log itself is unavailable we
+        #    fall back to a direct in-process drain so we still never drop.
+        if new_subjects:
+            try:
+                worklog.begin(space_id, new_subjects, meta=meta)
+            except OSError as exc:
+                base_warnings.append(
+                    "worklog_begin_failed (processing in-process): "
+                    f"{scrub_credentials(str(exc))}"
                 )
-        except RuntimeError as exc:
-            return _error_remember_result(str(exc))
+                degraded = _acquire_and_run(
+                    space_id, knowledge[:50],
+                    lambda: _drain_direct(client, space_id, new_subjects, meta, base_warnings),
+                    attempts=_DRAIN_ACQUIRE_ATTEMPTS * 4, delay=_DRAIN_ACQUIRE_DELAY,
+                )
+                if degraded is None:
+                    # Last resort: process WITHOUT the lock (risks a dup, never a
+                    # drop). Rare — only when the work-log AND the lock are both
+                    # unavailable for the whole retry budget.
+                    degraded = _drain_direct(
+                        client, space_id, new_subjects, meta,
+                        base_warnings + ["processed_without_lock"],
+                    )
+                    degraded["status"] = "partial"
+                _reindex_guarded(space_id, degraded)
+                return degraded
+
+        # h. DRAIN — try to become the drainer (bounded NB retry). If we get the
+        #    lock we drain everything pending (our batch + anyone else's, plus any
+        #    crash leftovers). If we can't, our append is swept up by the current
+        #    holder's drain-until-dry; we return "queued".
+        try:
+            result = _acquire_and_run(
+                space_id, knowledge[:50],
+                lambda: _drain_pending(client, space_id, base_warnings),
+                attempts=_DRAIN_ACQUIRE_ATTEMPTS, delay=_DRAIN_ACQUIRE_DELAY,
+            )
+        except Exception as exc:  # noqa: BLE001 — drain failure must not propagate
+            # An unexpected error mid-drain: our subjects are durable in the
+            # work-log and the lock was released, so the next run resumes them.
+            # Report rather than crash the caller.
+            return _error_remember_result(
+                f"[DATA ERROR] drain_failed: {scrub_credentials(str(exc))}"
+            )
+        if result is not None:
+            _reindex_guarded(space_id, result)
+            return result
+
+        return _queued_remember_result(len(new_subjects or []), base_warnings)
     finally:
         client.close()
 
 
-def _run_remember(
-    client: WikiClient,
-    space_id: str,
-    knowledge: str,
-    subject_hint: str | None,
-    kind: str | None,
-    relations: list[dict] | None,
-    source: str | None,
-    schema_warnings: list[str],
-) -> dict:
-    result = _empty_remember_result()
-    result["warnings"].extend(schema_warnings)
-    status = "ok"
+# Bounded non-blocking lock acquisition (queue-submit model). A submitter that
+# can't immediately become the drainer gives up quickly and leaves its work in
+# the durable log for the current holder's drain-until-dry to sweep up.
+_DRAIN_ACQUIRE_ATTEMPTS = 6
+_DRAIN_ACQUIRE_DELAY = 0.05  # seconds → ~0.3s total before yielding to the holder
 
-    # g. extract (inside lock). model-not-pulled aborts before any write. Kept
-    #    under the lock so a contender fails fast without paying for extraction
-    #    first (see docs/architecture.md "Concurrency model").
-    extracted = extract(markdown=knowledge, space_id=space_id)
-    if isinstance(extracted, str):
-        if "ollama_model_not_pulled" in extracted:
-            return _error_remember_result(extracted)
-        extracted = {"entities": [], "concepts": []}
-    if isinstance(extracted, dict) and "ollama_model_not_pulled" in str(
-        extracted.get("error", "")
-    ):
-        return _error_remember_result(str(extracted["error"]))
 
-    # h. build subjects.
-    new_subjects = _build_subjects(extracted)
-    if not new_subjects and subject_hint:
-        hint_kind = "concept" if kind == "concept" else "entity"
-        new_subjects = [
-            {"name": subject_hint, "kind": hint_kind, "facts": knowledge}
-        ]
+def _acquire_and_run(space_id, label, fn, attempts, delay):
+    """Try to acquire the per-space lock (bounded NB retry) and run ``fn`` under it.
 
-    # i. Durability — the no-drop guarantee (replaces the old fixed subject cap).
-    #    The previous design truncated the subject list to a hard limit and
-    #    SILENTLY DROPPED the remainder (unbounded data loss, no record of what
-    #    was lost). Instead: record every extracted subject in a durable per-space
-    #    work-log BEFORE draining, fold back any subjects left pending by an
-    #    interrupted prior run, and finish them here. Consolidation is idempotent,
-    #    so re-processing a partially-applied subject converges to a no-op. Nothing
-    #    is dropped; an interrupted drain resumes on the next run. See worklog.py.
-    pending = _safe_load_pending(space_id, result)
-    if pending:
-        result["warnings"].append(f"resumed_pending_subjects: {len(pending)}")
+    Returns ``fn()``'s result if acquired, or ``None`` if the lock stayed held for
+    the whole retry budget (the caller's work is already durable in the work-log;
+    the current holder will drain it). Re-raises a non-contention RuntimeError.
+    """
+    for attempt in range(attempts):
+        try:
+            with space_ingest_lock(space_id, label):
+                return fn()
+        except RuntimeError as exc:
+            if "ingest_in_progress" not in str(exc):
+                raise
+            if attempt < attempts - 1:
+                time.sleep(delay)
+    return None
 
-    if not new_subjects and not pending:
-        result["warnings"].append("no_subjects: extraction empty and no subject_hint")
-        result["status"] = "partial"
+
+def drain_pending(space_id: str) -> dict:
+    """Drain any pending work-log subjects for a space under the per-space lock.
+
+    The backstop used by the ``wiki-drain`` CLI and by ``wiki_ingest`` (which
+    drains the queue before its own work). Acquires with a generous bounded
+    retry; returns the drain result (or a not-acquired note).
+    """
+    client = WikiClient()
+    try:
+        result = _acquire_and_run(
+            space_id, "drain",
+            lambda: _drain_pending(client, space_id, []),
+            attempts=_DRAIN_ACQUIRE_ATTEMPTS * 8, delay=_DRAIN_ACQUIRE_DELAY,
+        )
+        if result is None:
+            return _queued_remember_result(0, ["drain_skipped: lock held by another writer"])
         _reindex_guarded(space_id, result)
         return result
+    finally:
+        client.close()
 
-    # Record THIS batch durably (fsync) before draining. On a work-log failure we
-    # still process everything in-process — we only warn that crash-resume isn't
-    # guaranteed for this run. We never drop a subject.
-    new_work_id = None
-    enriched_new = new_subjects
-    if new_subjects:
-        new_work_id, enriched_new = _safe_begin(
-            space_id, new_subjects,
-            meta={"relations": relations or [], "source": source},
-            result=result,
-        )
 
-    # Unified work list: pending (prior interrupted runs) first, then this batch.
-    # De-duplicate by (normalized name, kind) to avoid redundant consolidations;
-    # each item carries _id/_work_id so completion is recorded per subject.
-    subjects: list[dict] = []
-    relations = list(relations or [])
-    seen: set[tuple[str, str]] = set()
-    seen_meta_work: set[str] = set()
-    for p in pending:
-        wid = p.get("_work_id")
-        if wid and wid not in seen_meta_work:
-            seen_meta_work.add(wid)
-            relations.extend((p.get("_meta") or {}).get("relations") or [])
-        key = (normalize_title(p.get("name", "")), p.get("kind", "entity"))
-        if key in seen:
-            _safe_mark_done(space_id, p.get("_work_id"), p.get("id"), result)
-            continue
-        seen.add(key)
-        subjects.append({
-            "name": p.get("name", ""), "kind": p.get("kind", "entity"),
-            "facts": p.get("facts", ""),
-            "_id": p.get("id"), "_work_id": p.get("_work_id"),
-        })
-    for s in enriched_new:
-        key = (normalize_title(s.get("name", "")), s.get("kind", "entity"))
-        if key in seen:
-            _safe_mark_done(space_id, new_work_id, s.get("id"), result)
-            continue
-        seen.add(key)
-        subjects.append({
-            "name": s.get("name", ""), "kind": s.get("kind", "entity"),
-            "facts": s.get("facts", ""),
-            "_id": s.get("id"), "_work_id": new_work_id,
-        })
+def _drain_pending(client: WikiClient, space_id: str, base_warnings: list[str]) -> dict:
+    """Drain the work-log until dry (caller holds the per-space lock).
 
-    # j. per-subject create/consolidate.
+    Re-reads ``load_pending`` each pass, so subjects appended by *other* PIDs
+    during this drain are swept up too. Groups by work_id to apply each submitted
+    batch's own source/relations. Marks each subject done; compacts when dry.
+    """
+    result = _empty_remember_result()
+    result["warnings"].extend(base_warnings)
+    result["status"] = "ok"
+
+    attempted: set[str] = set()
+    processed_any = False
+    while True:
+        pending = _safe_load_pending(space_id, result)
+        fresh = [p for p in pending if p.get("id") and p["id"] not in attempted]
+        if not fresh:
+            break
+        order: list[str] = []
+        groups: dict[str, dict] = {}
+        for p in fresh:
+            wid = p.get("_work_id") or "__nowork__"
+            if wid not in groups:
+                groups[wid] = {"items": [], "meta": p.get("_meta") or {}}
+                order.append(wid)
+            groups[wid]["items"].append(p)
+        for wid in order:
+            g = groups[wid]
+            _apply_batch(client, space_id, g["items"], g["meta"], result)
+            for it in g["items"]:
+                attempted.add(it["id"])
+                _safe_mark_done(space_id, it.get("_work_id"), it.get("id"), result)
+            processed_any = True
+
+    _safe_compact(space_id, result)
+    if not processed_any and not result["objects"]:
+        result["warnings"].append("no_subjects: nothing pending to drain")
+        result["status"] = "partial"
+    return result
+
+
+def _drain_direct(client, space_id, subjects, meta, base_warnings) -> dict:
+    """Degraded path: apply an in-memory batch directly (work-log unavailable)."""
+    result = _empty_remember_result()
+    result["warnings"].extend(base_warnings)
+    result["status"] = "ok"
+    items = [
+        {"name": s.get("name", ""), "kind": s.get("kind", "entity"),
+         "facts": s.get("facts", ""), "id": None, "_work_id": None}
+        for s in subjects
+    ]
+    _apply_batch(client, space_id, items, meta, result)
+    return result
+
+
+def _queued_remember_result(n: int, base_warnings: list[str]) -> dict:
+    """Result for a submit that queued its subjects for another writer to drain."""
+    result = _empty_remember_result()
+    result["warnings"].extend(base_warnings)
+    result["warnings"].append(
+        f"queued_for_drain: {n} subject(s) appended; another writer is draining "
+        "this space and will apply them"
+    )
+    result["status"] = "ok"
+    result["queued"] = n
+    return result
+
+
+def _apply_batch(client, space_id, items, meta, result) -> None:
+    """Apply ONE work-log batch (resolve/consolidate/create + relations + WikiLog).
+
+    Accumulates into ``result`` (objects/counts/warnings). Does NOT touch the
+    work-log (the drain loop owns begin/mark_done/compact) or reindex. ``meta``
+    carries this batch's ``source``/``relations``/``subject``.
+    """
+    source = meta.get("source")
+    relations = list(meta.get("relations") or [])
+    subject = meta.get("subject") or ""
+
     name_to_id: dict[str, str] = {}
     kind_by_id: dict[str, str] = {}
     wikilog_notes: list[str] = []
-    objects_written = 0  # created or updated (real writes — drives lazy Source)
 
-    # Lazy Source (SF10): created on the FIRST real write so its id can be folded
-    # into that same create/PATCH (one PATCH per object — no separate back-link
-    # write). Returns the source id (or None on degrade).
     source_state: dict = {"id": None, "created": False}
 
     def _ensure_source() -> str | None:
@@ -437,9 +523,7 @@ def _run_remember(
             return source_state["id"]
         source_state["created"] = True
         source_type_name = (
-            "conversation"
-            if source and "conversation" in source.lower()
-            else "agent"
+            "conversation" if source and "conversation" in source.lower() else "agent"
         )
         st_tag_id, st_degraded = _resolve_wiki_source_type_tag(
             client, space_id, source_type_name
@@ -452,7 +536,7 @@ def _run_remember(
         result["source_object_id"] = sid
         return sid
 
-    for subj in subjects:
+    for subj in items:
         clean_name = sanitize_name(subj["name"])
         if clean_name is None:
             result["warnings"].append(f"name_policy_rejected: {subj['name']!r}")
@@ -475,7 +559,6 @@ def _run_remember(
             resolution = resolve_entity(client, space_id, type_key, clean_name)
 
             if resolution.get("action") == "update":
-                # D9b/B9 — ambiguity check on the same-type, same-normalized-name set.
                 normalized = normalize_title(clean_name)
                 same_type = _same_type_candidates(client, space_id, clean_name, type_key)
                 exact = [
@@ -488,7 +571,7 @@ def _run_remember(
                     )
                     obj_entry["action"] = "error"
                     obj_entry["error"] = "ambiguous_subject"
-                    status = "partial"
+                    result["status"] = "partial"
                     result["objects"].append(obj_entry)
                     continue
 
@@ -507,7 +590,7 @@ def _run_remember(
                 if "consolidation_degraded" in str(cons.get("error", "")):
                     obj_entry["action"] = "consolidation_degraded"
                     result["warnings"].append(str(cons.get("error")))
-                    status = "partial"
+                    result["status"] = "partial"
                     result["objects"].append(obj_entry)
                     continue
 
@@ -519,7 +602,6 @@ def _run_remember(
                     if isinstance(fa, dict) and fa.get("action") in _VALID_FACT_ACTIONS
                 ]
 
-                # Conflict-flag FIRST (SF1), independent of the D3 PATCH gate.
                 n_conflicts = len(conflicts)
                 obj_entry["conflicts_flagged"] = n_conflicts
                 if n_conflicts:
@@ -532,18 +614,12 @@ def _run_remember(
                         for c in conflicts
                         if isinstance(c, dict)
                     )
-                    wikilog_notes.append(
-                        f"conflicts_flagged: {n_conflicts}; {pair_detail}"
-                    )
+                    wikilog_notes.append(f"conflicts_flagged: {n_conflicts}; {pair_detail}")
 
-                # Supersede audit (addendum item 1).
                 for fa in fact_actions:
                     if fa.get("action") == "supersede" and fa.get("supersedes"):
-                        wikilog_notes.append(
-                            f"supersede: {fa.get('supersedes')}"
-                        )
+                        wikilog_notes.append(f"supersede: {fa.get('supersedes')}")
 
-                # D3 text-PATCH gate.
                 norm_equal = (
                     _normalize_for_compare(consolidated_text)
                     == _normalize_for_compare(existing_text)
@@ -553,9 +629,6 @@ def _run_remember(
                     if changed and norm_equal:
                         result["warnings"].append("consolidated_despite_changed_flag")
                 else:
-                    # Real change → PATCH the consolidated text (B1 sanitize-on-write).
-                    # The Source is created lazily HERE (first real write) so its id
-                    # rides in the same PATCH (one PATCH per object — SF10/D2).
                     src_id = _ensure_source()
                     patch_props = [
                         {"key": prop_key, "text": sanitize_property_value(consolidated_text)},
@@ -566,49 +639,37 @@ def _run_remember(
                              "date": datetime.now(timezone.utc).isoformat()}
                         )
                     if src_id:
-                        patch_props.append(
-                            {"key": "wiki_sources", "objects": [src_id]}
-                        )
+                        patch_props.append({"key": "wiki_sources", "objects": [src_id]})
                     client.update_object(space_id, target_id, {"properties": patch_props})
                     obj_entry["action"] = "updated"
-                    objects_written += 1
 
                 obj_entry["deeplink"] = _object_deeplink(space_id, target_id)
                 name_to_id[normalize_title(clean_name)] = target_id
                 kind_by_id[target_id] = subj_kind
 
             else:
-                # Create with EMPTY body (properties only — AC-L1). The Source is
-                # created lazily HERE and linked in the create payload.
                 src_id = _ensure_source()
                 create_props = [{"key": prop_key, "text": subj_facts}]
                 if src_id:
-                    create_props.append(
-                        {"key": "wiki_sources", "objects": [src_id]}
-                    )
+                    create_props.append({"key": "wiki_sources", "objects": [src_id]})
                 created = client.create_object(
-                    space_id,
-                    type_key=type_key,
-                    name=clean_name,
-                    properties=create_props,
+                    space_id, type_key=type_key, name=clean_name, properties=create_props,
                 )
                 obj_id = created.get("id")
                 obj_entry["object_id"] = obj_id
                 obj_entry["action"] = "created"
                 obj_entry["deeplink"] = _object_deeplink(space_id, obj_id)
-                objects_written += 1
                 name_to_id[normalize_title(clean_name)] = obj_id
                 kind_by_id[obj_id] = subj_kind
 
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
             obj_entry["action"] = "error"
             obj_entry["error"] = str(exc)
-            status = "partial"
+            result["status"] = "partial"
 
         result["objects"].append(obj_entry)
 
-    # l. relations (SF5 type-safe; G1 per-object counts).
-    rel_total = 0
+    # relations (SF5 type-safe; G1 per-object counts).
     if relations:
         rel_tuples: list[tuple[str, str, str]] = []
         endpoint_objs: list[str] = []
@@ -620,10 +681,6 @@ def _run_remember(
             label = rel.get("label", "related")
             from_id = name_to_id.get(normalize_title(from_name))
             to_id = name_to_id.get(normalize_title(to_name))
-            # Cross-batch / resume: an endpoint may name a subject that was
-            # written by a PRIOR (interrupted) run, so it isn't in this run's
-            # name_to_id. Resolve it against existing objects before giving up,
-            # otherwise a relation spanning a crash boundary would be lost.
             if from_id is None:
                 from_id = _resolve_existing_endpoint(
                     client, space_id, from_name, name_to_id, kind_by_id
@@ -646,15 +703,14 @@ def _run_remember(
         )
         if rollback_notes:
             result["warnings"].extend(rollback_notes)
-            status = "partial"
-        # Per-object relations_created: count endpoint appearances.
+            result["status"] = "partial"
         for obj in result["objects"]:
             oid = obj.get("object_id")
-            if oid:
+            if oid and oid in endpoint_objs:
                 obj["relations_created"] = endpoint_objs.count(oid)
-    result["relations_created"] = rel_total
+        result["relations_created"] += rel_total
 
-    # m. WikiLog always (action_name="remember").
+    # WikiLog for this batch (action_name="remember").
     action_tag_id, degraded = _resolve_wiki_action_tag(
         client, space_id, action_name="remember"
     )
@@ -668,32 +724,13 @@ def _run_remember(
     notes = "; ".join(["remember", *wikilog_notes]) if wikilog_notes else "remember"
     result["wiki_log_id"] = _write_wikilog(
         client, space_id,
-        subject=knowledge[:50],
+        subject=subject,
         created=created_count,
         updated=updated_count,
         notes=notes,
         action_tag_id=action_tag_id,
         action_name="remember",
     )
-
-    # Every subject in this run's work list was attempted exactly once above, so
-    # mark them all done and compact the durable work-log. If the drain had been
-    # interrupted (crash/kill/timeout) before reaching here, the log persists and
-    # the next run resumes the outstanding subjects — that is the no-drop scope.
-    # NOTE: a subject whose write hit a per-subject API error above (action=
-    # "error", status=partial) is ALSO marked done here, on purpose: the error is
-    # reported (not silently dropped), and leaving it pending would re-run a
-    # deterministically-failing subject forever. Crash-resume covers process
-    # death; per-subject API errors are surfaced, not retried.
-    for subj in subjects:
-        _safe_mark_done(space_id, subj.get("_work_id"), subj.get("_id"), result)
-    _safe_compact(space_id, result)
-
-    result["status"] = status
-
-    # n. auto-reindex (non-fatal).
-    _reindex_guarded(space_id, result)
-    return result
 
 
 def _resolve_existing_endpoint(
@@ -736,19 +773,6 @@ def _safe_load_pending(space_id: str, result: dict) -> list[dict]:
             f"worklog_load_failed: {scrub_credentials(str(exc))}"
         )
         return []
-
-
-def _safe_begin(space_id: str, subjects: list[dict], meta: dict, result: dict):
-    """worklog.begin guarded. On failure, process all subjects in-process anyway
-    (no drop) — only crash-resume is forfeited for this run."""
-    try:
-        return worklog.begin(space_id, subjects, meta=meta)
-    except OSError as exc:
-        result["warnings"].append(
-            "worklog_begin_failed (crash-resume not guaranteed this run): "
-            f"{scrub_credentials(str(exc))}"
-        )
-        return None, subjects
 
 
 def _safe_mark_done(space_id: str, work_id, subject_id, result: dict) -> None:
