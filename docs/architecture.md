@@ -106,78 +106,69 @@ boundary is intentionally *not* done (it would consolidate a definition into an
 entity), so cross-kind twins are surfaced for human merge rather than merged
 automatically.
 
-## 6. Concurrency model — the per-space lock
+## 6. Concurrency model — queue-submit, single drainer
 
-All writes to a space are serialized by an **advisory file lock**
-(`fcntl.flock`, `LOCK_EX | LOCK_NB`) under `WIKI_LOCK_DIR`, one file per space
-(`space_ingest_lock`). It is **non-blocking / fail-fast**: if another run holds
-the lock, the new run does **not** queue — it raises
-`[DATA ERROR] ingest_in_progress` immediately.
+`wiki_remember` is built for a **fleet**: independent agents on separate PIDs /
+terminals (each running `/wiki-learn`) write the *same* space concurrently. The
+model is **submit + drain**, so concurrent submitters never block and never lose
+writes — read-after-write is explicitly not guaranteed (the knowledge is for the
+*next* agent on that client/project).
 
-Why the lock exists: `resolve_entity` does read-candidates → decide-create, which
-is **not atomic**. Two concurrent writers resolving the same name would both miss
-and both create — the duplicate class in §5. The lock makes resolve→write
-serial per space, which is load-bearing for dedup correctness.
+**Submit (lock-free).** `wiki_remember` does `extract` (read-only LLM, no lock)
+→ `worklog.begin` (a durable, fsync'd, **lock-free append** of the extracted
+subjects to the per-space work-log, §7). Once `begin` returns, the subjects are
+durable. This is the "submit."
+
+**Drain (single holder, drain-until-dry).** The per-space `fcntl.flock`
+(`space_ingest_lock`) now guards only *draining*. After submitting, a caller
+tries to become the drainer via a **bounded non-blocking retry**
+(`_acquire_and_run`, a few NB attempts over ~0.3 s):
+
+- **Acquired** → it runs **drain-until-dry**: re-read `load_pending` each pass and
+  apply every pending batch, until the queue is empty, then `compact`. Because it
+  re-reads each pass, subjects another PID appended *during* the drain are swept
+  up by this same holder.
+- **Not acquired** → another writer holds the lock and is draining; the caller
+  returns `queued_for_drain`. Its append is durable and the current holder's
+  drain-until-dry applies it.
+
+Why the lock exists at all: `resolve_entity` does read-candidates → decide-create,
+which is **not atomic**; serializing the drain is load-bearing for dedup
+correctness (§5).
+
+**Who drains a queued submitter's work — the holder, not a future agent.** This
+is the crux. If B can't acquire while A is draining, A's drain-until-dry loop sees
+B's append (B appended before retrying) and applies it. The one microsecond race —
+B appends in the gap between A's final empty-check and A's release — is closed by
+B's bounded retry: B keeps trying NB-acquire, and A's release is imminent, so B
+grabs the lock and drains its *own* work. `compact()` is gated on an empty queue,
+so even in that race B's record is never deleted, only delayed. We do **not**
+depend on the next organic submit. The only fall-through is true pathology (a PID
+crashes between `begin` and draining), for which there is an explicit
+`wiki-drain --space-id` CLI backstop (`remember.drain_pending`) — runnable on
+demand or via cron, never an unbounded wait on traffic.
+
+**`wiki_ingest` participates.** Holding the lock obligates draining the queue:
+`wiki_ingest` acquires with the same bounded retry (waits politely instead of
+fail-fast) and **drains pending `wiki_remember` subjects first**, then does its
+own work — so a long ingest never starves queued learnings. It stays synchronous
+(the operator wants its result inline); if the lock stays held for the whole
+retry budget it returns `ingest_in_progress` for the operator to retry.
+
+**Extraction is lock-free.** Since submit appends and only draining holds the
+lock, the long extraction LLM call never holds it — the per-space critical
+section is just resolve → write → relations, kept short.
 
 **Cross-host caveat (important for fleets).** `fcntl.flock` is **host-local** —
-it only serializes processes on the *same* machine that share `WIKI_LOCK_DIR`.
-That covers the common fleet case (several agents/terminals on one host, default
-`~/.local/share`). It does **not** cover writers on *different* hosts (or in
-containers without a shared lock-dir volume) writing the *same* Anytype vault:
-flock gives them no mutual exclusion at all, so their `resolve→create` genuinely
-interleaves → duplicate entities and last-writer-wins clobbering of relation
-arrays. There is no cross-host guard today (the same limitation `wiki_bootstrap`
-documents in known-limitations §1). **Operating constraint: write a shared vault
-from a single host.** A cross-host guard would need an Anytype-side
+it serializes processes on the *same* machine that share `WIKI_LOCK_DIR` (the
+common fleet case: several agents/terminals on one host, default `~/.local/share`,
+sharing one `WIKI_WORKLOG_DIR`). It does **not** cover writers on *different*
+hosts (or containers without a shared lock-dir volume) writing the *same* vault:
+flock gives them no mutual exclusion, so their `resolve→create` genuinely
+interleaves → duplicate entities and clobbered relation arrays (same limitation
+`wiki_bootstrap` notes in known-limitations §1). **Operating constraint: write a
+shared vault from a single host.** A cross-host guard needs an Anytype-side
 compare-and-set, not a file lock.
-
-**Why extraction runs *inside* the lock.** Extraction is a read-only LLM call
-(no writes) and the single longest step — minutes on a large local model. It is
-tempting to move it outside the lock to shrink the critical section. We don't,
-and the trade-off is the reason: under the *fail-fast* lock, a contender that
-extracted *before* checking the lock would pay for a multi-minute extraction and
-*then* fail with `ingest_in_progress` — wasted work. Keeping extract under the
-lock lets a contender fail fast without that waste. (This is asserted by
-`test_space_lock_held_returns_ingest_in_progress`.)
-
-### Deferred: blocking acquire + chunked release
-
-The complete fairness fix — so a long drain neither rejects nor indefinitely
-blocks a concurrent same-space writer — is:
-
-1. a **blocking-with-timeout** acquire (wait your turn, don't hard-fail), and
-2. **chunked lock release**: process subjects in chunks of K, releasing the lock
-   between chunks so other writers interleave. K becomes a *fairness* boundary,
-   not a data ceiling.
-
-This is **deferred on purpose**: it is an invasive refactor of the most critical,
-most-tested path, and its real-world benefit is marginal on a single-user/single-
-agent vault (concurrent same-space writes are rare). The current fail-fast
-behavior is correct and bounded; the contender gets a clear, retryable error.
-
-The work-log (§7) makes the *subject* side of mid-drain release safe — a
-released/re-acquired chunk re-runs `resolve_entity` under the lock, so a
-between-chunks create by another writer is re-resolved and converges without
-duplicates, and an interrupted chunk resumes. But "safe to add later" is **not**
-unconditional; chunked release additionally requires three things the current
-code does **not** yet provide, and they are prerequisites, not afterthoughts:
-
-1. **Relation-resume across chunk boundaries.** Resume now resolves relation
-   endpoints against existing objects (not just this-run writes), so a relation
-   spanning a boundary can be rewritten — but this path must be exercised at
-   every chunk boundary, not only after a crash.
-2. **A locked compaction contract.** `worklog.compact`/`load_pending` are
-   correct only while the per-space lock is held (a lockless `compact` could race
-   a `begin`); mid-drain release is exactly where that contract must be enforced.
-3. **Consolidation idempotency is best-effort, not guaranteed.** Re-processing a
-   resumed subject converges to a no-op only because the LLM consolidation
-   returns `changed=false`/equal text — it is not a code-level invariant (same
-   caveat as re-ingest determinism, known-limitations §6). A
-   released-and-reacquired chunk can therefore emit a spurious PATCH.
-
-So: deferral is justified, the subject-resume foundation is in place, but the
-chunked-release work must land these three before it is truly "safe." Revisit if
-multi-writer concurrency on one space becomes a real workload.
 
 ## 7. The no-drop work-log (`wiki/worklog.py`)
 
@@ -188,8 +179,12 @@ History: `wiki_remember` used to truncate its subject list to a hard
 `_MAX_SUBJECTS = 8` ("fan-out cap") and discard the rest with only a
 `subject_cap_exceeded` warning — unbounded, irrecoverable data loss, applied
 inconsistently (`wiki_ingest` had no such cap). The cap's only purpose was to
-bound how long the per-space lock was held (§6); it paid for that with dropped
+bound how long the per-space lock was held; it paid for that with dropped
 knowledge.
+
+The work-log is also the **submission queue** for the concurrency model (§6): a
+lock-free `begin` append is how a fleet submitter durably hands off its subjects
+to whichever PID drains.
 
 The replacement is a **write-ahead log**:
 
@@ -204,13 +199,16 @@ The replacement is a **write-ahead log**:
   findable after a crash). Replay skips **any** unparseable line — a torn
   trailing write is the common case, but a mid-file partial is skipped the same
   way. Once `begin` returns, its subjects are durable.
-- On the next run, `load_pending()` replays the log and **folds any unfinished
-  subjects back into the current batch**, finishing them. Consolidation is
+- The drain-until-dry loop (§6) `load_pending()`s the log and applies every
+  pending subject, finishing any left by an interrupted run. Consolidation is
   best-effort idempotent (it relies on the LLM returning equal text for an
-  already-applied subject — see §6 prerequisite 3), so re-processing converges to
-  a no-op in the normal case.
-- All work-log access **must hold the per-space lock** (it serializes writers and
-  makes `compact`'s read-then-remove atomic). The current call sites all do.
+  already-applied subject — cf. known-limitations §6), so re-processing converges
+  to a no-op in the normal case.
+- **Locking contract:** `begin` (append) is **lock-free** — that is what lets a
+  fleet submitter hand off without blocking. Everything else — `load_pending`,
+  draining, `mark_done`, `compact` — **must hold the per-space lock** (it
+  serializes drainers and makes `compact`'s read-then-remove atomic against a
+  concurrent `begin`). The call sites enforce this.
 
 All work-log calls in `remember.py` are guarded: a work-log failure degrades to
 in-process processing with a warning — never a dropped subject, never a broken
@@ -218,8 +216,6 @@ run. **Scope of the no-drop guarantee:** it covers process death
 (crash/kill/timeout) and work-log I/O failure. A *per-subject* API error during a
 subject's write is reported (`status=partial`, `action="error"`) and that subject
 is marked done — it is surfaced, not silently dropped, and not retried forever.
-The lock is held for the whole (now uncapped) drain; bounding that hold is the
-deferred §6 work, **not** a reason to cap or drop.
 
 ## 8. Retrieval & the compounding loop (`wiki_query`)
 

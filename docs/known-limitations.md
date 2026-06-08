@@ -182,46 +182,35 @@ re-enumeration on every call. Tracked here rather than as a separate ticket
 (per maintainer decision); raised by the post-impl council and prior #285
 councils.
 
-## 10. `wiki_remember` holds the per-space lock for the whole (uncapped) drain
+## 10. Same-host-only concurrency; no read-after-write on submit
 
-`wiki_remember` no longer caps or drops subjects — every extracted subject is
-processed and durably logged (see [architecture §7](./architecture.md#7-the-no-drop-work-log-wikiworklogpy)).
-The per-space write lock is held for that whole drain, and it is **fail-fast**
-(`LOCK_EX | LOCK_NB`): a concurrent same-space `wiki_remember`/`wiki_ingest`
-gets `[DATA ERROR] ingest_in_progress` rather than queuing. For a large narration
-this hold can last as long as N sequential consolidations (each an LLM call).
+`wiki_remember` uses a **queue-submit** model for fleet concurrency (see
+[architecture §6](./architecture.md#6-concurrency-model--queue-submit-single-drainer)):
+a submit appends its extracted subjects to the durable work-log lock-free and
+returns; whichever PID holds the per-space lock drains the queue (drain-until-dry).
+So independent agents (separate PIDs / terminals) on one host invoking
+`/wiki-learn` against the *same* space **never block and never lose writes** — the
+earlier fail-fast "rejected loser silently drops its learnings" gap is resolved.
 
-**Same-host fleet contention.** When independent agents (separate PIDs /
-terminals) on one host invoke `/wiki-learn` against the *same* space, `flock`
-serializes them correctly — but the loser is *rejected*, not queued, and since
-`/wiki-learn` is fire-and-forget at session end its error is typically swallowed
-→ that agent's learnings are silently not captured. This is a real gap for
-fleet/SDLC usage and is being addressed by the queue-submit model (append the
-extracted subjects to the durable work-log and return; a single drainer applies
-them under the lock), tracked in [architecture §6](./architecture.md#6-concurrency-model--the-per-space-lock).
+Two accepted constraints remain:
 
-**Cross-host (no protection).** `flock` is host-local: agents writing the same
-vault from *different* hosts or containers without a shared `WIKI_LOCK_DIR` get
-no mutual exclusion → genuinely interleaved `resolve→create` → duplicate entities
-and clobbered relation arrays. **Operating constraint: write a shared vault from a
-single host.** A cross-host guard needs an Anytype-side compare-and-set, not a
-file lock.
+- **No read-after-write.** A submit may return before its subjects are drained
+  (another writer is draining, or it queued). A `wiki_query` issued immediately
+  after a `wiki_remember` on the same agent may not see the just-submitted
+  subjects until they drain. This is intentional — the wiki is for the *next*
+  agent on a client/project, not for the submitter's own next line. A
+  `wiki-drain --space-id` CLI backstop forces a synchronous drain when needed.
 
-This is accepted: on a single-user / single-agent vault, concurrent same-space
-writes are rare, and the contender gets a clear, retryable error (no data is at
-risk — the no-drop work-log makes any interrupted drain resumable). The complete
-fairness fix — a **blocking-with-timeout** acquire plus **chunked lock release**
-(release every K subjects so writers interleave; K as a fairness boundary, not a
-data ceiling) — is **deferred on purpose**: it is an invasive refactor of the
-most critical path for marginal single-user benefit, and the work-log makes the
-*subject* side of mid-drain release safe to add later — though chunked release
-additionally requires relation-resume at every boundary, a locked compaction
-contract, and acknowledges best-effort (not guaranteed) consolidation
-idempotency. See
-[architecture §6](./architecture.md#6-concurrency-model--the-per-space-lock).
+- **Cross-host: no protection.** `flock` is host-local. Agents writing the same
+  vault from *different* hosts or containers **without a shared `WIKI_LOCK_DIR`
+  and `WIKI_WORKLOG_DIR`** get no mutual exclusion → genuinely interleaved
+  `resolve→create` → duplicate entities and clobbered relation arrays.
+  **Operating constraint: write a shared vault from a single host** (agents may be
+  many PIDs, but one machine sharing the lock/worklog dirs). A cross-host guard
+  needs an Anytype-side compare-and-set, not a file lock.
 
-**Status:** accepted; revisit if multi-writer concurrency on one space becomes a
-real workload.
+**Status:** queue-submit shipped (same-host fleet writes are safe); read-after-write
+intentionally not provided; cross-host single-writer-host constraint documented.
 
 ## 11. Duplicate prevention is detect-only; cross-kind merges are deliberately not automatic
 

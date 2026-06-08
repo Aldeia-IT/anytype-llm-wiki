@@ -13,9 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `subject_cap_exceeded` warning.** It now processes *every* extracted subject
   and writes a durable work-log under `WIKI_WORKLOG_DIR`. Anything depending on
   the ≤8-object ceiling or that warning must adapt. (Mechanism under *Changed*.)
+- **`wiki_remember` is now queue-submit (no read-after-write); a held lock no
+  longer returns `ingest_in_progress`.** A concurrent same-space `wiki_remember`
+  now durably queues its subjects and returns `queued_for_drain` (status `ok`)
+  instead of erroring; a `wiki_query` issued immediately after may not see the
+  just-submitted subjects until they drain. `wiki_ingest` waits (bounded retry)
+  instead of failing fast, and only returns `ingest_in_progress` if the lock
+  stays held for the whole budget. (Concurrency model under *Changed*.)
 
 ### Added
 
+- **Queue-submit concurrency for `wiki_remember`** — independent agents on
+  separate PIDs/terminals (a fleet running `/wiki-learn`) writing the *same*
+  space no longer block or lose writes. A submit appends its extracted subjects
+  to the durable work-log lock-free and returns; whichever PID holds the
+  per-space lock drains the queue **drain-until-dry**, sweeping up subjects other
+  PIDs appended mid-drain. `wiki_ingest` drains the queue before its own work
+  (holding the lock obligates draining). Same-host only — see *Migration* /
+  known-limitations §10 for the cross-host constraint.
+- **`wiki-drain` CLI command** (`anytype-llm-wiki wiki-drain --space-id <id>`) —
+  backstop that drains any queued `wiki_remember` subjects on demand (for the
+  pathological case where a submitter crashed between append and drain).
 - **`prune-citations` CLI command** (`anytype-llm-wiki prune-citations
   --space-id <id>`) — a one-time, idempotent sweep that removes stale
   `wiki_query` citation edges left in entity/concept relation arrays by old
