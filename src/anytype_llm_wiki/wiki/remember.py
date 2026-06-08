@@ -27,6 +27,7 @@ import httpx
 
 from . import types_schema
 from . import bootstrap as _bootstrap
+from . import config
 from .bootstrap import _object_deeplink
 from .extraction import (
     check_remote_endpoint_consent,
@@ -264,6 +265,11 @@ def wiki_remember(
     if len(knowledge) > _KNOWLEDGE_MAX_CHARS:
         return _error_remember_result("[DATA ERROR] knowledge_too_large")
 
+    # Loud fail-safe (v0.7.3): wiki_remember shares resolve_entity, so refuse to
+    # run when alias adjudication is enabled on an unvetted model (over-merge risk).
+    _adj_err = config.alias_adjudication_config_error()
+    if _adj_err:
+        return _error_remember_result(_adj_err)
 
     client = WikiClient()
     try:

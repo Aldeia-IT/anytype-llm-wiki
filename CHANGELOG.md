@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-09
+
+### Added
+
+- **LLM alias adjudication in entity resolution (`resolve_entity` Step 3).** When
+  exact-title (Step 1) and fuzzy `SequenceMatcher` ≥ 0.92 (Step 2) both miss, a
+  local LLM is asked whether the candidate denotes the **same real-world entity**
+  as one of the same-type lexical search hits — catching aliases / abbreviations /
+  renames that title matching can't (e.g. `Blackstone BPM` → `Blackstone`). It is:
+  - **Conservative** — returns null unless confident; a part-of / related entity
+    stays distinct (`Gnosis Safe` ≠ `Gnosis`, `Finance Agent` ≠ `Finance`), with a
+    prompt-injection guard and a hallucinated-id filter (only an id from the
+    candidate set can win).
+  - **Best-effort** — any LLM/transport/parse failure resolves to *create*; it
+    **never blocks ingest** (same posture as contradiction detection). Also runs
+    in `wiki_remember`, which shares `resolve_entity`.
+  - **Scoped** to `wiki_entity`/`wiki_concept`; `wiki_source` dedup stays
+    exact/fuzzy. Candidate pool is the lexical search hits already in hand (no
+    extra fetch, no Qdrant dependency); an embedding-neighbour pass remains a
+    possible future recall improvement.
+- **Model-vetting fail-safe for alias adjudication.** A small model over-merges
+  distinct entities, so the feature is **off by default** (`WIKI_ALIAS_ADJUDICATION`,
+  default off) and only runs on a **vetted** extraction model (prefix match;
+  built-in `qwen3.5-mlx`, extend via `WIKI_ALIAS_VETTED_MODELS` — a comma-separated
+  prefix list is the override; there is no force flag). Because the config is fixed
+  at start time, **the MCP server refuses to start (exit 2, loud `[CONFIG ERROR]`
+  on stderr) when adjudication is enabled on an unvetted model** — not lazily on
+  first ingest. `wiki_ingest`/`wiki_remember` keep the same guard at their entry
+  for one-shot CLI invocations that bypass server startup.
+
 ## [0.7.2] - 2026-06-08
 
 ### Fixed

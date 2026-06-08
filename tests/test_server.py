@@ -86,3 +86,49 @@ class TestReindexTool:
         stats = reindex_anytype()
         assert isinstance(stats, dict)
         assert "spaces" in stats
+
+
+class TestServerStartupAdjudicationGate:
+    """v0.7.3: the MCP server REFUSES TO START (exit 2) when alias adjudication is
+    enabled on an unvetted model — the config is fixed at start time, so it fails
+    loud and early rather than lazily on the first ingest."""
+
+    def _patch_run(self, monkeypatch):
+        import sys as _sys
+        from anytype_llm_wiki import server
+        ran = {"n": 0}
+        monkeypatch.setattr(server.mcp, "run", lambda **k: ran.__setitem__("n", ran["n"] + 1))
+        monkeypatch.setattr(_sys, "argv", ["anytype-llm-wiki"])  # no subcommand → server path
+        return server, ran
+
+    def test_refuses_start_when_enabled_unvetted(self, monkeypatch):
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        monkeypatch.delenv("WIKI_ALIAS_VETTED_MODELS", raising=False)
+        server, ran = self._patch_run(monkeypatch)
+        with pytest.raises(SystemExit) as ei:
+            server.main()
+        assert ei.value.code == 2
+        assert ran["n"] == 0, "server must NOT start the MCP transport with an unapproved config"
+
+    def test_starts_when_enabled_and_vetted(self, monkeypatch):
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen3.5-mlx:latest")
+        server, ran = self._patch_run(monkeypatch)
+        server.main()  # must not raise
+        assert ran["n"] == 1
+
+    def test_starts_when_disabled_even_if_model_unvetted(self, monkeypatch):
+        monkeypatch.delenv("WIKI_ALIAS_ADJUDICATION", raising=False)  # off (default)
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        server, ran = self._patch_run(monkeypatch)
+        server.main()
+        assert ran["n"] == 1
+
+    def test_starts_when_unvetted_model_whitelisted(self, monkeypatch):
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        monkeypatch.setenv("WIKI_ALIAS_VETTED_MODELS", "qwen2.5")
+        server, ran = self._patch_run(monkeypatch)
+        server.main()
+        assert ran["n"] == 1

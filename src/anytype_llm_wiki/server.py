@@ -225,6 +225,17 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] in wiki_cli.SUBCOMMANDS:
         sys.exit(wiki_cli.main(sys.argv[1:]))
 
+    # Fail-safe (v0.7.3): the alias-adjudication config is fixed at start time, so
+    # refuse to START the MCP server with an UNAPPROVED config — adjudication
+    # enabled on an unvetted model (over-merge risk). Fail loud and early here,
+    # not lazily on the first ingest. (CLI subcommands above keep their own
+    # entry-point guard for one-shot invocations that bypass server startup.)
+    from .wiki import config as wiki_config
+    adj_err = wiki_config.alias_adjudication_config_error()
+    if adj_err:
+        print(f"anytype-llm-wiki: refusing to start — {adj_err}", file=sys.stderr)
+        sys.exit(2)
+
     mcp.run(transport="stdio")
 
 
