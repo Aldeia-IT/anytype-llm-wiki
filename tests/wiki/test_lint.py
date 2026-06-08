@@ -481,6 +481,45 @@ class TestAsymmetricRelationCheck:
             f"asymmetric_relation must be Critical; got {asymmetric[0]['severity']!r}"
         )
 
+    @respx.mock
+    def test_symmetric_relation_not_flagged_when_backlinks_polluted(self, monkeypatch):
+        """Regression: a genuinely symmetric A<->B pair must NOT be flagged just
+        because A's backlinks list is non-empty but happens to omit B.
+
+        This reproduces the file-back citation-pollution case: provenance backlinks
+        (e.g. query objects) crowd an entity's backlinks field, so the primary
+        signal can't confirm a symmetric peer. The check must fall through to the
+        symmetric-outbound signal rather than firing a false Critical.
+        """
+        # A->B and B->A are symmetric in wiki_relations, but A's backlinks lists
+        # only an unrelated provenance object ("query-x"), not B.
+        obj_a = _make_entity(
+            "obj-a", name="Entity A", relations=["obj-b"], backlinks=["query-x"]
+        )
+        obj_b = _make_entity(
+            "obj-b", name="Entity B", relations=["obj-a"], backlinks=["query-x"]
+        )
+        objects = [obj_a, obj_b]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(obj_a)
+        register(obj_b)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(
+            201, json={"object": {"id": "log-001", "name": "lint-log"}}
+        ))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        findings = result.get("findings", [])
+        asymmetric = [f for f in findings if f.get("check") == "asymmetric_relation"]
+        assert len(asymmetric) == 0, (
+            f"A symmetric pair must not be flagged when backlinks omit the peer but "
+            f"the symmetric outbound confirms reciprocity; got: {asymmetric}"
+        )
+
 
 class TestBacklinksD1:
     """AC1: D1 backlinks primary path and fallback behavior."""

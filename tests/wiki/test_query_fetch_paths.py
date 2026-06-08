@@ -119,10 +119,11 @@ class TestNeighborhoodCacheReplacement:
 
 class TestReciprocalReadMergeWriteReplacement:
     @respx.mock
-    def test_reciprocal_merge_preserves_prior(self, monkeypatch):
-        """N1: reciprocal back-reference onto a cited entity reads the LIVE relation
-        array (prior=['e1','e2'], distinct from the stale enumeration snapshot) and
-        writes prior ∪ [query_id]. Single dispatcher route.
+    def test_no_reciprocal_write_onto_cited_entity(self, monkeypatch):
+        """File-back must not touch a cited entity's relation set at all: no PATCH
+        is issued onto the cited entity, and its pre-existing relations are left
+        untouched. The forward provenance edge lives only on the query object
+        (wiki_drew_from); the reverse direction is served by Anytype backlinks.
         """
         cited_id = "entity-cited-001"
         prior = ["e1", "e2"]
@@ -170,13 +171,19 @@ class TestReciprocalReadMergeWriteReplacement:
         query_id = result.get("query_object_id")
         assert query_id, result
         cited_patches = [p for (oid, p) in patch_calls if oid == cited_id]
-        assert cited_patches, [oid for oid, _ in patch_calls]
-        for payload in cited_patches:
-            for prop in payload.get("properties", []):
-                if prop.get("key") in ("wiki_relations", "wiki_related"):
-                    merged = prop.get("objects", [])
-                    assert "e1" in merged and "e2" in merged, merged
-                    assert query_id in merged, merged
+        assert not cited_patches, (
+            f"No PATCH should be issued onto cited entity {cited_id!r}; got: {cited_patches}"
+        )
+        # The forward provenance edge is written on the query object instead.
+        drew_from = [
+            prop
+            for (oid, payload) in patch_calls if oid == query_id
+            for prop in payload.get("properties", [])
+            if prop.get("key") == "wiki_drew_from"
+        ]
+        assert drew_from and cited_id in (drew_from[0].get("objects") or []), (
+            f"Expected wiki_drew_from on the query object citing {cited_id!r}; got {drew_from}"
+        )
 
 
 class TestCitedObjectDeletedReplacement:

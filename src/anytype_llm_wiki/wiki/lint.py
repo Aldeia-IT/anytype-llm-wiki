@@ -335,9 +335,14 @@ def wiki_lint(
 
             # (a) asymmetric_relation (Critical)
             for target in _outbound(o):
-                if has_primary:
-                    reciprocal = target in inbound
-                else:
+                # Two independent signals confirm reciprocity; either suffices.
+                # The backlinks (primary) signal is NOT authoritative on its own:
+                # a populated backlinks list may carry unrelated inbound links
+                # (e.g. citation provenance) and omit a genuinely symmetric peer.
+                # So when backlinks doesn't confirm, fall through to the
+                # symmetric-outbound check rather than flagging immediately.
+                reciprocal = has_primary and target in inbound
+                if not reciprocal:
                     t_obj = by_id.get(target) or _fetch_cached(
                         read_client, space_id, target, cache, enum_map
                     )

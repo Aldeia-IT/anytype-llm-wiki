@@ -52,9 +52,6 @@ _WIKI_TYPE_KEYS = ("wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query
 # Relation property keys carrying 1-hop neighbors per type.
 _RELATION_KEYS = ("wiki_relations", "wiki_related", "wiki_drew_from", "wiki_subjects")
 
-# Reciprocal back-reference relation key by cited-object type.
-_RECIPROCAL_REL_KEY = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
-
 # Slow-synthesis log signal threshold (seconds). WIKI_EXTRACT_TIMEOUT (600s) is the
 # deliberate accepted finite ceiling; this signals an unusually slow interactive call.
 _SLOW_SYNTH_SECONDS = 60.0
@@ -859,36 +856,14 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
         warnings.append(scrub_credentials(f"drew_from_write_failed: {exc}"))
         status = "partial"
 
-    # Reciprocal back-reference onto each pre-existing cited entity/concept via
-    # explicit READ-MERGE-WRITE (N1 — never a full overwrite, which would clobber
-    # the cited object's persisted relations down to just [query_id]).
-    for oid, type_key in cited_entries:
-        rel_key = _RECIPROCAL_REL_KEY.get(type_key)
-        if rel_key is None:
-            continue
-        obj = _refetch_for_writeback(read_client, space_id, oid, enum_map)
-        if obj is None:
-            warnings.append(f"reciprocal_read_failed: {oid}")
-            status = "partial"
-            continue
-        prior = _relation_objects_for_key(obj, rel_key)
-        merged = list(dict.fromkeys(prior + [query_id]))  # union, order-stable
-        try:
-            write_client.update_object(
-                space_id,
-                oid,
-                {"properties": [{"key": rel_key, "objects": merged}]},
-            )
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-            warnings.append(scrub_credentials(f"reciprocal_write_failed: {oid}: {exc}"))
-            status = "partial"
-
+    # NOTE: we deliberately do NOT write a reciprocal citation edge back onto the
+    # cited entities/concepts. A citation is directional provenance, not a
+    # bidirectional semantic relation — injecting query_ids into an entity's
+    # wiki_relations conflated "relates to that entity" with "was cited by that
+    # query", which (a) polluted the knowledge graph (queries surfaced as
+    # entity neighbours / duplicate-sweep candidates) and (b) produced a wave of
+    # false "asymmetric_relation" findings in wiki_lint, since the reverse edge
+    # lives under a different key (wiki_drew_from) than lint's symmetry check
+    # reads. The reverse "cited by" direction is served for free by Anytype
+    # backlinks, auto-derived from the query's wiki_drew_from above.
     return True, query_id, status, warnings
-
-
-def _relation_objects_for_key(obj: dict, rel_key: str) -> list[str]:
-    """Parse the current relation ``objects`` array for ``rel_key`` (dual-shape)."""
-    for prop in obj.get("properties", []) or []:
-        if isinstance(prop, dict) and prop.get("key") == rel_key:
-            return _parse_relation_elements(prop.get("objects"))
-    return []
