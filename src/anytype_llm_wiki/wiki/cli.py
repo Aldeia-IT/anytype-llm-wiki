@@ -24,6 +24,8 @@ SUBCOMMANDS = (
     "wiki-remember",
     "wiki-query",
     "wiki-lint",
+    "wiki-drain",
+    "prune-citations",
     "doctor",
 )
 
