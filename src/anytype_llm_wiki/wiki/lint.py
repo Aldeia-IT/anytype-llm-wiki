@@ -89,6 +89,16 @@ def _type_of(obj: dict) -> str:
     return t or ""
 
 
+# Generic/stopword tokens that, as the *sole* distinctive content of a shorter
+# title, make a token-subset match too noisy to flag (e.g. "the" ⊂ "the project").
+# A subset is only flagged when the shorter title carries at least one token that
+# is NOT in this set and is ≥ 3 chars — so "axe" ⊂ "axe token" still fires.
+_TITLE_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "with",
+    "new", "page", "note", "item", "list", "misc", "general", "other", "untitled",
+})
+
+
 def _title_duplicate_reason(title_a: str, title_b: str) -> str | None:
     """Return a reason if two *normalized* titles likely denote the same subject.
 
@@ -96,7 +106,9 @@ def _title_duplicate_reason(title_a: str, title_b: str) -> str | None:
     - identical normalized title (e.g. an entity and a concept that share a name,
       which type-scoped resolution never merges across the kind boundary); and
     - one title's tokens being a proper subset of the other's (e.g. "axe" vs
-      "axe token"), the classic abbreviation/expansion duplicate.
+      "axe token"), the classic abbreviation/expansion duplicate — gated by a
+      distinctiveness floor so stopword-only subsets ("the" ⊂ "the project")
+      don't generate noise.
 
     Returns None when the titles are unrelated. Informational only — it suggests a
     review/merge, never an automatic mutation.
@@ -104,8 +116,12 @@ def _title_duplicate_reason(title_a: str, title_b: str) -> str | None:
     if not title_a or not title_b or title_a == title_b:
         return "identical title" if title_a and title_a == title_b else None
     tokens_a, tokens_b = set(title_a.split()), set(title_b.split())
-    if tokens_a and tokens_b and (tokens_a < tokens_b or tokens_b < tokens_a):
-        return "one title is a token-subset of the other"
+    if not tokens_a or not tokens_b:
+        return None
+    if tokens_a < tokens_b or tokens_b < tokens_a:
+        smaller = tokens_a if tokens_a < tokens_b else tokens_b
+        if any(len(t) >= 3 and t not in _TITLE_STOPWORDS for t in smaller):
+            return "one title is a token-subset of the other"
     return None
 
 
@@ -360,8 +376,22 @@ def wiki_lint(
             tk = _type_of(o)
             has_primary, inbound = _backlinks_inbound(o)
 
-            # (a) asymmetric_relation (Critical)
+            # (a) asymmetric_relation (Critical) + stale_citation_edge (High)
             for target in _outbound(o):
+                t_obj = by_id.get(target)
+                # Stale citation edge: an OLD wiki_query file-back wrote query ids
+                # into entity/concept relation arrays. A citation is directional
+                # provenance (served by Anytype backlinks now), not a semantic
+                # relation — flag it for pruning, and do NOT also report it as
+                # asymmetric (it never reciprocates, by design).
+                if t_obj is not None and _type_of(t_obj) == "wiki_query":
+                    findings.append(_finding(
+                        "high", "stale_citation_edge", o, space_id,
+                        f"relation {o['id']} -> Query object {target}: stale "
+                        "file-back citation edge; prune it "
+                        "(see docs/known-limitations §11 / the prune-citations command)",
+                    ))
+                    continue
                 # Two independent signals confirm reciprocity; either suffices.
                 # The backlinks (primary) signal is NOT authoritative on its own:
                 # a populated backlinks list may carry unrelated inbound links
@@ -370,7 +400,7 @@ def wiki_lint(
                 # symmetric-outbound check rather than flagging immediately.
                 reciprocal = has_primary and target in inbound
                 if not reciprocal:
-                    t_obj = by_id.get(target) or _fetch_cached(
+                    t_obj = t_obj or _fetch_cached(
                         read_client, space_id, target, cache, enum_map
                     )
                     reciprocal = (

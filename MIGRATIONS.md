@@ -86,6 +86,30 @@ content is transmitted off-machine — a one-time consent banner is shown and an
 acknowledgement file is written under
 `~/.local/share/anytype-llm-wiki/extraction-endpoint-acknowledged-*`.
 
+## Upgrading to the next release (Unreleased)
+
+### One-time: prune stale `wiki_query` citation edges
+
+Earlier versions of `wiki_query` file-back wrote a reciprocal back-reference from
+each cited entity/concept into its `wiki_relations`/`wiki_related` array, pointing
+at the filed Query object. That is now recognized as graph pollution (a citation
+is directional provenance, served by Anytype backlinks — not a semantic
+relation), and new file-backs no longer write it.
+
+If you ran `wiki_query` with file-back on a space **before** this release, those
+stale edges persist and will surface as High `stale_citation_edge` findings in
+`wiki_lint`. Run the one-time, idempotent cleanup to remove them:
+
+```bash
+uv run anytype-llm-wiki prune-citations --space-id <your-space-id>
+```
+
+It scans entity/concept relation arrays, strips any id that points at a
+`wiki_query` object, and leaves all genuine relations untouched. Safe to re-run
+(a clean space reports `edges_pruned: 0`). No reverse-direction information is
+lost — the "cited by" view is still available via Anytype backlinks. Fresh spaces
+(no prior file-back history) need no action.
+
 ## Future versions
 
 Migration notes for v0.4.0 and later releases will be appended to this file as

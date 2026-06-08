@@ -520,6 +520,138 @@ class TestAsymmetricRelationCheck:
             f"the symmetric outbound confirms reciprocity; got: {asymmetric}"
         )
 
+    @respx.mock
+    def test_asymmetric_still_fires_with_polluted_backlinks(self, monkeypatch):
+        """False-negative guard for the OR-combine: a genuinely asymmetric edge
+        whose source has a NON-empty backlinks list that omits the peer must still
+        fire (backlinks present-but-incomplete must not suppress a real asymmetry).
+        """
+        # A -> B, but B has no outbound to A; A.backlinks is non-empty yet omits B.
+        obj_a = _make_entity("obj-a", name="A", relations=["obj-b"], backlinks=["other-x"])
+        obj_b = _make_entity("obj-b", name="B", relations=[], backlinks=["other-x"])
+        objects = [obj_a, obj_b]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(obj_a)
+        register(obj_b)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        asymmetric = [f for f in result.get("findings", []) if f.get("check") == "asymmetric_relation"]
+        assert any(f["object_id"] == "obj-a" and "obj-b" in f["detail"] for f in asymmetric), (
+            f"A genuinely asymmetric A->B must still fire despite polluted backlinks; got {asymmetric}"
+        )
+
+    @respx.mock
+    def test_stale_citation_edge_flagged_not_asymmetric(self, monkeypatch):
+        """An entity whose wiki_relations points at a wiki_query object (a stale
+        file-back citation edge) is flagged High `stale_citation_edge` and NOT
+        double-reported as asymmetric_relation."""
+        entity = _make_entity("obj-ent", name="Entity", relations=["q-1"], backlinks=[])
+        query_obj = {
+            "id": "q-1",
+            "name": "Some question?",
+            "type": {"key": "wiki_query"},
+            "properties": [{"key": "wiki_answer", "text": "an answer"}],
+            "backlinks": [],
+        }
+        objects = [entity, query_obj]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        register(entity)
+        register(query_obj)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        findings = result.get("findings", [])
+        stale = [f for f in findings if f.get("check") == "stale_citation_edge"]
+        asym = [
+            f for f in findings
+            if f.get("check") == "asymmetric_relation" and "q-1" in f.get("detail", "")
+        ]
+        assert len(stale) == 1, f"Expected one stale_citation_edge finding; got {findings}"
+        assert stale[0]["severity"] == "high", stale[0]
+        assert stale[0]["object_id"] == "obj-ent", stale[0]
+        assert not asym, f"Stale citation edge must NOT also be flagged asymmetric; got {asym}"
+
+
+    @respx.mock
+    def test_new_file_back_shape_is_lint_clean(self, monkeypatch):
+        """Integration guard (M5) for the original bug: the state the CURRENT
+        wiki_query file-back produces — a Query object with wiki_drew_from -> entity,
+        and the entity carrying only the auto-derived backlink (NO query id in its
+        wiki_relations) — must yield ZERO asymmetric_relation and ZERO
+        stale_citation_edge findings. Re-introducing the reverse write would put a
+        query id back into wiki_relations and trip stale_citation_edge here."""
+        entity = _make_entity("e-1", name="Cited Entity", relations=["e-2"], backlinks=["q-1", "e-2"])
+        peer = _make_entity("e-2", name="Peer", relations=["e-1"], backlinks=["e-1"])
+        query_obj = {
+            "id": "q-1",
+            "name": "What is the cited entity?",
+            "type": {"key": "wiki_query"},
+            "properties": [
+                {"key": "wiki_answer", "text": "an answer"},
+                {"key": "wiki_drew_from", "objects": ["e-1"]},
+            ],
+            "backlinks": [],
+        }
+        objects = [entity, peer, query_obj]
+
+        get_side_effect, register = _standard_mocks(objects=objects)
+        for o in objects:
+            register(o)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        findings = result.get("findings", [])
+        bad = [
+            f for f in findings
+            if f.get("check") in ("asymmetric_relation", "stale_citation_edge")
+        ]
+        assert not bad, (
+            f"The current file-back shape must be lint-clean of asymmetric/stale "
+            f"findings; got {bad}"
+        )
+
+
+class TestTitleDuplicateReason:
+    """Unit tests for the embedding-independent title-duplicate heuristic."""
+
+    def test_identical_title(self):
+        from anytype_llm_wiki.wiki.lint import _title_duplicate_reason
+        assert _title_duplicate_reason("axe dao", "axe dao") == "identical title"
+
+    def test_token_subset_distinctive_flags(self):
+        from anytype_llm_wiki.wiki.lint import _title_duplicate_reason
+        assert _title_duplicate_reason("axe", "axe token") is not None
+
+    def test_token_subset_stopword_only_does_not_flag(self):
+        from anytype_llm_wiki.wiki.lint import _title_duplicate_reason
+        # "the" carries no distinctive token → suppressed as noise.
+        assert _title_duplicate_reason("the", "the project") is None
+
+    def test_partial_overlap_does_not_flag(self):
+        from anytype_llm_wiki.wiki.lint import _title_duplicate_reason
+        # Neither is a subset of the other.
+        assert _title_duplicate_reason("axe token", "axe coin") is None
+
+    def test_empty_titles(self):
+        from anytype_llm_wiki.wiki.lint import _title_duplicate_reason
+        assert _title_duplicate_reason("", "axe") is None
+        assert _title_duplicate_reason("axe", "") is None
+
 
 class TestBacklinksD1:
     """AC1: D1 backlinks primary path and fallback behavior."""

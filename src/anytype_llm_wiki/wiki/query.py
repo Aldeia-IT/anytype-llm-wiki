@@ -867,3 +867,82 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
     # reads. The reverse "cited by" direction is served for free by Anytype
     # backlinks, auto-derived from the query's wiki_drew_from above.
     return True, query_id, status, warnings
+
+
+def _relation_ids_for_key(obj: dict, rel_key: str) -> list[str]:
+    """Parse an object's relation ``objects`` array for ``rel_key`` (dual-shape)."""
+    for prop in obj.get("properties", []) or []:
+        if isinstance(prop, dict) and prop.get("key") == rel_key:
+            return _parse_relation_elements(prop.get("objects"))
+    return []
+
+
+_PRUNE_REL_KEY = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
+
+
+def prune_stale_citation_edges(space_id: str) -> dict:
+    """Remove stale citation edges left by the OLD ``wiki_query`` file-back.
+
+    Earlier versions wrote a filed Query object's id into each cited
+    entity/concept's ``wiki_relations``/``wiki_related`` array (a reciprocal
+    back-reference). That is graph pollution — a citation is directional
+    provenance served by Anytype backlinks, not a semantic relation — and on a
+    current wiki it shows up as ``stale_citation_edge`` lint findings. This
+    idempotent sweep strips any ``wiki_query``-typed id from entity/concept
+    relation arrays. Safe to re-run (a clean space yields 0 edges_pruned).
+
+    Returns ``{objects_scanned, objects_modified, edges_pruned, status, error,
+    warnings}``.
+    """
+    result: dict = {
+        "objects_scanned": 0,
+        "objects_modified": 0,
+        "edges_pruned": 0,
+        "status": "ok",
+        "error": None,
+        "warnings": [],
+    }
+    client = WikiClient()
+    try:
+        try:
+            objects = client.list_objects(space_id)
+        except (httpx.HTTPError, ConnectionError) as exc:
+            result["status"] = "error"
+            result["error"] = scrub_credentials(f"anytype_unavailable: {exc}")
+            return result
+
+        query_ids = {
+            o["id"] for o in objects
+            if isinstance(o, dict) and o.get("id") and _type_of(o) == "wiki_query"
+        }
+        if not query_ids:
+            return result  # nothing could be stale
+
+        for o in objects:
+            if not isinstance(o, dict):
+                continue
+            rel_key = _PRUNE_REL_KEY.get(_type_of(o))
+            if rel_key is None:
+                continue
+            result["objects_scanned"] += 1
+            current = _relation_ids_for_key(o, rel_key)
+            if not current:
+                continue
+            kept = [rid for rid in current if rid not in query_ids]
+            pruned = len(current) - len(kept)
+            if not pruned:
+                continue
+            try:
+                client.update_object(
+                    space_id, o["id"], {"properties": [{"key": rel_key, "objects": kept}]}
+                )
+                result["objects_modified"] += 1
+                result["edges_pruned"] += pruned
+            except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+                result["status"] = "partial"
+                result["warnings"].append(
+                    scrub_credentials(f"prune_failed {o['id']}: {exc}")
+                )
+        return result
+    finally:
+        client.close()
