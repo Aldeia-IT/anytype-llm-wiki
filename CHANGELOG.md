@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-08
+
+### Fixed
+
+- **`prune-citations` and `wiki-drain` CLI commands are now reachable.** Both were
+  registered in the argument parser in 0.7.0 but omitted from the `SUBCOMMANDS`
+  routing gate in `server.main()`, so invoking `anytype-llm-wiki prune-citations`
+  / `wiki-drain` silently started the MCP server instead of running the command.
+  Added them to the gate, plus a guard test that pins the routing registry to the
+  parser's subcommands so the two can't drift again. (v0.7.0 shipped these two
+  commands unreachable; use 0.7.1.)
+
 ## [0.7.0] - 2026-06-08
 
 ### Breaking
