@@ -191,6 +191,22 @@ The per-space write lock is held for that whole drain, and it is **fail-fast**
 gets `[DATA ERROR] ingest_in_progress` rather than queuing. For a large narration
 this hold can last as long as N sequential consolidations (each an LLM call).
 
+**Same-host fleet contention.** When independent agents (separate PIDs /
+terminals) on one host invoke `/wiki-learn` against the *same* space, `flock`
+serializes them correctly — but the loser is *rejected*, not queued, and since
+`/wiki-learn` is fire-and-forget at session end its error is typically swallowed
+→ that agent's learnings are silently not captured. This is a real gap for
+fleet/SDLC usage and is being addressed by the queue-submit model (append the
+extracted subjects to the durable work-log and return; a single drainer applies
+them under the lock), tracked in [architecture §6](./architecture.md#6-concurrency-model--the-per-space-lock).
+
+**Cross-host (no protection).** `flock` is host-local: agents writing the same
+vault from *different* hosts or containers without a shared `WIKI_LOCK_DIR` get
+no mutual exclusion → genuinely interleaved `resolve→create` → duplicate entities
+and clobbered relation arrays. **Operating constraint: write a shared vault from a
+single host.** A cross-host guard needs an Anytype-side compare-and-set, not a
+file lock.
+
 This is accepted: on a single-user / single-agent vault, concurrent same-space
 writes are rare, and the contender gets a clear, retryable error (no data is at
 risk — the no-drop work-log makes any interrupted drain resumable). The complete

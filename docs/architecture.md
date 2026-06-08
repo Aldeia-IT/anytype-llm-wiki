@@ -119,6 +119,18 @@ is **not atomic**. Two concurrent writers resolving the same name would both mis
 and both create — the duplicate class in §5. The lock makes resolve→write
 serial per space, which is load-bearing for dedup correctness.
 
+**Cross-host caveat (important for fleets).** `fcntl.flock` is **host-local** —
+it only serializes processes on the *same* machine that share `WIKI_LOCK_DIR`.
+That covers the common fleet case (several agents/terminals on one host, default
+`~/.local/share`). It does **not** cover writers on *different* hosts (or in
+containers without a shared lock-dir volume) writing the *same* Anytype vault:
+flock gives them no mutual exclusion at all, so their `resolve→create` genuinely
+interleaves → duplicate entities and last-writer-wins clobbering of relation
+arrays. There is no cross-host guard today (the same limitation `wiki_bootstrap`
+documents in known-limitations §1). **Operating constraint: write a shared vault
+from a single host.** A cross-host guard would need an Anytype-side
+compare-and-set, not a file lock.
+
 **Why extraction runs *inside* the lock.** Extraction is a read-only LLM call
 (no writes) and the single longest step — minutes on a large local model. It is
 tempting to move it outside the lock to shrink the critical section. We don't,
