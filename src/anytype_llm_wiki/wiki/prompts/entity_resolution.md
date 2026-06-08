@@ -24,6 +24,12 @@ These are NOT the same entity (return null):
 - A part, component, sub-system, or product/brand line OF the candidate.
   "Gnosis Safe" is NOT "Gnosis". "Finance Agent" is NOT "Finance". "USDC" is
   NOT "EURe".
+- A wrapped, bridged, synthetic, staked, or otherwise derivative version of an
+  asset/token is DISTINCT from the underlying — they are separate tokens with
+  separate contracts. "wxDAI" is NOT "xDAI". "WETH" is NOT "ETH". "stETH" is NOT
+  "ETH". "USDC.e" (bridged) is NOT "USDC".
+- A fork, sibling, or version variant is distinct. "Ethereum Classic" is NOT
+  "Ethereum"; "qwen2.5:7b" is NOT "qwen3.5-mlx".
 - A related or adjacent entity that merely co-occurs with the candidate.
 - A broader category versus a specific instance of it.
 - Two distinct entities that happen to share a word.
