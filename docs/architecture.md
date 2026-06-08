@@ -81,14 +81,28 @@ out the stale clause. Re-asserting the *same* knowledge converges to a no-op.
 1. exact match on the normalized title (NFC + dash-fold + casefold + whitespace
    collapse) among same-type candidates → update;
 2. fuzzy `SequenceMatcher` ratio ≥ `0.92` among same-type candidates → update;
-3. otherwise → create.
+3. **LLM alias adjudication** (v0.7.3, entity/concept only) — when (1) and (2)
+   miss, ask a local LLM whether the candidate denotes the *same real-world
+   entity* as one of the same-type lexical search hits (alias / abbreviation /
+   rename). Conservative (returns null unless confident; a part-of or related
+   entity stays distinct — `Gnosis Safe` ≠ `Gnosis`), hallucinated-id-filtered,
+   and **best-effort** (any LLM/transport failure → create; never blocks ingest).
+   Same posture as contradiction detection. `wiki_source` dedup stays exact/fuzzy.
+   **Off by default and model-gated:** a small model over-merges, so it runs only
+   when `WIKI_ALIAS_ADJUDICATION` is on *and* the extraction model is **vetted**
+   (prefix match; built-in `qwen3.5-mlx`, extend via `WIKI_ALIAS_VETTED_MODELS` —
+   no force flag). Enabled-on-an-unvetted-model is an *unapproved config*: the MCP
+   server **refuses to start** (exit 2, loud `[CONFIG ERROR]`), with the same guard
+   at `wiki_ingest`/`wiki_remember` entry for one-shot CLI use.
+4. otherwise → create.
 
 Consequences (and where dupes come from):
 
 - **Cross-kind twins** — the same normalized title as a `wiki_entity` *and* a
   `wiki_concept` are never merged, because resolution only looks within one type.
-- **Abbreviation/expansion** — "AXE" vs "AXE token" sits well below 0.92, so both
-  are created.
+- **Abbreviation/expansion** — "AXE" vs "AXE token" sits below the 0.92 fuzzy
+  threshold; step (3) now catches the true-alias cases the LLM is confident about,
+  while genuinely distinct near-matches still create.
 
 These are *detected* (not yet prevented) by `wiki_lint`'s opt-in duplicate sweep,
 which has two passes, both scoped to `_DEDUP_TYPES = (entity, concept)` so Query

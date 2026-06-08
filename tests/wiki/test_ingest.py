@@ -2340,6 +2340,235 @@ class TestHeadingFallbackSuppression:
         )
 
 
+class TestAliasAdjudication:
+    """v0.7.3: resolve_entity Step 3 — LLM alias adjudication merges same-entity
+    aliases that exact/fuzzy title matching misses. Conservative + best-effort:
+    null / hallucinated-id / LLM-failure all resolve to create; scoped to
+    entity/concept (wiki_source dedup stays exact/fuzzy)."""
+
+    # --- _adjudicate_alias unit behavior (LLM mocked) ---
+
+    def test_adjudicate_returns_valid_match(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setattr(
+            _ingest, "_call_ollama_prompt",
+            lambda base, prompt: ({"same_as": "obj-black", "reason": "alias"}, None),
+        )
+        cands = [{"object_id": "obj-black", "name": "Blackstone"}]
+        assert _ingest._adjudicate_alias("Blackstone BPM", "the BPM product", cands) == "obj-black"
+
+    def test_adjudicate_null_returns_none(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setattr(
+            _ingest, "_call_ollama_prompt",
+            lambda base, prompt: ({"same_as": None, "reason": "distinct"}, None),
+        )
+        cands = [{"object_id": "obj-gnosis", "name": "Gnosis"}]
+        assert _ingest._adjudicate_alias("Gnosis Safe", "a smart account", cands) is None
+
+    def test_adjudicate_hallucinated_id_filtered(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setattr(
+            _ingest, "_call_ollama_prompt",
+            lambda base, prompt: ({"same_as": "obj-not-in-candidate-set"}, None),
+        )
+        cands = [{"object_id": "obj-real", "name": "Real"}]
+        assert _ingest._adjudicate_alias("X", "", cands) is None
+
+    def test_adjudicate_llm_failure_returns_none(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        import httpx as _httpx
+
+        def _boom(base, prompt):
+            raise _httpx.ConnectError("no ollama")
+
+        monkeypatch.setattr(_ingest, "_call_ollama_prompt", _boom)
+        cands = [{"object_id": "obj-x", "name": "X"}]
+        assert _ingest._adjudicate_alias("X variant", "", cands) is None
+
+    def test_adjudicate_empty_candidates_returns_none(self):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        assert _ingest._adjudicate_alias("X", "facts", []) is None
+
+    # --- resolve_entity Step 3 integration (fake client; adjudicator mocked) ---
+
+    def _client(self, results):
+        class _FakeClient:
+            def search(self, space_id, query=None, **kw):
+                return results
+        return _FakeClient()
+
+    def test_resolve_entity_merges_on_adjudicator_match(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen3.5-mlx:latest")
+        existing = {"id": "obj-black", "name": "Blackstone",
+                    "type": {"key": "wiki_entity"}, "properties": []}
+        monkeypatch.setattr(_ingest, "_adjudicate_alias", lambda t, f, c: "obj-black")
+        res = _ingest.resolve_entity(
+            self._client([existing]), "space", "wiki_entity", "Blackstone BPM",
+            candidate_facts="the on-chain BPM product",
+        )
+        assert res["action"] == "update", res
+        assert res["target"]["id"] == "obj-black", res
+
+    def test_resolve_entity_creates_when_adjudicator_null(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen3.5-mlx:latest")
+        existing = {"id": "obj-gnosis", "name": "Gnosis",
+                    "type": {"key": "wiki_entity"}, "properties": []}
+        monkeypatch.setattr(_ingest, "_adjudicate_alias", lambda t, f, c: None)
+        res = _ingest.resolve_entity(
+            self._client([existing]), "space", "wiki_entity", "Gnosis Safe",
+            candidate_facts="a smart-account product",
+        )
+        assert res["action"] == "create", res
+
+    def test_resolve_entity_skips_adjudication_for_source_type(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen3.5-mlx:latest")
+        existing = {"id": "src-1", "name": "Some Source",
+                    "type": {"key": "wiki_source"}, "properties": []}
+        called = {"n": 0}
+
+        def _spy(t, f, c):
+            called["n"] += 1
+            return "src-1"
+
+        monkeypatch.setattr(_ingest, "_adjudicate_alias", _spy)
+        res = _ingest.resolve_entity(
+            self._client([existing]), "space", "wiki_source", "Another Source",
+        )
+        assert res["action"] == "create", res
+        assert called["n"] == 0, "alias adjudication must NOT run for wiki_source"
+
+    def test_resolve_entity_exact_match_skips_adjudication(self, monkeypatch):
+        """Step 1 exact-title match short-circuits before Step 3 (no LLM call)."""
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen3.5-mlx:latest")
+        existing = {"id": "obj-1", "name": "Gnosis Chain",
+                    "type": {"key": "wiki_entity"}, "properties": []}
+        called = {"n": 0}
+
+        def _spy(t, f, c):
+            called["n"] += 1
+            return None
+
+        monkeypatch.setattr(_ingest, "_adjudicate_alias", _spy)
+        res = _ingest.resolve_entity(
+            self._client([existing]), "space", "wiki_entity", "gnosis chain",
+        )
+        assert res["action"] == "update" and res["target"]["id"] == "obj-1", res
+        assert called["n"] == 0, "exact title match must short-circuit before adjudication"
+
+
+class TestAliasAdjudicationGate:
+    """v0.7.3 fail-safe: adjudication is OFF by default and only runs on a VETTED
+    model. Enabled + unvetted aborts LOUD (a [CONFIG ERROR]); the vetted list (not
+    a force flag) is the escape hatch."""
+
+    # --- config-level vetting logic ---
+
+    def test_disabled_by_default(self, monkeypatch):
+        from anytype_llm_wiki.wiki import config
+        monkeypatch.delenv("WIKI_ALIAS_ADJUDICATION", raising=False)
+        assert config.alias_adjudication_enabled() is False
+        assert config.alias_adjudication_active() is False
+
+    def test_vetted_and_unvetted_models(self, monkeypatch):
+        from anytype_llm_wiki.wiki import config
+        monkeypatch.delenv("WIKI_ALIAS_VETTED_MODELS", raising=False)
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen3.5-mlx:latest")
+        assert config.adjudication_model_vetted() is True
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        assert config.adjudication_model_vetted() is False
+
+    def test_vetted_list_extension_via_env(self, monkeypatch):
+        from anytype_llm_wiki.wiki import config
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        monkeypatch.setenv("WIKI_ALIAS_VETTED_MODELS", "qwen2.5, my-model")
+        assert config.adjudication_model_vetted() is True
+
+    def test_config_error_when_enabled_unvetted(self, monkeypatch):
+        from anytype_llm_wiki.wiki import config
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        monkeypatch.delenv("WIKI_ALIAS_VETTED_MODELS", raising=False)
+        err = config.alias_adjudication_config_error()
+        assert err and "[CONFIG ERROR]" in err and "qwen2.5:7b" in err, err
+        assert config.alias_adjudication_active() is False
+
+    def test_no_config_error_when_enabled_vetted_or_disabled(self, monkeypatch):
+        from anytype_llm_wiki.wiki import config
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen3.5-mlx:latest")
+        assert config.alias_adjudication_config_error() is None
+        assert config.alias_adjudication_active() is True
+        # disabled + unvetted model → still no error (feature is off)
+        monkeypatch.delenv("WIKI_ALIAS_ADJUDICATION", raising=False)
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        assert config.alias_adjudication_config_error() is None
+
+    # --- resolve_entity gating ---
+
+    def test_resolve_entity_default_off_skips_adjudicator(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.delenv("WIKI_ALIAS_ADJUDICATION", raising=False)  # default off
+        existing = {"id": "obj-x", "name": "Blackstone",
+                    "type": {"key": "wiki_entity"}, "properties": []}
+        called = {"n": 0}
+
+        def _spy(t, f, c):
+            called["n"] += 1
+            return "obj-x"
+
+        monkeypatch.setattr(_ingest, "_adjudicate_alias", _spy)
+
+        class _C:
+            def search(self, s, query=None, **k):
+                return [existing]
+
+        res = _ingest.resolve_entity(_C(), "space", "wiki_entity", "Blackstone BPM", candidate_facts="x")
+        assert res["action"] == "create", res
+        assert called["n"] == 0, "adjudication must NOT run when the feature is off (default)"
+
+    def test_resolve_entity_runs_when_unvetted_model_whitelisted(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        monkeypatch.setenv("WIKI_ALIAS_VETTED_MODELS", "qwen2.5")  # opt this model in
+        existing = {"id": "obj-x", "name": "Blackstone",
+                    "type": {"key": "wiki_entity"}, "properties": []}
+        monkeypatch.setattr(_ingest, "_adjudicate_alias", lambda t, f, c: "obj-x")
+
+        class _C:
+            def search(self, s, query=None, **k):
+                return [existing]
+
+        res = _ingest.resolve_entity(_C(), "space", "wiki_entity", "Blackstone BPM", candidate_facts="x")
+        assert res["action"] == "update" and res["target"]["id"] == "obj-x", res
+
+    # --- loud-fail integration through the ingest entry point ---
+
+    @respx.mock
+    def test_wiki_ingest_loud_error_on_enabled_unvetted(self, monkeypatch):
+        monkeypatch.setenv("WIKI_ALIAS_ADJUDICATION", "on")
+        monkeypatch.setenv("WIKI_EXTRACT_MODEL", "qwen2.5:7b")
+        monkeypatch.delenv("WIKI_ALIAS_VETTED_MODELS", raising=False)
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "x", "name": "x"}}))
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        res = wiki_ingest(source="https://example.com/paper", space_id=FAKE_SPACE_ID)
+        assert res.get("status") == "error", res
+        assert "[CONFIG ERROR]" in str(res.get("error", "")), res
+        assert "alias_adjudication_unvetted_model" in str(res.get("error", "")), res
+        assert res.get("objects_created") in ([], None), res
+
+
 class TestWriteWikilogRegressionGuards:
     """AC-R12b/B6, SF15 — regression guards for #284 shipped behavior (MUST PASS now)."""
 

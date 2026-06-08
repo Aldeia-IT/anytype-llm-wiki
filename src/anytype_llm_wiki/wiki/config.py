@@ -234,6 +234,63 @@ def log_level() -> str:
     return os.environ.get("WIKI_LOG_LEVEL", DEFAULT_WIKI_LOG_LEVEL)
 
 
+# --- Alias adjudication (v0.7.3): resolve_entity Step 3 LLM entity merge --------
+# Default OFF: the package default extraction model (a small model) tends to
+# over-merge distinct entities ("Gnosis Safe" → "Gnosis"), so the feature must be
+# explicitly enabled. When enabled, only a VETTED model may run it — an unvetted
+# model + adjudication-on fails LOUD (a [CONFIG ERROR]) rather than silently
+# corrupting the graph. There is no force flag: extend the vetted list via
+# WIKI_ALIAS_VETTED_MODELS (comma-separated prefixes) — adding your model IS the
+# override.
+DEFAULT_WIKI_ALIAS_ADJUDICATION = False
+_DEFAULT_VETTED_ADJUDICATION_PREFIXES = ("qwen3.5-mlx",)
+
+
+def alias_adjudication_enabled() -> bool:
+    """Resolve WIKI_ALIAS_ADJUDICATION — whether resolve_entity Step 3 (LLM alias
+    merge) is active. Defaults to OFF; accepts 1/true/yes/on (case-insensitive)."""
+    raw = os.environ.get("WIKI_ALIAS_ADJUDICATION")
+    if raw is None:
+        return DEFAULT_WIKI_ALIAS_ADJUDICATION
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def vetted_adjudication_prefixes() -> tuple[str, ...]:
+    """Vetted extraction-model prefixes for alias adjudication: the built-in
+    defaults UNION any comma-separated prefixes in WIKI_ALIAS_VETTED_MODELS."""
+    extra = os.environ.get("WIKI_ALIAS_VETTED_MODELS", "")
+    extras = tuple(p.strip() for p in extra.split(",") if p.strip())
+    return _DEFAULT_VETTED_ADJUDICATION_PREFIXES + extras
+
+
+def adjudication_model_vetted(model: str | None = None) -> bool:
+    """True if the (resolved) extraction model matches a vetted prefix."""
+    m = model if model is not None else extract_model()
+    return any(m.startswith(p) for p in vetted_adjudication_prefixes())
+
+
+def alias_adjudication_active() -> bool:
+    """True when adjudication should actually run: enabled AND a vetted model."""
+    return alias_adjudication_enabled() and adjudication_model_vetted()
+
+
+def alias_adjudication_config_error() -> str | None:
+    """The loud fail-safe: a ``[CONFIG ERROR]`` message when adjudication is
+    enabled but the model is NOT vetted, else None. Checked at ingest/remember
+    entry so the run aborts before any object is created."""
+    if alias_adjudication_enabled() and not adjudication_model_vetted():
+        return (
+            "[CONFIG ERROR] alias_adjudication_unvetted_model: "
+            f"WIKI_ALIAS_ADJUDICATION is on but the extraction model "
+            f"'{extract_model()}' is not vetted for alias merging (a small model "
+            "over-merges distinct entities). Add its prefix to "
+            "WIKI_ALIAS_VETTED_MODELS, switch to a vetted model (one of: "
+            f"{', '.join(vetted_adjudication_prefixes())}), or set "
+            "WIKI_ALIAS_ADJUDICATION=off."
+        )
+    return None
+
+
 def fetch_extra_ports() -> list[int]:
     """Resolve WIKI_FETCH_EXTRA_PORTS — a comma-separated list of extra ports.
 
