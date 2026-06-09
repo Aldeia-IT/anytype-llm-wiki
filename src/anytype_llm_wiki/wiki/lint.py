@@ -153,6 +153,16 @@ def _outbound(obj: dict) -> list[str]:
     return _parse_relation_elements(prop.get("objects"))
 
 
+def _obj_text(obj: dict) -> str:
+    """The knowledge text of a fetched object — wiki_facts (entity) or
+    wiki_definition (concept), whichever is present."""
+    for key in ("wiki_facts", "wiki_definition"):
+        prop = _prop(obj, key)
+        if prop and isinstance(prop.get("text"), str) and prop["text"]:
+            return prop["text"]
+    return ""
+
+
 def _backlinks_inbound(obj: dict) -> tuple[bool, set[str]]:
     """Inbound resolution from the get_object ``backlinks`` data.
 
@@ -239,6 +249,7 @@ def wiki_lint(
     space_id: str,
     severity_threshold: str = "all",
     include_duplicates: bool = False,
+    adjudicate_duplicates: bool = False,
 ) -> dict:
     """Run the structural health check over a bootstrapped wiki space.
 
@@ -641,6 +652,41 @@ def wiki_lint(
                             f"{o['id']} and {cid} are near-duplicates (score {s})",
                         ))
         report["potential_duplicates"] = potential_duplicates
+
+        # --- Step 7b: opt-in LLM adjudication of the duplicate SUGGESTIONS ---
+        # Annotate each potential_duplicate with a same/distinct verdict so the
+        # human review queue is pre-judged (far higher signal than the embedding/
+        # title heuristics alone). This is NON-DESTRUCTIVE — it only labels a
+        # suggestion a human reviews — so there is **no vetting gate** (a wrong
+        # suggestion is harmless; the model-vetting fail-safe is reserved for the
+        # destructive write-time auto-merge in resolve_entity). Best-effort: any
+        # adjudication failure leaves the verdict off and never aborts the lint.
+        if adjudicate_duplicates and potential_duplicates:
+            from .ingest import _adjudicate_alias  # local import avoids any cycle
+            for entry in potential_duplicates:
+                a = by_id.get(entry["object_a"]) or _fetch_cached(
+                    read_client, space_id, entry["object_a"], cache, enum_map
+                )
+                b = by_id.get(entry["object_b"]) or _fetch_cached(
+                    read_client, space_id, entry["object_b"], cache, enum_map
+                )
+                if not (isinstance(a, dict) and isinstance(b, dict)):
+                    continue
+                # _adjudicate_alias is self-guarding (returns None on ANY failure,
+                # never raises), so the lint can call it directly. A failed call
+                # presents as "distinct" — a harmless, human-reviewed suggestion.
+                match = _adjudicate_alias(
+                    a.get("name", ""), _obj_text(a),
+                    [{"object_id": b["id"], "name": b.get("name", ""),
+                      "facts": _obj_text(b)[:400]}],
+                )
+                verdict = "same" if match == b["id"] else "distinct"
+                entry["llm_verdict"] = verdict
+                base = entry.get("recommendation", "review for possible merge")
+                entry["recommendation"] = (
+                    f"LLM: likely the SAME entity — {base}" if verdict == "same"
+                    else f"LLM: likely DISTINCT — keep separate ({base})"
+                )
 
         # --- Step 8: severity post-filter (findings[] only) ---
         min_rank = _THRESHOLD_MIN_RANK.get(severity_threshold, 0)

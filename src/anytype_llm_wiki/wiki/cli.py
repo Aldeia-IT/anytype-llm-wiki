@@ -205,6 +205,7 @@ def _cmd_lint(args: argparse.Namespace) -> int:
         space_id=args.space_id,
         severity_threshold=args.severity_threshold,
         include_duplicates=args.include_duplicates,
+        adjudicate_duplicates=args.adjudicate_duplicates,
     )
     if args.json:
         print(json.dumps(result, indent=2, default=str))
@@ -375,6 +376,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Run the opt-in Qdrant duplicate sweep (can exceed the ≤60s budget).",
+    )
+    lint_p.add_argument(
+        "--adjudicate-duplicates",
+        action="store_true",
+        default=False,
+        help="Annotate each potential_duplicate with a non-destructive LLM "
+             "same/distinct verdict (one local-LLM call per pair). Pre-judges the "
+             "human review queue; best on a vetted model.",
     )
     lint_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     lint_p.set_defaults(func=_cmd_lint)
