@@ -178,6 +178,7 @@ def wiki_lint(
     space_id: str,
     severity_threshold: str = "all",
     include_duplicates: bool = False,
+    adjudicate_duplicates: bool = False,
 ) -> dict:
     """Run a read-only structural health check over a bootstrapped wiki space.
 
@@ -204,10 +205,16 @@ def wiki_lint(
             "all" | "low" | "medium" | "high" | "critical" ("all" includes
             informational; "low" excludes it). Does not affect potential_duplicates[].
         include_duplicates: When True, run the opt-in Qdrant duplicate sweep.
+        adjudicate_duplicates: When True, annotate each potential_duplicate with a
+            NON-DESTRUCTIVE LLM same/distinct verdict (one local-LLM call per pair)
+            to pre-judge the human review queue. Suggestion-only — no graph
+            mutation and no model-vetting gate. Best on a vetted model.
 
     Returns:
         A LintReport dict (object_counts, findings, potential_duplicates, summary,
         elapsed_ms, wiki_log_id, deeplink, warnings, status, error, error_category).
+        With ``adjudicate_duplicates``, each potential_duplicates[] entry also
+        carries an ``llm_verdict`` ("same"|"distinct") and a sharpened recommendation.
     """
     from .wiki.lint import wiki_lint as _wiki_lint
 
@@ -215,6 +222,7 @@ def wiki_lint(
         space_id=space_id,
         severity_threshold=severity_threshold,
         include_duplicates=include_duplicates,
+        adjudicate_duplicates=adjudicate_duplicates,
     )
 
 

@@ -1800,6 +1800,69 @@ class TestDuplicateSweep:
         )
 
 
+class TestDuplicateAdjudication:
+    """v0.7.3: opt-in `adjudicate_duplicates` annotates each potential_duplicate
+    with a NON-DESTRUCTIVE LLM same/distinct verdict (suggestion-only, no gate)."""
+
+    def _two_titled_dups(self, monkeypatch):
+        # Token-subset titles ("axe" ⊂ "axe token") fire the embedding-independent
+        # title pass, so we don't need a live vector backend. Isolate to that pass.
+        a = _make_entity("obj-a", name="AXE token", relations=[], backlinks=[])
+        b = _make_entity("obj-b", name="AXE", relations=[], backlinks=[])
+        gse, reg = _standard_mocks(objects=[a, b])
+        reg(a); reg(b)
+        import anytype_llm_wiki.indexer as _idx
+        monkeypatch.setattr(_idx, "semantic_search_core", lambda *a, **k: [])
+        return gse
+
+    @respx.mock
+    def test_verdict_same_annotates_entry(self, monkeypatch):
+        gse = self._two_titled_dups(monkeypatch)
+        import anytype_llm_wiki.wiki.ingest as _ing
+        # adjudicator returns the candidate id → "same"
+        monkeypatch.setattr(_ing, "_adjudicate_alias", lambda name, facts, cands: cands[0]["object_id"])
+        respx.get().mock(side_effect=gse)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        res = wiki_lint(space_id=FAKE_SPACE_ID, include_duplicates=True, adjudicate_duplicates=True)
+        pds = res.get("potential_duplicates", [])
+        assert pds, pds
+        assert all(e.get("llm_verdict") == "same" for e in pds), pds
+        assert all("SAME" in e.get("recommendation", "") for e in pds), pds
+
+    @respx.mock
+    def test_verdict_distinct_annotates_entry(self, monkeypatch):
+        gse = self._two_titled_dups(monkeypatch)
+        import anytype_llm_wiki.wiki.ingest as _ing
+        monkeypatch.setattr(_ing, "_adjudicate_alias", lambda name, facts, cands: None)  # → distinct
+        respx.get().mock(side_effect=gse)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        res = wiki_lint(space_id=FAKE_SPACE_ID, include_duplicates=True, adjudicate_duplicates=True)
+        pds = res.get("potential_duplicates", [])
+        assert pds, pds
+        assert all(e.get("llm_verdict") == "distinct" for e in pds), pds
+        assert all("DISTINCT" in e.get("recommendation", "") for e in pds), pds
+
+    @respx.mock
+    def test_no_verdict_and_no_llm_call_when_flag_off(self, monkeypatch):
+        gse = self._two_titled_dups(monkeypatch)
+        import anytype_llm_wiki.wiki.ingest as _ing
+        called = {"n": 0}
+        def _spy(*a, **k):
+            called["n"] += 1
+            return None
+        monkeypatch.setattr(_ing, "_adjudicate_alias", _spy)
+        respx.get().mock(side_effect=gse)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        res = wiki_lint(space_id=FAKE_SPACE_ID, include_duplicates=True)  # adjudicate off (default)
+        pds = res.get("potential_duplicates", [])
+        assert pds, "title-pass duplicate should still be detected"
+        assert all("llm_verdict" not in e for e in pds), pds
+        assert called["n"] == 0, "adjudicator must not be called when the flag is off"
+
+
 class TestSeverityThreshold:
     """AC7: severity_threshold filtering (SF7)."""
 

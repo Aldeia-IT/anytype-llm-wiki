@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     exact/fuzzy. Candidate pool is the lexical search hits already in hand (no
     extra fetch, no Qdrant dependency); an embedding-neighbour pass remains a
     possible future recall improvement.
+- **`wiki_lint --adjudicate-duplicates` — the safe, non-destructive use of the
+  adjudicator (recommended over auto-merge).** With `--include-duplicates`, each
+  `potential_duplicate` finding is annotated with a same/distinct **`llm_verdict`**
+  and a sharpened recommendation, turning the noisy embedding/title heuristic list
+  into a pre-judged review queue for the weekly human-reviewed cleanup. Because it
+  only labels a *suggestion* (no graph mutation), there is **no model-vetting gate**
+  — that fail-safe is reserved for the destructive write-time auto-merge. Exposed
+  on the `wiki_lint` MCP tool (`adjudicate_duplicates`) and the CLI flag.
 - **Model-vetting fail-safe for alias adjudication.** A small model over-merges
   distinct entities, so the feature is **off by default** (`WIKI_ALIAS_ADJUDICATION`,
   default off) and only runs on a **vetted** extraction model (prefix match;
