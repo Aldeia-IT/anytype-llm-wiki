@@ -1,7 +1,7 @@
 # wiki_query — the compounding loop: cited answers that feed future questions
 # Render: d2 --theme 0 --pad 24 compounding-loop.d2 compounding-loop.svg
 
-direction: down
+direction: right
 
 classes: {
   step:  { shape: rectangle; style: { fill: "#ffffff"; stroke: "#9fb3c8" } }
@@ -12,14 +12,14 @@ classes: {
 
 q: Question { class: io }
 
-graph: Wiki knowledge graph {
+graph: Wiki graph {
   class: store
-  label: "Wiki knowledge graph\nentities · concepts · sources\n+ past Q&A"
+  label: "Wiki graph\nentities · concepts\nsources · past Q&A"
 }
 
 retrieve: Tiered retrieval {
   class: step
-  label: "Tiered retrieval\ngraph navigation + Qdrant vectors"
+  label: "Tiered retrieval\n(graph + vectors)"
 }
 
 synth: LLM synthesis {
@@ -31,14 +31,14 @@ answer: Cited answer { class: io }
 
 fileback: File-back {
   class: step
-  label: "File-back (optional)\nQuery object + wiki_drew_from edges"
+  label: "File-back\n(optional)"
 }
 
 q -> retrieve
 graph -> retrieve: context
 retrieve -> synth
-synth -> answer: with source citations
+synth -> answer: "+ citations"
 answer -> fileback
-fileback -> graph: "stored → retrievable by FUTURE questions" {
+fileback -> graph: "stored → feeds FUTURE questions" {
   style: { stroke: "#5a9367"; bold: true; font-color: "#3f6b4a"; stroke-width: 2 }
 }

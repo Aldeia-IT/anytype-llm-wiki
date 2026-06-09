@@ -31,6 +31,12 @@ Give autonomous agents a **persistent, typed memory that survives sessions** and
 
 > This is exactly how we use it at [Aldeia IT](https://github.com/Aldeia-IT): as the shared long-term memory for our autonomous SDLC agent fleet.
 
+### 3. A research buffer that cuts repeated web search
+
+Researching a topic across many sessions means re-fetching the same facts from the web again and again. Ingest findings once and the wiki becomes a **local, cited cache**: future questions are answered from accumulated knowledge first, with a live web search reserved for genuine gaps — fewer tokens, faster answers, and a provenance trail.
+
+→ Concrete example: a **Capoeira genealogy** research project uses it as exactly this kind of buffer — caching lineage and history research so repeated LLM web-searches are avoided.
+
 ## How it works
 
 Everything runs **locally** — no off-machine egress. An MCP client calls the
@@ -38,13 +44,13 @@ Everything runs **locally** — no off-machine egress. An MCP client calls the
 typed knowledge graph), **Ollama** (extraction / reasoning LLM + embeddings), and
 **Qdrant** (vectors).
 
-![System architecture overview](docs/diagrams/architecture-overview.svg)
+[![System architecture overview](docs/diagrams/architecture-overview.svg)](docs/diagrams/architecture-overview.svg?raw=true)
 
 Questions are answered **only from your wiki, with citations** — and the Q&A can be
 *filed back* so future questions retrieve from it. The wiki gets more useful the more
 you use it:
 
-![The compounding loop](docs/diagrams/compounding-loop.svg)
+[![The compounding loop](docs/diagrams/compounding-loop.svg)](docs/diagrams/compounding-loop.svg?raw=true)
 
 > 📊 **[Full visual guide →](docs/diagrams.md)** — the write pipeline, the typed object
 > model, and the self-auditing health check.
@@ -182,7 +188,7 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_ALIAS_VETTED_MODELS` | _(empty)_ | Comma-separated extra extraction-model **prefixes** trusted for alias adjudication, unioned with the built-in `qwen3.5-mlx`. Adding your model here is the override (there is no force flag). |
 
 > **⚠️ `WIKI_ALIAS_ADJUDICATION` is experimental — leave it off unless you accept the risk.**
-> *What it does:* on a write, when exact- and fuzzy-title matching don't find an existing object, it asks a local LLM whether the new entity is the **same real-world entity** as a lexically-similar existing one (an alias / abbreviation / rename) and, if so, **merges** into it instead of creating a duplicate — automatically catching dupes like `axedao` → `Axé DAO`.
+> *What it does:* on a write, when exact- and fuzzy-title matching don't find an existing object, it asks a local LLM whether the new entity is the **same real-world entity** as a lexically-similar existing one (an alias / abbreviation / rename) and, if so, **merges** into it instead of creating a duplicate — automatically catching dupes like `k8s` → `Kubernetes`.
 > *The risk:* the judgment is **destructive and irreversible-ish** (the new object is never created), and even a vetted model **over-merges distinct entities** on real, messy data (observed ~7–10% on a real graph — e.g. merging a person into the eponymous project, a testnet into its mainnet, or a collection into one of its members). It is deliberately conservative and gated behind this off-by-default flag + a vetted-model startup check, but **it can still corrupt your graph**. For curation we recommend the **non-destructive** path instead: `wiki_lint --include-duplicates`, which only *surfaces* `potential_duplicate` suggestions for a human to review and merge.
 | `WIKI_EXTRACT_ENDPOINT` | *(unset → local Ollama)* | Hosted LLM endpoint for extraction (off-machine; consent-gated) |
 | `WIKI_INDEX_THRESHOLD` | `200` | Object count at which `wiki_query` flips Tier 1 → Tier 2 |

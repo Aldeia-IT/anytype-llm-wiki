@@ -35,12 +35,11 @@ The wiki is a small set of Anytype types created by `wiki_bootstrap`:
 Objects carry **properties, not body text** — Anytype silently drops a `body`
 PATCH (see known-limitations §4), so durable content lives in text properties.
 
-![Typed object model](diagrams/object-model.svg)
+[![Typed object model](diagrams/object-model.svg)](diagrams/object-model.svg?raw=true)
 
 ## 3. The write pipeline (extract → resolve → consolidate → relate → log → reindex)
 
-![Write pipeline](diagrams/flow-ingest.svg)
-
+[![Write pipeline](diagrams/flow-ingest.svg)](diagrams/flow-ingest.svg?raw=true)
 
 Both `wiki_ingest` (from a URL/file) and `wiki_remember` (from narration) run the
 same backbone:
@@ -116,7 +115,7 @@ Consequences (and where dupes come from):
 
 - **Cross-kind twins** — the same normalized title as a `wiki_entity` *and* a
   `wiki_concept` are never merged, because resolution only looks within one type.
-- **Abbreviation/expansion** — "AXE" vs "AXE token" sits below the 0.92 fuzzy
+- **Abbreviation/expansion** — `"k8s"` vs `"k8s cluster"` sits below the 0.92 fuzzy
   threshold; step (3) now catches the true-alias cases the LLM is confident about,
   while genuinely distinct near-matches still create.
 
@@ -125,13 +124,13 @@ which has two passes, both scoped to `_DEDUP_TYPES = (entity, concept)` so Query
 objects are never candidates:
 
 - **title pass** (embedding-independent) — flags identical normalized titles
-  (incl. cross-kind) and token-subset pairs ("axe" ⊂ "axe token");
+  (incl. cross-kind) and token-subset pairs ("k8s" ⊂ "k8s cluster");
 - **embedding pass** — Qdrant nearest-neighbours within a score band, candidate
   type re-checked defensively.
 
 **Deferred:** prevention at write time via an embedding nearest-neighbour check
 inside `resolve_entity` (the "Step 3 embedding sweep" stub) — tracked as the
-dedup follow-up (aldeia-box#286). Auto-merging across the entity/concept kind
+dedup follow-up. Auto-merging across the entity/concept kind
 boundary is intentionally *not* done (it would consolidate a definition into an
 entity), so cross-kind twins are surfaced for human merge rather than merged
 automatically.
@@ -249,7 +248,7 @@ is marked done — it is surfaced, not silently dropped, and not retried forever
 
 ## 8. Retrieval & the compounding loop (`wiki_query`)
 
-![The compounding loop](diagrams/compounding-loop.svg)
+[![The compounding loop](diagrams/compounding-loop.svg)](diagrams/compounding-loop.svg?raw=true)
 
 `wiki_query` enumerates the wiki, picks a **tier** by object count
 (`WIKI_INDEX_THRESHOLD`, default 200): Tier 1 index-navigation below it, Tier 2
@@ -286,7 +285,7 @@ clean-synthesis precondition and the file-back gate — see
 
 ## 9. Structural health (`wiki_lint`)
 
-![Self-auditing health check](diagrams/flow-lint.svg)
+[![Self-auditing health check](diagrams/flow-lint.svg)](diagrams/flow-lint.svg?raw=true)
 
 A read-only battery over a bootstrapped space (mutates nothing but one WikiLog
 receipt):
