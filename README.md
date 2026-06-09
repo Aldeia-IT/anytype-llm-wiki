@@ -44,13 +44,13 @@ Everything runs **locally** — no off-machine egress. An MCP client calls the
 typed knowledge graph), **Ollama** (extraction / reasoning LLM + embeddings), and
 **Qdrant** (vectors).
 
-[![System architecture overview](docs/diagrams/architecture-overview.svg)](docs/diagrams/architecture-overview.svg?raw=true)
+![System architecture overview](docs/diagrams/architecture-overview.svg)
 
 Questions are answered **only from your wiki, with citations** — and the Q&A can be
 *filed back* so future questions retrieve from it. The wiki gets more useful the more
 you use it:
 
-[![The compounding loop](docs/diagrams/compounding-loop.svg)](docs/diagrams/compounding-loop.svg?raw=true)
+![The compounding loop](docs/diagrams/compounding-loop.svg)
 
 > 📊 **[Full visual guide →](docs/diagrams.md)** — the write pipeline, the typed object
 > model, and the self-auditing health check.
