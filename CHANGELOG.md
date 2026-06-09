@@ -11,11 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **LLM alias adjudication in entity resolution (`resolve_entity` Step 3).** When
-  exact-title (Step 1) and fuzzy `SequenceMatcher` ≥ 0.92 (Step 2) both miss, a
-  local LLM is asked whether the candidate denotes the **same real-world entity**
-  as one of the same-type lexical search hits — catching aliases / abbreviations /
-  renames that title matching can't (e.g. `Blackstone BPM` → `Blackstone`). It is:
+- **LLM alias adjudication in entity resolution (`resolve_entity` Step 3) —
+  EXPERIMENTAL, off by default.** When exact-title (Step 1) and fuzzy
+  `SequenceMatcher` ≥ 0.92 (Step 2) both miss, a local LLM is asked whether the
+  candidate denotes the **same real-world entity** as one of the same-type lexical
+  search hits — catching aliases / abbreviations / renames that title matching
+  can't (e.g. `axedao` → `Axé DAO`). **Enable at your own risk:** even the vetted
+  model over-merges distinct entities on real data (~7–10% in a real-graph eval),
+  and a merge is destructive. The recommended, non-destructive curation path is
+  `wiki_lint --include-duplicates` (human-reviewed suggestions). It is:
   - **Conservative** — returns null unless confident; a part-of / related entity
     stays distinct (`Gnosis Safe` ≠ `Gnosis`, `Finance Agent` ≠ `Finance`), with a
     prompt-injection guard and a hallucinated-id filter (only an id from the

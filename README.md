@@ -180,8 +180,12 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint |
 | `EMBED_MODEL` / `EMBED_DIMS` | `bge-m3` / `1024` | Embedding model and its vector dimensions (must match) |
 | `WIKI_EXTRACT_MODEL` | `qwen2.5:7b` | Local model for extraction / synthesis / consolidation |
-| `WIKI_ALIAS_ADJUDICATION` | `off` | Enable LLM alias-merge in entity resolution (Step 3). Off by default — a small model over-merges distinct entities. Only runs on a vetted model; **enabling it on an unvetted model makes the MCP server refuse to start** (loud `[CONFIG ERROR]`). |
+| `WIKI_ALIAS_ADJUDICATION` | `off` | **⚠️ EXPERIMENTAL — enable at your own risk.** LLM alias-merge in entity resolution (Step 3). Off by default. Only runs on a vetted model; **enabling it on an unvetted model makes the MCP server refuse to start** (loud `[CONFIG ERROR]`). See the warning below. |
 | `WIKI_ALIAS_VETTED_MODELS` | _(empty)_ | Comma-separated extra extraction-model **prefixes** trusted for alias adjudication, unioned with the built-in `qwen3.5-mlx`. Adding your model here is the override (there is no force flag). |
+
+> **⚠️ `WIKI_ALIAS_ADJUDICATION` is experimental — leave it off unless you accept the risk.**
+> *What it does:* on a write, when exact- and fuzzy-title matching don't find an existing object, it asks a local LLM whether the new entity is the **same real-world entity** as a lexically-similar existing one (an alias / abbreviation / rename) and, if so, **merges** into it instead of creating a duplicate — automatically catching dupes like `axedao` → `Axé DAO`.
+> *The risk:* the judgment is **destructive and irreversible-ish** (the new object is never created), and even a vetted model **over-merges distinct entities** on real, messy data (observed ~7–10% on a real graph — e.g. merging a person into the eponymous project, a testnet into its mainnet, or a collection into one of its members). It is deliberately conservative and gated behind this off-by-default flag + a vetted-model startup check, but **it can still corrupt your graph**. For curation we recommend the **non-destructive** path instead: `wiki_lint --include-duplicates`, which only *surfaces* `potential_duplicate` suggestions for a human to review and merge.
 | `WIKI_EXTRACT_ENDPOINT` | *(unset → local Ollama)* | Hosted LLM endpoint for extraction (off-machine; consent-gated) |
 | `WIKI_INDEX_THRESHOLD` | `200` | Object count at which `wiki_query` flips Tier 1 → Tier 2 |
 | `WIKI_AUTO_REINDEX` | `true` | Auto-reindex after each write (set `false` to batch via a scheduled reindex) |

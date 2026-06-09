@@ -81,7 +81,8 @@ out the stale clause. Re-asserting the *same* knowledge converges to a no-op.
 1. exact match on the normalized title (NFC + dash-fold + casefold + whitespace
    collapse) among same-type candidates → update;
 2. fuzzy `SequenceMatcher` ratio ≥ `0.92` among same-type candidates → update;
-3. **LLM alias adjudication** (v0.7.3, entity/concept only) — when (1) and (2)
+3. **LLM alias adjudication** (v0.7.3, **EXPERIMENTAL — off by default**, entity/
+   concept only) — when (1) and (2)
    miss, ask a local LLM whether the candidate denotes the *same real-world
    entity* as one of the same-type lexical search hits (alias / abbreviation /
    rename). Conservative (returns null unless confident; a part-of or related
@@ -94,6 +95,13 @@ out the stale clause. Re-asserting the *same* knowledge converges to a no-op.
    no force flag). Enabled-on-an-unvetted-model is an *unapproved config*: the MCP
    server **refuses to start** (exit 2, loud `[CONFIG ERROR]`), with the same guard
    at `wiki_ingest`/`wiki_remember` entry for one-shot CLI use.
+   **⚠️ Known limitation (why it's experimental):** even the vetted model
+   **over-merges distinct entities** on real, messy data — a real-graph eval saw
+   ~7–10% over-merges (person→eponymous project, testnet→mainnet, collection→member).
+   Because a merge is destructive, **leaving this off and using the non-destructive
+   `wiki_lint --include-duplicates` suggestions (human-reviewed) is the recommended
+   curation path.** A future revision will route the adjudicator's judgment into
+   those `potential_duplicate` *suggestions* rather than auto-merging at write time.
 4. otherwise → create.
 
 Consequences (and where dupes come from):
