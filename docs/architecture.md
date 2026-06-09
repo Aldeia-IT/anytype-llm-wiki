@@ -35,11 +35,11 @@ The wiki is a small set of Anytype types created by `wiki_bootstrap`:
 Objects carry **properties, not body text** — Anytype silently drops a `body`
 PATCH (see known-limitations §4), so durable content lives in text properties.
 
-[![Typed object model](diagrams/object-model.svg)](diagrams/object-model.svg?raw=true)
+![Typed object model](diagrams/object-model.svg)
 
 ## 3. The write pipeline (extract → resolve → consolidate → relate → log → reindex)
 
-[![Write pipeline](diagrams/flow-ingest.svg)](diagrams/flow-ingest.svg?raw=true)
+![Write pipeline](diagrams/flow-ingest.svg)
 
 Both `wiki_ingest` (from a URL/file) and `wiki_remember` (from narration) run the
 same backbone:
@@ -248,7 +248,7 @@ is marked done — it is surfaced, not silently dropped, and not retried forever
 
 ## 8. Retrieval & the compounding loop (`wiki_query`)
 
-[![The compounding loop](diagrams/compounding-loop.svg)](diagrams/compounding-loop.svg?raw=true)
+![The compounding loop](diagrams/compounding-loop.svg)
 
 `wiki_query` enumerates the wiki, picks a **tier** by object count
 (`WIKI_INDEX_THRESHOLD`, default 200): Tier 1 index-navigation below it, Tier 2
@@ -285,7 +285,7 @@ clean-synthesis precondition and the file-back gate — see
 
 ## 9. Structural health (`wiki_lint`)
 
-[![Self-auditing health check](diagrams/flow-lint.svg)](diagrams/flow-lint.svg?raw=true)
+![Self-auditing health check](diagrams/flow-lint.svg)
 
 A read-only battery over a bootstrapped space (mutates nothing but one WikiLog
 receipt):
