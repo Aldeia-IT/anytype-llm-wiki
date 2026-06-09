@@ -109,14 +109,14 @@ match) then resolves to the existing objects. Verified live and pinned by
 Residual caveats:
 - If `WIKI_EXTRACT_ENDPOINT` points at a non-deterministic remote model, re-extraction may vary and produce near-duplicate entities on re-ingest.
 - Resolution is title-based (exact + fuzzy ≥ 0.92; the embedding sweep is not yet implemented), so genuinely different surface forms of the same concept across *different* sources can still create separate objects.
-- Resolution is also **type-scoped**: the same normalized title as both a `wiki_entity` and a `wiki_concept` (a cross-kind twin) is never merged, and an abbreviation/expansion pair like "AXE" vs "AXE token" falls below the 0.92 threshold.
+- Resolution is also **type-scoped**: the same normalized title as both a `wiki_entity` and a `wiki_concept` (a cross-kind twin) is never merged, and an abbreviation/expansion pair like "k8s" vs "k8s cluster" falls below the 0.92 threshold.
 
 These are now **detected** by the lint potential-duplicate sweep, which runs an
 embedding-independent **title pass** (identical normalized titles incl. cross-kind,
 plus token-subset pairs) alongside the vector pass, scoped to entity/concept
 objects so Query objects are never flagged. **Prevention at write time** (an
 embedding nearest-neighbour check inside `resolve_entity`) remains the deferred
-follow-up (aldeia-box#286); see
+follow-up; see
 [architecture §5](./architecture.md#5-entity-resolution--duplicate-handling).
 
 ## 7. Filed `wiki_query` answers surface only after the next reindex (compounding latency)
@@ -216,14 +216,14 @@ intentionally not provided; cross-host single-writer-host constraint documented.
 
 The lint duplicate sweep now *detects* cross-kind twins and abbreviation/expansion
 pairs (§6 above), but `resolve_entity` does not yet *prevent* them at write time
-(the embedding-resolve step is the deferred aldeia-box#286 follow-up). Note that
+(the embedding-resolve step is a deferred follow-up). Note that
 automatic merging across the entity↔concept boundary is intentionally **not**
 done even once embedding-resolve lands — consolidating a concept's definition
 into an entity (or vice-versa) changes meaning — so cross-kind twins will always
 be surfaced for human/agent merge rather than merged silently.
 
 **Status:** detection shipped; write-time prevention for same-kind near-dupes
-tracked (aldeia-box#286); cross-kind auto-merge intentionally out of scope.
+tracked; cross-kind auto-merge intentionally out of scope.
 
 ## 12. Spaces with old `wiki_query` file-back history carry stale citation edges
 

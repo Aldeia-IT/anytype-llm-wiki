@@ -16,7 +16,7 @@ agent fleet, an IDE) calls the `anytype-llm-wiki` MCP server, which orchestrates
 local backends: **Anytype** (the typed knowledge graph), **Ollama** (an extraction /
 reasoning LLM plus an embedding model), and **Qdrant** (the vector store).
 
-![System architecture overview](diagrams/architecture-overview.svg)
+[![System architecture overview](diagrams/architecture-overview.svg)](diagrams/architecture-overview.svg?raw=true)
 
 ---
 
@@ -27,7 +27,7 @@ relations: entities and concepts link to each other and to the sources they came
 contradictions are kept on both sides and flagged for review; filed-back Q&A
 (`wiki_query`) records exactly which objects it drew from.
 
-![Typed object model](diagrams/object-model.svg)
+[![Typed object model](diagrams/object-model.svg)](diagrams/object-model.svg?raw=true)
 
 ---
 
@@ -37,7 +37,7 @@ A source (URL, file, or text) is compiled into typed, interlinked objects:
 **fetch → extract → resolve/dedup → consolidate → relate → embed**, writing objects and
 relations to Anytype, vectors to Qdrant, and an audit receipt to a `wiki_log` — every time.
 
-![Write pipeline](diagrams/flow-ingest.svg)
+[![Write pipeline](diagrams/flow-ingest.svg)](diagrams/flow-ingest.svg?raw=true)
 
 ---
 
@@ -47,7 +47,7 @@ Questions are answered **only from the wiki**, with citations. Optionally the Q&
 *filed back* as a `wiki_query` object with `wiki_drew_from` edges — so it becomes part of
 the corpus that future questions retrieve from. The wiki gets more useful as you use it.
 
-![The compounding loop](diagrams/compounding-loop.svg)
+[![The compounding loop](diagrams/compounding-loop.svg)](diagrams/compounding-loop.svg?raw=true)
 
 ---
 
@@ -58,7 +58,7 @@ dangling relations, orphans, staleness, duplicates). The opt-in duplicate sweep 
 **LLM-adjudicated** into pre-judged `same`/`distinct` merge suggestions. Findings are
 **surfaced for human review** (the weekly wellness cadence) — never auto-applied.
 
-![Self-auditing health check](diagrams/flow-lint.svg)
+[![Self-auditing health check](diagrams/flow-lint.svg)](diagrams/flow-lint.svg?raw=true)
 
 ---
 
