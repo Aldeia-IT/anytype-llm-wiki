@@ -1,0 +1,43 @@
+# wiki_ingest — the write pipeline: source → typed, interlinked objects
+# Render: d2 --theme 0 --pad 24 flow-ingest.d2 flow-ingest.svg
+
+direction: right
+
+classes: {
+  step:  { shape: rectangle; style: { fill: "#ffffff"; stroke: "#9fb3c8" } }
+  hero:  { shape: rectangle; style: { fill: "#1f3a5f"; font-color: "#ffffff"; bold: true; stroke: "#13243c" } }
+  store: { shape: cylinder;  style: { fill: "#e8f0fe"; stroke: "#3b6fb6" } }
+  llm:   { shape: rectangle; style: { fill: "#eef6ee"; stroke: "#5a9367" } }
+  io:    { shape: document;  style: { fill: "#fbfbf5"; stroke: "#b9a44a" } }
+}
+
+src: Source { class: io; label: "Source\nURL · file · text" }
+
+pipeline: wiki_ingest pipeline {
+  style: { stroke-dash: 4; fill: "#f7f9fb"; stroke: "#9fb3c8"; font-size: 15; bold: true }
+
+  fetch:       Fetch { class: step }
+  extract:     Extract { class: hero; label: "Extract\nentities + concepts" }
+  resolve:     Resolve { class: step; label: "Resolve / dedup\nexact · fuzzy · alias" }
+  consolidate: Consolidate { class: step; label: "Consolidate\nmerge facts · detect contradictions" }
+  relate:      Relate { class: step; label: "Relate\nwrite typed relations" }
+  embed:       Embed { class: step }
+
+  fetch -> extract -> resolve -> consolidate -> relate -> embed
+}
+
+extractor: extraction LLM {
+  class: llm
+  label: "extraction LLM\nqwen3.5-mlx"
+}
+embedder: embedding model { class: llm; label: "embeddings\nbge-m3" }
+anytype: Anytype graph { class: store; label: "Anytype\ntyped objects + relations" }
+qdrant: Qdrant { class: store; style.fill: "#fdf0e6"; style.stroke: "#c9803a"; label: "Qdrant\nvectors" }
+log: WikiLog receipt { class: io }
+
+src -> pipeline.fetch
+pipeline.extract <-> extractor: "LLM" { style.font-size: 12 }
+pipeline.relate -> anytype: "create / update" { style.font-size: 12 }
+pipeline.embed <-> embedder { style.font-size: 12 }
+pipeline.embed -> qdrant: upsert { style.font-size: 12 }
+pipeline.embed -> log: "always — audit trail" { style.font-size: 12 }

@@ -1,0 +1,44 @@
+# wiki_query — the compounding loop: cited answers that feed future questions
+# Render: d2 --theme 0 --pad 24 compounding-loop.d2 compounding-loop.svg
+
+direction: down
+
+classes: {
+  step:  { shape: rectangle; style: { fill: "#ffffff"; stroke: "#9fb3c8" } }
+  hero:  { shape: rectangle; style: { fill: "#1f3a5f"; font-color: "#ffffff"; bold: true; stroke: "#13243c" } }
+  store: { shape: cylinder;  style: { fill: "#e8f0fe"; stroke: "#3b6fb6" } }
+  io:    { shape: document;  style: { fill: "#fbfbf5"; stroke: "#b9a44a" } }
+}
+
+q: Question { class: io }
+
+graph: Wiki knowledge graph {
+  class: store
+  label: "Wiki knowledge graph\nentities · concepts · sources\n+ past Q&A"
+}
+
+retrieve: Tiered retrieval {
+  class: step
+  label: "Tiered retrieval\ngraph navigation + Qdrant vectors"
+}
+
+synth: LLM synthesis {
+  class: hero
+  label: "LLM synthesis\nqwen3.5-mlx"
+}
+
+answer: Cited answer { class: io }
+
+fileback: File-back {
+  class: step
+  label: "File-back (optional)\nQuery object + wiki_drew_from edges"
+}
+
+q -> retrieve
+graph -> retrieve: context
+retrieve -> synth
+synth -> answer: with source citations
+answer -> fileback
+fileback -> graph: "stored → retrievable by FUTURE questions" {
+  style: { stroke: "#5a9367"; bold: true; font-color: "#3f6b4a"; stroke-width: 2 }
+}
