@@ -1,0 +1,51 @@
+# wiki_lint — a self-auditing knowledge base
+# Render: d2 --theme 0 --pad 24 flow-lint.d2 flow-lint.svg
+
+direction: right
+
+classes: {
+  step:  { shape: rectangle; style: { fill: "#ffffff"; stroke: "#9fb3c8" } }
+  hero:  { shape: rectangle; style: { fill: "#1f3a5f"; font-color: "#ffffff"; bold: true; stroke: "#13243c" } }
+  store: { shape: cylinder;  style: { fill: "#e8f0fe"; stroke: "#3b6fb6" } }
+  llm:   { shape: rectangle; style: { fill: "#eef6ee"; stroke: "#5a9367" } }
+  human: { shape: person;    style: { fill: "#fdf0e6"; stroke: "#c9803a" } }
+}
+
+graph: Wiki knowledge graph { class: store }
+
+lint: wiki_lint {
+  class: hero
+  label: "wiki_lint\nstructural health check\n(read-only · one receipt)"
+}
+
+checks: Check battery {
+  style: { stroke-dash: 4; fill: "#f7f9fb"; stroke: "#9fb3c8"; font-size: 14; bold: true }
+  a: contradictions { class: step }
+  b: asymmetric / dangling relations { class: step }
+  c: orphans { class: step }
+  d: staleness { class: step }
+  e: duplicates (opt-in sweep) { class: step }
+}
+
+adj: LLM adjudication {
+  class: llm
+  label: "adjudicate_duplicates (opt-in)\nsame / distinct verdict per pair\nqwen3.5-mlx"
+}
+
+queue: Pre-judged review queue {
+  class: step
+  label: "Findings + pre-judged\nmerge suggestions"
+}
+
+reviewer: Human review {
+  class: human
+  label: "Human review\n(weekly wellness cadence)"
+}
+
+graph -> lint: scan
+lint -> checks
+checks.e -> adj: "candidate pairs" { style.font-size: 12 }
+checks -> queue
+adj -> queue: "same / distinct\nlabels" { style: { stroke: "#5a9367"; font-size: 12 } }
+queue -> reviewer: "surface, never auto-fix" { style.bold: true }
+reviewer -> graph: "merges / resolutions\n(human decides)" { style: { stroke-dash: 3; font-size: 12 } }

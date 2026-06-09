@@ -33,23 +33,21 @@ Give autonomous agents a **persistent, typed memory that survives sessions** and
 
 ## How it works
 
-```
-Sources (URLs, files, agent narration)        Anytype vault (local API)
-        │  fetch / narrate                              │  read objects → markdown
-        ▼                                               ▼
-   LLM extraction (local Ollama)              Chunker (headings / paragraphs)
-        │  entities, concepts, relations,              │  text chunks + metadata
-        │  contradiction detection                     ▼
-        ▼                                       Ollama embeddings (bge-m3)
-   Typed Objects + Relations  ───────────────►        │  vectors + payload
-   written back to Anytype                            ▼
-        ▲                                        Qdrant (vector DB)
-        │  cited synthesis (wiki_query)                ▲  similarity search
-        └───────────────── MCP server ────────────────┘
-              semantic_search · reindex · wiki_* tools
-                                │
-                     Claude Code / Cursor / your agents
-```
+Everything runs **locally** — no off-machine egress. An MCP client calls the
+`anytype-llm-wiki` server, which orchestrates three local backends: **Anytype** (the
+typed knowledge graph), **Ollama** (extraction / reasoning LLM + embeddings), and
+**Qdrant** (vectors).
+
+![System architecture overview](docs/diagrams/architecture-overview.svg)
+
+Questions are answered **only from your wiki, with citations** — and the Q&A can be
+*filed back* so future questions retrieve from it. The wiki gets more useful the more
+you use it:
+
+![The compounding loop](docs/diagrams/compounding-loop.svg)
+
+> 📊 **[Full visual guide →](docs/diagrams.md)** — the write pipeline, the typed object
+> model, and the self-auditing health check.
 
 Objects carry their knowledge in **properties** (`wiki_facts`, `wiki_definition`, …), not in the object body — so an ingested object shows an empty body in the Anytype client by design; the content is fully indexed and retrievable.
 
@@ -201,6 +199,8 @@ Additional `WIKI_SYNTH_*` and `WIKI_LINT_*` tuning knobs exist with sensible def
 - **Wiki pipeline** — LLM extraction → entity/concept resolution → typed Objects with bidirectional Relations → contradiction detection → cited synthesis.
 - **MCP server** — [FastMCP](https://github.com/jlowin/fastmcp) over stdio, exposing the seven tools above.
 - **doctor** — read-only preflight (Anytype, Qdrant, Ollama, embedding model).
+
+📊 **[Architecture — Visual Guide](docs/diagrams.md)** — diagrams of the components, the write/read pipelines, the typed object model, and the health check.
 
 For the internals — the write pipeline, how consolidation corrects reality, entity-resolution & duplicate handling, the concurrency model, and the no-drop subject work-log — see [**Architecture & internals**](docs/architecture.md).
 

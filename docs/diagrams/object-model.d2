@@ -1,0 +1,27 @@
+# The typed object model — a knowledge graph, not flat notes
+# Render: d2 --theme 0 --pad 24 object-model.d2 object-model.svg
+
+direction: right
+
+classes: {
+  ent:  { shape: rectangle; style: { fill: "#e8f0fe"; stroke: "#3b6fb6"; bold: true } }
+  con:  { shape: rectangle; style: { fill: "#eef6ee"; stroke: "#5a9367"; bold: true } }
+  src:  { shape: page;      style: { fill: "#fdf0e6"; stroke: "#c9803a"; bold: true } }
+  qry:  { shape: document;  style: { fill: "#fbfbf5"; stroke: "#b9a44a"; bold: true } }
+  log:  { shape: rectangle; style: { fill: "#f1f1f4"; stroke: "#9098a8" } }
+}
+
+entity:  wiki_entity  { class: ent;  label: "wiki_entity\n(a thing / actor)" }
+concept: wiki_concept { class: con;  label: "wiki_concept\n(an idea / definition)" }
+source:  wiki_source  { class: src;  label: "wiki_source\n(ingested document)" }
+query:   wiki_query   { class: qry;  label: "wiki_query\n(a filed-back Q&A)" }
+log:     wiki_log     { class: log;  label: "wiki_log\n(audit receipt)" }
+
+entity -> entity:   "wiki_relations" { style.font-size: 12 }
+concept -> concept: "wiki_related" { style.font-size: 12 }
+entity -> concept:  "wiki_relations" { style.font-size: 12 }
+entity -> entity:   "wiki_contradictions\n(both sides kept, flagged)" { style: { stroke: "#b4452f"; font-color: "#b4452f"; font-size: 12 } }
+entity -> source:   "wiki_sources" { style.font-size: 12 }
+concept -> source:  "wiki_sources" { style.font-size: 12 }
+query -> entity:    "wiki_drew_from" { style: { stroke: "#5a9367"; font-color: "#3f6b4a"; font-size: 12 } }
+query -> concept:   "wiki_drew_from" { style: { stroke: "#5a9367"; font-color: "#3f6b4a"; font-size: 12 } }

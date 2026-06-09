@@ -1,0 +1,68 @@
+# anytype-llm-wiki — system architecture overview
+# Render: d2 --theme 0 --layout elk --pad 24 architecture-overview.d2 architecture-overview.svg
+
+direction: right
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 0
+  }
+}
+
+client: MCP client {
+  shape: person
+  style.font-size: 18
+}
+client.label: "MCP client\n(Claude Code · agent fleet · IDE)"
+
+local: Local machine — no off-machine egress {
+  style: {
+    stroke-dash: 4
+    fill: "#f7f9fb"
+    stroke: "#9fb3c8"
+    font-size: 16
+    bold: true
+  }
+
+  server: anytype-llm-wiki {
+    shape: rectangle
+    style: { fill: "#1f3a5f"; font-color: "#ffffff"; bold: true; stroke: "#13243c" }
+    label: "anytype-llm-wiki\nMCP server  ·  FastMCP / stdio\n\nwiki_ingest · wiki_query\nwiki_remember · wiki_lint"
+  }
+
+  anytype: Anytype daemon {
+    shape: cylinder
+    style: { fill: "#e8f0fe"; stroke: "#3b6fb6" }
+    label: "Anytype\ntyped knowledge graph\n:31012"
+  }
+
+  ollama: Ollama  ·  local LLMs  :11434 {
+    style: { fill: "#eef6ee"; stroke: "#5a9367" }
+    extract: extraction / reasoning LLM {
+      shape: rectangle
+      style.fill: "#ffffff"
+      label: "extraction & reasoning\nqwen3.5-mlx"
+    }
+    embed: embedding model {
+      shape: rectangle
+      style.fill: "#ffffff"
+      label: "embeddings\nbge-m3"
+    }
+  }
+
+  qdrant: Qdrant {
+    shape: cylinder
+    style: { fill: "#fdf0e6"; stroke: "#c9803a" }
+    label: "Qdrant\nvector store\n:6333"
+  }
+
+  server -> anytype: "read / write\ntyped objects + relations" { style.font-size: 13 }
+  server -> ollama.extract: "extract entities,\nconcepts, contradictions" { style.font-size: 13 }
+  server -> ollama.embed: "embed text" { style.font-size: 13 }
+  server -> qdrant: "upsert / similarity search" { style.font-size: 13 }
+}
+
+client -> local.server: "MCP tool calls\n(stdio)" {
+  style: { font-size: 14; bold: true }
+}
