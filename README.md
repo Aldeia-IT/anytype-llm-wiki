@@ -1,6 +1,12 @@
 # anytype-llm-wiki
 
 <p align="center">
+  <a href="https://pypi.org/project/anytype-llm-wiki/"><img src="https://img.shields.io/pypi/v/anytype-llm-wiki?color=2b6fb6" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/anytype-llm-wiki/"><img src="https://img.shields.io/pypi/pyversions/anytype-llm-wiki" alt="Python versions"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/pypi/l/anytype-llm-wiki" alt="License"></a>
+</p>
+
+<p align="center">
   <img src="https://raw.githubusercontent.com/Aldeia-IT/anytype-llm-wiki/main/docs/images/knowledge-graph.png" alt="Example Anytype graph" width="100%">
 </p>
 
@@ -66,7 +72,14 @@ Objects carry their knowledge in **properties** (`wiki_facts`, `wiki_definition`
 
 ### Install
 
-Install from source with [uv](https://docs.astral.sh/uv/) (PyPI publishing is on the roadmap):
+From [PyPI](https://pypi.org/project/anytype-llm-wiki/) — this puts an `anytype-llm-wiki` command on your PATH:
+
+```bash
+uv tool install anytype-llm-wiki      # or: pipx install anytype-llm-wiki
+```
+
+<details>
+<summary>Or run from source (for development)</summary>
 
 ```bash
 git clone https://github.com/Aldeia-IT/anytype-llm-wiki.git
@@ -74,7 +87,10 @@ cd anytype-llm-wiki
 uv sync
 ```
 
-Run any command with `uv run anytype-llm-wiki …`. Running it with **no subcommand** starts the MCP server over stdio.
+Then prefix the commands below with `uv run` (e.g. `uv run anytype-llm-wiki doctor`).
+</details>
+
+Running `anytype-llm-wiki` with **no subcommand** starts the MCP server over stdio.
 
 ### Configure
 
@@ -92,8 +108,8 @@ EMBED_MODEL=bge-m3
 ### Verify & provision
 
 ```bash
-uv run anytype-llm-wiki doctor                          # read-only preflight (Anytype, Qdrant, Ollama)
-uv run anytype-llm-wiki wiki-bootstrap --space-id <id>  # idempotently create the typed wiki schema
+anytype-llm-wiki doctor                          # read-only preflight (Anytype, Qdrant, Ollama)
+anytype-llm-wiki wiki-bootstrap --space-id <id>  # idempotently create the typed wiki schema
 ```
 
 `wiki-bootstrap` is safe to re-run — it reconciles the space to the expected schema without creating duplicates. Re-run it after an upgrade that changes the schema (the CHANGELOG flags those).
@@ -102,35 +118,35 @@ uv run anytype-llm-wiki wiki-bootstrap --space-id <id>  # idempotently create th
 
 **Claude Code:**
 ```bash
-claude mcp add anytype-llm-wiki -e ANYTYPE_API_KEY=your-key \
-  -- uv run --directory /path/to/anytype-llm-wiki anytype-llm-wiki
+claude mcp add anytype-llm-wiki -e ANYTYPE_API_KEY=your-key -- anytype-llm-wiki
 ```
 
 **Claude Desktop / Cursor / other clients** — add to your MCP config:
 ```json
 {
   "anytype-llm-wiki": {
-    "command": "uv",
-    "args": ["run", "--directory", "/path/to/anytype-llm-wiki", "anytype-llm-wiki"],
+    "command": "anytype-llm-wiki",
     "env": { "ANYTYPE_API_KEY": "your-key" }
   }
 }
 ```
+
+> No install? `uvx anytype-llm-wiki` runs the latest from PyPI without installing — use `"command": "uvx", "args": ["anytype-llm-wiki"]` in the JSON config.
 
 ### Try it in 5 minutes
 
 **Build a research wiki and query it** (from an empty space):
 ```bash
 # 1. Provision the typed schema.
-uv run anytype-llm-wiki wiki-bootstrap --space-id <id>
+anytype-llm-wiki wiki-bootstrap --space-id <id>
 
 # 2. Compile a source into typed, interlinked Objects (auto-reindexes).
-uv run anytype-llm-wiki wiki-ingest --space-id <id> \
+anytype-llm-wiki wiki-ingest --space-id <id> \
   --source https://en.wikipedia.org/wiki/Retrieval-augmented_generation
 
 # 3. Ask a question — answered only from your wiki, with citations.
 #    --file-back stores the Q&A so it can be retrieved by FUTURE queries.
-uv run anytype-llm-wiki wiki-query --space-id <id> \
+anytype-llm-wiki wiki-query --space-id <id> \
   --question "What is retrieval-augmented generation?" --file-back
 ```
 
@@ -220,7 +236,6 @@ Dependencies are pinned in two layers: **`uv.lock`** locks every direct and tran
 - Relationship-aware retrieval — follow Anytype Relations to pull connected context
 - Contradiction detection beyond linked entities (semantic pre-filter) and across Concepts
 - Cross-space federation with access control
-- PyPI publishing
 - Webhook-based indexing when Anytype adds webhook support
 
 See the [GitHub Releases](https://github.com/Aldeia-IT/anytype-llm-wiki/releases) and [CHANGELOG](CHANGELOG.md) for what's shipped.
