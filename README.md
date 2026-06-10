@@ -1,7 +1,7 @@
 # anytype-llm-wiki
 
 <p align="center">
-  <img src="docs/images/knowledge-graph.png" alt="Example Anytype graph" width="100%">
+  <img src="https://raw.githubusercontent.com/Aldeia-IT/anytype-llm-wiki/main/docs/images/knowledge-graph.png" alt="Example Anytype graph" width="100%">
 </p>
 
 **A local-first, typed "second brain" on [Anytype](https://anytype.io) — for humans *and* AI agents.**
@@ -44,13 +44,13 @@ Everything runs **locally** — no off-machine egress. An MCP client calls the
 typed knowledge graph), **Ollama** (extraction / reasoning LLM + embeddings), and
 **Qdrant** (vectors).
 
-![System architecture overview](docs/diagrams/architecture-overview.svg)
+![System architecture overview](https://raw.githubusercontent.com/Aldeia-IT/anytype-llm-wiki/main/docs/diagrams/architecture-overview.svg)
 
 Questions are answered **only from your wiki, with citations** — and the Q&A can be
 *filed back* so future questions retrieve from it. The wiki gets more useful the more
 you use it:
 
-![The compounding loop](docs/diagrams/compounding-loop.svg)
+![The compounding loop](https://raw.githubusercontent.com/Aldeia-IT/anytype-llm-wiki/main/docs/diagrams/compounding-loop.svg)
 
 > 📊 **[Full visual guide →](docs/diagrams.md)** — the write pipeline, the typed object
 > model, and the self-auditing health check.
