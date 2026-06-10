@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-10
+
+### Added
+
+- **Architecture diagrams (D2) + a visual guide.** Five diagrams (system overview,
+  typed object model, write pipeline, the compounding loop, self-auditing health)
+  under `docs/diagrams/`, collected in `docs/diagrams.md` and embedded in the README
+  and `docs/architecture.md`.
+- **PyPI-ready packaging metadata** — `[project.urls]` (Homepage / Repository /
+  Issues / Changelog) and trove `classifiers` so the PyPI project page has links and
+  is discoverable.
+
+### Changed
+
+- **README images use absolute `raw.githubusercontent.com` URLs** (pinned to `main`)
+  so they render on the **PyPI project page** — PyPI does not resolve repo-relative
+  image paths. (In-repo doc *links* stay relative; GitHub resolves those.)
+
 ## [0.7.3] - 2026-06-09
 
 ### Added
