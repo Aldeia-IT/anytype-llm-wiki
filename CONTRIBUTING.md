@@ -1,6 +1,16 @@
 # Contributing to anytype-llm-wiki
 
-Thanks for your interest in contributing! This project is in early stages and we welcome help in many areas.
+This project is built and maintained by [Aldeia IT](https://github.com/Aldeia-IT)
+primarily for our own use, and published openly under the MIT license. We're **not
+actively soliciting contributions right now** and may be slow to respond to issues
+and pull requests — please set expectations accordingly. You're very welcome to
+**fork** it and adapt it to your needs; well-scoped fixes are appreciated when we
+have the bandwidth to review them.
+
+For **security issues**, please use private reporting — see [`SECURITY.md`](SECURITY.md)
+— not a public issue or PR.
+
+If you do open a PR, the setup below gets you a working dev environment.
 
 ## Getting started
 

@@ -234,16 +234,7 @@ It also differs from API-access MCPs like [`anyproto/anytype-mcp`](https://githu
 
 ## Contributing
 
-Contributions welcome — maintained by [Aldeia IT](https://github.com/Aldeia-IT).
-
-```bash
-git clone https://github.com/Aldeia-IT/anytype-llm-wiki.git && cd anytype-llm-wiki
-uv sync --all-extras
-cp .env.example .env          # add your keys
-uv run pytest tests/ -v        # requires Anytype, Ollama, Qdrant running locally
-```
-
-Most-welcome areas: chunking strategies per object type, hybrid search (semantic + keyword), testing with large vaults (1000+ objects), and examples for different MCP clients.
+Maintained by [Aldeia IT](https://github.com/Aldeia-IT) for our own use and published openly. We're **not actively soliciting contributions right now** and may be slow to respond to issues and PRs — but you're welcome to fork it. **Security issues:** please use [private reporting](SECURITY.md), not a public issue. Dev setup and expectations are in [CONTRIBUTING.md](CONTRIBUTING.md); please be kind ([Code of Conduct](CODE_OF_CONDUCT.md)).
 
 ## License
 
