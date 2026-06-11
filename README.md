@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Aldeia-IT/anytype-llm-wiki/main/docs/images/knowledge-graph.png" alt="Example Anytype graph" width="100%">
+  <img src="https://raw.githubusercontent.com/Aldeia-IT/anytype-llm-wiki/main/docs/images/hero.jpg" alt="anytype-llm-wiki — a local-first, typed second brain on Anytype" width="100%">
 </p>
 
 **A local-first, typed "second brain" on [Anytype](https://anytype.io) — for humans *and* AI agents.**
