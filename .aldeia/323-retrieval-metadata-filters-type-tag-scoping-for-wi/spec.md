@@ -1,6 +1,6 @@
 ---
 name: retrieval-metadata-filters-type-tag-scoping
-status: DRAFT
+status: SPEC
 issue: 323
 repo: anytype-llm-wiki
 target_repo: anytype-llm-wiki
@@ -11,7 +11,7 @@ parent_spec: 285-anytype-llm-wiki-v0-4-0-wiki-query-tiered-retrieva
 
 # Retrieval: Metadata Filters + Type/Tag Scoping for `wiki_query` / `semantic_search`
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-12
 **Author:** spec-writer agent
 **Review rounds:** 0
