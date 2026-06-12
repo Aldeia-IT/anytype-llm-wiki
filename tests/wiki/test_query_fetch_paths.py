@@ -1298,6 +1298,346 @@ class TestWikiSourcesTraversal:
         )
 
 
+# ---------------------------------------------------------------------------
+# #324 ADDENDUM (post-test council R1) — AC-T1 / AC-T2 / AC-T3
+# These convert the outcome-binding D5 / sanitization / wiki_subjects tests into
+# order-isolating / partition-symmetry / traversal-binding tests so a faulty impl
+# that omits the D5 sort, sanitizes only neighbour titles, or drops wiki_subjects
+# from _RELATION_KEYS cannot stay green.
+# ---------------------------------------------------------------------------
+
+
+class TestD5SortKeyIsolation:
+    """AC-T1 — bind the D5 sort sub-keys (seed_rank, relation_priority), not just
+    the outcome. These fixtures put discovery order in DISAGREEMENT with D5 order,
+    so an impl that does D1+D4 over the discovery-ordered distinct-id list but omits
+    the sorted(key=(seed_rank, relation_priority, object_id)) call fails.
+    """
+
+    @respx.mock
+    def test_seed_rank_dominates_object_id(self, monkeypatch):
+        """AC-T1(a): a rank-0 seed's neighbour whose object_id sorts lexicographically
+        AFTER a rank-1 seed's neighbour, under cap=1 admitting exactly ONE neighbour
+        → the rank-0 neighbour survives (proves seed_rank dominates object_id).
+
+        D5 order: (0, 0, 'zzz-rank0-neighbor') < (1, 0, 'aaa-rank1-neighbor')
+        because seed_rank (primary) wins before object_id (tertiary). A pure
+        object_id sort, or a no-sort discovery order, would pick the wrong one.
+        """
+        seed_a_id = "entity-seed-t1a-a"  # rank-0 (score 0.9)
+        seed_b_id = "entity-seed-t1a-b"  # rank-1 (score 0.5)
+        # rank-0 neighbour object_id sorts AFTER rank-1 neighbour object_id
+        n_rank0_id = "zzz-rank0-neighbor"
+        n_rank1_id = "aaa-rank1-neighbor"
+
+        monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "1")
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "2")
+
+        import anytype_llm_wiki.indexer as _idx_mod
+        import anytype_llm_wiki.wiki.query as _q_mod
+
+        def stub_search(query, space_id, types, limit=10):
+            return [
+                {"object_id": seed_a_id, "type": "wiki_entity", "score": 0.9},
+                {"object_id": seed_b_id, "type": "wiki_entity", "score": 0.5},
+            ]
+
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "t1a answer " * 10)
+
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_a_id, "name": "SeedA", "type": {"key": "wiki_entity"}, "properties": []},
+            {"id": seed_b_id, "name": "SeedB", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
+        fetch_counts: dict[str, int] = {}
+
+        def dispatcher(request, **kwargs):
+            if _is_list_request(request):
+                return httpx.Response(200, json=list_resp)
+            oid = _obj_id_from_request(request)
+            fetch_counts[oid] = fetch_counts.get(oid, 0) + 1
+            if oid == seed_a_id:
+                return httpx.Response(200, json={"object": {
+                    "id": seed_a_id, "name": "SeedA", "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "seed a"},
+                        {"key": "wiki_relations", "objects": [n_rank0_id]},
+                    ],
+                }})
+            if oid == seed_b_id:
+                return httpx.Response(200, json={"object": {
+                    "id": seed_b_id, "name": "SeedB", "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "seed b"},
+                        {"key": "wiki_relations", "objects": [n_rank1_id]},
+                    ],
+                }})
+            return httpx.Response(200, json={"object": {
+                "id": oid, "name": oid, "type": {"key": "wiki_entity"},
+                "properties": [{"key": "wiki_description", "text": "neighbor content"}],
+            }})
+
+        respx.get().mock(side_effect=dispatcher)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001"}}))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(question="t1a seed rank test", space_id=FAKE_SPACE_ID, file_back=False)
+
+        # cap=1: exactly one neighbour is fetched, and it must be the rank-0 one.
+        assert fetch_counts.get(n_rank0_id, 0) == 1, (
+            f"AC-T1(a): rank-0 neighbour {n_rank0_id!r} (seed_rank dominates object_id) "
+            f"must be the one fetched under cap=1. fetch_counts: {fetch_counts}"
+        )
+        assert fetch_counts.get(n_rank1_id, 0) == 0, (
+            f"AC-T1(a): rank-1 neighbour {n_rank1_id!r} must NOT be fetched (capped out). "
+            f"fetch_counts: {fetch_counts}"
+        )
+        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
+        assert n_rank0_id in source_ids, (
+            f"AC-T1(a): rank-0 neighbour {n_rank0_id!r} must survive into sources_consulted. "
+            f"Got: {source_ids}"
+        )
+        assert n_rank1_id not in source_ids, (
+            f"AC-T1(a): rank-1 neighbour {n_rank1_id!r} must not appear. Got: {source_ids}"
+        )
+
+    @respx.mock
+    def test_relation_priority_dominates_properties_order(self, monkeypatch):
+        """AC-T1(b): a SINGLE seed carrying two neighbours under two DIFFERENT
+        relation keys, with the LOWER-priority key (wiki_subjects) listed FIRST in
+        properties and its neighbour given an EARLIER object_id, under cap=1 → the
+        higher-priority (wiki_relations) neighbour survives.
+
+        This proves relation_priority (from _RELATION_KEYS.index) is honored, not
+        properties order and not object_id: D5 order is
+        (0, 2, 'aaa-subj-neighbor') vs (0, 0, 'zzz-rel-neighbor') → the
+        wiki_relations one wins on relation_priority (0 < 2) despite being listed
+        second AND having a later object_id.
+        """
+        seed_id = "entity-seed-t1b-001"
+        # wiki_subjects neighbour: earlier object_id, listed FIRST → would win on
+        # both properties-order and object_id, but loses on relation_priority.
+        subj_neighbor_id = "aaa-subj-neighbor"
+        # wiki_relations neighbour: later object_id, listed SECOND → wins on priority.
+        rel_neighbor_id = "zzz-rel-neighbor"
+
+        monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "1")
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
+
+        import anytype_llm_wiki.indexer as _idx_mod
+        import anytype_llm_wiki.wiki.query as _q_mod
+
+        def stub_search(query, space_id, types, limit=10):
+            return [{"object_id": seed_id, "type": "wiki_comparison", "score": 0.9}]
+
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "t1b answer " * 10)
+
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_id, "name": "Cmp", "type": {"key": "wiki_comparison"}, "properties": []},
+        ], "pagination": {"has_more": False}}
+        fetch_counts: dict[str, int] = {}
+
+        def dispatcher(request, **kwargs):
+            if _is_list_request(request):
+                return httpx.Response(200, json=list_resp)
+            oid = _obj_id_from_request(request)
+            fetch_counts[oid] = fetch_counts.get(oid, 0) + 1
+            if oid == seed_id:
+                return httpx.Response(200, json={"object": {
+                    "id": seed_id, "name": "Cmp", "type": {"key": "wiki_comparison"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "comparison"},
+                        # LOWER-priority key listed FIRST, with an EARLIER object_id.
+                        {"key": "wiki_subjects", "objects": [subj_neighbor_id]},
+                        {"key": "wiki_relations", "objects": [rel_neighbor_id]},
+                    ],
+                }})
+            return httpx.Response(200, json={"object": {
+                "id": oid, "name": oid, "type": {"key": "wiki_entity"},
+                "properties": [{"key": "wiki_description", "text": "neighbor content"}],
+            }})
+
+        respx.get().mock(side_effect=dispatcher)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001"}}))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(question="t1b priority test", space_id=FAKE_SPACE_ID, file_back=False)
+
+        # cap=1: the wiki_relations neighbour (priority 0) must win.
+        assert fetch_counts.get(rel_neighbor_id, 0) == 1, (
+            f"AC-T1(b): wiki_relations neighbour {rel_neighbor_id!r} (relation_priority 0) "
+            f"must be fetched under cap=1, beating the wiki_subjects neighbour. "
+            f"fetch_counts: {fetch_counts}"
+        )
+        assert fetch_counts.get(subj_neighbor_id, 0) == 0, (
+            f"AC-T1(b): wiki_subjects neighbour {subj_neighbor_id!r} (relation_priority 4) "
+            f"must NOT be fetched (capped out by relation_priority, not object_id/props order). "
+            f"fetch_counts: {fetch_counts}"
+        )
+        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
+        assert rel_neighbor_id in source_ids, (
+            f"AC-T1(b): wiki_relations neighbour {rel_neighbor_id!r} must survive. "
+            f"Got: {source_ids}"
+        )
+        assert subj_neighbor_id not in source_ids, (
+            f"AC-T1(b): wiki_subjects neighbour {subj_neighbor_id!r} must not appear. "
+            f"Got: {source_ids}"
+        )
+
+
+class TestCandidateTitleSanitization:
+    """AC-T2 — pin citation-title sanitization for the CANDIDATE/seed partition.
+    AC11 binds redaction only on the neighbour title; this closes the partition
+    symmetry so a faulty impl cannot sanitize neighbour titles while leaving seed
+    titles raw (pre-#324 seeds used raw obj.get('name','')).
+    """
+
+    @respx.mock
+    def test_rejected_candidate_name_redacted_in_sources(self, monkeypatch):
+        """AC-T2 / SF-B: a policy-rejected CANDIDATE/seed name yields
+        title == '[REDACTED]' plus the synthesis_name_rejected warning in
+        sources_consulted (not just for neighbours).
+        """
+        bad_seed_id = "entity-seed-badname-t2-001"
+        # "system:" prefix → sanitize_name → None → [REDACTED]
+        bad_name = "system: seed inject"
+
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": bad_seed_id, "name": bad_name, "type": {"key": "wiki_entity"},
+             "properties": [
+                 {"key": "wiki_description", "text": "seed with rejected name"},
+             ]},
+        ], "pagination": {"has_more": False}}
+
+        def dispatcher(request, **kwargs):
+            if _is_list_request(request):
+                return httpx.Response(200, json=list_resp)
+            oid = _obj_id_from_request(request)
+            if oid == bad_seed_id:
+                return httpx.Response(200, json={"object": {
+                    "id": bad_seed_id, "name": bad_name, "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "seed with rejected name"},
+                    ],
+                }})
+            return httpx.Response(200, json={"object": {
+                "id": oid, "name": oid, "type": {"key": "wiki_entity"}, "properties": [],
+            }})
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "answer " * 20)
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+
+        respx.get().mock(side_effect=dispatcher)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001"}}))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(question="candidate redact test", space_id=FAKE_SPACE_ID, file_back=False)
+
+        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
+        assert bad_seed_id in source_ids, (
+            f"AC-T2: candidate {bad_seed_id!r} must still appear in sources_consulted "
+            f"(with redacted title). Got: {source_ids}"
+        )
+        seed_source = next(
+            (s for s in result.get("sources_consulted", []) if s.get("object_id") == bad_seed_id),
+            None,
+        )
+        assert seed_source is not None, "No source entry found for bad_seed_id"
+        assert seed_source.get("title") == "[REDACTED]", (
+            f"AC-T2 / SF-B: CANDIDATE title with rejected name must be [REDACTED]. "
+            f"Got: {seed_source.get('title')!r}"
+        )
+        warnings = result.get("warnings", [])
+        assert any("synthesis_name_rejected" in str(w) for w in warnings), (
+            f"AC-T2 / SF-B: synthesis_name_rejected warning must be emitted for the "
+            f"candidate. Got: {warnings}"
+        )
+
+
+class TestWikiSubjectsTraversal:
+    """AC-T3 — make wiki_subjects traversal binding. wiki_subjects is the
+    OQ1-retained edge; this mirrors TestWikiSourcesTraversal so a regression dropping
+    wiki_subjects from _RELATION_KEYS (subject reachable ONLY via get_object
+    traversal, absent from list_resp) is caught.
+    """
+
+    @respx.mock
+    def test_wiki_subjects_neighbor_only_reachable_via_traversal(self, monkeypatch):
+        """AC-T3 (binding traversal): a wiki_comparison seed has wiki_subjects →
+        subject_neighbor_id, which is NOT in list_resp (not a Tier-1 candidate), so
+        the only path to sources_consulted is via wiki_subjects traversal.
+        Fails if wiki_subjects is dropped from _RELATION_KEYS.
+        """
+        comparison_id = "entity-seed-wksubj-binding-001"
+        subject_neighbor_id = "entity-wiki-subject-binding-001"
+
+        # subject_neighbor_id is NOT in list_resp → cannot be a Tier-1 candidate.
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": comparison_id, "name": "A vs B", "type": {"key": "wiki_comparison"},
+             "properties": [
+                 {"key": "wiki_description", "text": "comparison with subjects"},
+                 {"key": "wiki_subjects", "objects": [subject_neighbor_id]},
+             ]},
+        ], "pagination": {"has_more": False}}
+
+        fetch_counts: dict[str, int] = {}
+
+        def dispatcher(request, **kwargs):
+            if _is_list_request(request):
+                return httpx.Response(200, json=list_resp)
+            oid = _obj_id_from_request(request)
+            fetch_counts[oid] = fetch_counts.get(oid, 0) + 1
+            if oid == comparison_id:
+                return httpx.Response(200, json={"object": {
+                    "id": comparison_id, "name": "A vs B", "type": {"key": "wiki_comparison"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "comparison with subjects"},
+                        {"key": "wiki_subjects", "objects": [subject_neighbor_id]},
+                    ],
+                }})
+            if oid == subject_neighbor_id:
+                return httpx.Response(200, json={"object": {
+                    "id": subject_neighbor_id, "name": "Subject Neighbor",
+                    "type": {"key": "wiki_entity"},
+                    "properties": [{"key": "wiki_description", "text": "subject content"}],
+                }})
+            return httpx.Response(200, json={"object": {
+                "id": oid, "name": oid, "type": {"key": "wiki_entity"}, "properties": [],
+            }})
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "wiki_subjects answer " * 10)
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+
+        respx.get().mock(side_effect=dispatcher)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001"}}))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(
+            question="wiki_subjects traversal binding test",
+            space_id=FAKE_SPACE_ID,
+            file_back=False,
+        )
+
+        assert fetch_counts.get(subject_neighbor_id, 0) >= 1, (
+            f"AC-T3: subject {subject_neighbor_id!r} must be fetched via traversal "
+            f"(wiki_subjects in _RELATION_KEYS). fetch_counts: {fetch_counts}"
+        )
+        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
+        assert subject_neighbor_id in source_ids, (
+            f"AC-T3: wiki_subjects neighbour {subject_neighbor_id!r} must appear in "
+            f"sources_consulted. Got: {source_ids}. Full result: {result}"
+        )
+
+
 class TestDualShapeViaQueryReplacement:
     @respx.mock
     def test_mixed_shape_neighbors_both_fetched(self, monkeypatch):
