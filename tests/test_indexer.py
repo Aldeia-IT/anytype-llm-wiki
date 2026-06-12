@@ -559,7 +559,7 @@ def test_invalid_date_raises_value_error():
 # ---------------------------------------------------------------------------
 
 
-def test_reindex_creates_payload_indexes(monkeypatch):
+def test_reindex_creates_payload_indexes(monkeypatch, tmp_path):
     """AC-F7a: reindex() calls _ensure_payload_indexes → type_key, space_id,
     last_modified_date in created_indexes; source_type must NOT be there.
     """
@@ -568,6 +568,9 @@ def test_reindex_creates_payload_indexes(monkeypatch):
     fake = FakeQdrantClientWithSearch()
     monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
     monkeypatch.setattr(_indexer, "list_spaces", lambda: [])
+    # Isolate index state so reindex()'s _save_state never touches real machine state.
+    monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
     _indexer.reindex()
     assert set(fake.created_indexes) >= {"type_key", "space_id", "last_modified_date"}, (
         f"Expected payload indexes for type_key/space_id/last_modified_date; "
