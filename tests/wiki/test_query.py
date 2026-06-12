@@ -2790,3 +2790,317 @@ class TestQueryLive:
                     f"Got: {source.get('deeplink')!r}"
                 )
                 break
+
+
+# ---------------------------------------------------------------------------
+# #324 — Relationship-Aware Retrieval (delta over v0.4.0)
+# Tests: AC2 (wiki_sources, wiki_subjects traversal), AC9 (budget trim D5 order
+#        extension), AC10 (query_max_neighbors config knob)
+# ---------------------------------------------------------------------------
+
+
+class TestRelationKeySet:
+    """AC2 — _RELATION_KEYS contains exactly 5 keys including wiki_sources and
+    wiki_subjects. Traversal tests confirm those keys are followed.
+    """
+
+    @respx.mock
+    def test_wiki_sources_relation_traversed(self, monkeypatch):
+        """AC2: a seed with wiki_sources objects → those objects are fetched and
+        appear in sources_consulted (relation key must be in _RELATION_KEYS).
+        """
+        seed_id = "entity-seed-wksrc-001"
+        source_neighbor_id = "entity-wiki-source-001"
+
+        schema_obj = _make_schema_ok_response()["data"][0]
+        # Seed has wiki_sources relation pointing to source_neighbor_id
+        seed_obj = {
+            "id": seed_id,
+            "name": "Seed With Sources",
+            "type": {"key": "wiki_entity"},
+            "properties": [
+                {"key": "wiki_description", "text": "entity with wiki_sources"},
+                {"key": "wiki_sources", "objects": [source_neighbor_id]},
+            ],
+        }
+        source_neighbor_obj = {
+            "id": source_neighbor_id,
+            "name": "Source Neighbor",
+            "type": {"key": "wiki_entity"},
+            "properties": [
+                {"key": "wiki_description", "text": "this is a cited source"},
+            ],
+        }
+        list_resp = {
+            "data": [schema_obj, seed_obj, source_neighbor_obj],
+            "pagination": {"has_more": False},
+        }
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "wiki_sources answer " * 10)
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+
+        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+        respx.get(
+            f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/objects/{seed_id}"
+        ).mock(return_value=httpx.Response(200, json=_make_get_object_response(
+            seed_id, "Seed With Sources",
+            relations=[]  # get_object returns same properties via list data
+        )))
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-001")
+        ))
+
+        from anytype_llm_wiki.wiki.query import wiki_query, _RELATION_KEYS
+        # First verify the constant itself
+        assert "wiki_sources" in _RELATION_KEYS, (
+            f"AC2: 'wiki_sources' must be in _RELATION_KEYS. Got: {_RELATION_KEYS}"
+        )
+
+        result = wiki_query(
+            question="wiki_sources traversal test",
+            space_id=FAKE_SPACE_ID,
+            file_back=False,
+        )
+
+        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
+        assert source_neighbor_id in source_ids, (
+            f"AC2: wiki_sources neighbor {source_neighbor_id!r} must appear in "
+            f"sources_consulted (wiki_sources must be in _RELATION_KEYS). "
+            f"Got source_ids: {source_ids}. Full result: {result}"
+        )
+
+    @respx.mock
+    def test_wiki_subjects_relation_traversed(self, monkeypatch):
+        """AC2: a wiki_comparison seed with wiki_subjects objects → those subjects
+        are fetched and appear in sources_consulted.
+        """
+        comparison_id = "entity-seed-comparison-001"
+        subject_a_id = "entity-subject-a-001"
+        subject_b_id = "entity-subject-b-001"
+
+        schema_obj = _make_schema_ok_response()["data"][0]
+        comparison_obj = {
+            "id": comparison_id,
+            "name": "A vs B Comparison",
+            "type": {"key": "wiki_comparison"},
+            "properties": [
+                {"key": "wiki_description", "text": "comparing A and B"},
+                {"key": "wiki_subjects", "objects": [subject_a_id, subject_b_id]},
+            ],
+        }
+        subject_a_obj = {
+            "id": subject_a_id,
+            "name": "Subject A",
+            "type": {"key": "wiki_entity"},
+            "properties": [{"key": "wiki_description", "text": "subject a desc"}],
+        }
+        subject_b_obj = {
+            "id": subject_b_id,
+            "name": "Subject B",
+            "type": {"key": "wiki_entity"},
+            "properties": [{"key": "wiki_description", "text": "subject b desc"}],
+        }
+        list_resp = {
+            "data": [schema_obj, comparison_obj, subject_a_obj, subject_b_obj],
+            "pagination": {"has_more": False},
+        }
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "wiki_subjects answer " * 10)
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+
+        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-001")
+        ))
+
+        from anytype_llm_wiki.wiki.query import wiki_query, _RELATION_KEYS
+        assert "wiki_subjects" in _RELATION_KEYS, (
+            f"AC2: 'wiki_subjects' must be in _RELATION_KEYS. Got: {_RELATION_KEYS}"
+        )
+
+        result = wiki_query(
+            question="wiki_subjects traversal test",
+            space_id=FAKE_SPACE_ID,
+            file_back=False,
+        )
+
+        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
+        assert subject_a_id in source_ids or subject_b_id in source_ids, (
+            f"AC2: wiki_subjects neighbors must appear in sources_consulted. "
+            f"Got source_ids: {source_ids}. Full result: {result}"
+        )
+
+
+class TestContextBudgetD5Extension:
+    """AC9 — extend test_synthesis_context_budget_trims_neighbors_first with
+    D5 order assertions. The base test is at test_query.py:1613 (TestContextBudget).
+    This class adds explicit D5-ordering within neighbors (B3 caveat: the inherited
+    len(sources) <= 2 check is ambiguous post-D1; we add explicit neighbor identity).
+    """
+
+    @respx.mock
+    def test_synthesis_context_budget_trims_neighbors_first_d5_order(self, monkeypatch):
+        """AC9 / B3: over-budget context; neighbors are dropped before candidates AND
+        within neighbors the D5 seed-rank order governs which are retained.
+
+        Setup: 2 seeds (A=rank-0, B=rank-1) + 2 neighbors (nA from A=rank-0,
+        nB from B=rank-1). WIKI_SYNTH_MAX_OBJECTS=3, ordered=[A, B, nA, nB],
+        cap=3 implies nB dropped (lowest D5 priority). nA must survive; nB must not.
+
+        Uses Tier-2 (stub_search) so seed rank is score-descending and deterministic.
+        Neighbor ids NOT in the initial list so they are discovered via get_object.
+        The catch-all GET mock uses a side_effect dispatcher to return correct
+        object envelopes per id.
+        """
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "3")
+        monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "16")
+        # Force Tier-2: threshold=2 and list has 2 wiki objects → count=2 >= 2
+        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "2")
+
+        schema_obj = _make_schema_ok_response()["data"][0]
+        seed_a_id = "entity-seed-d5-a"   # rank-0 (score=0.9)
+        seed_b_id = "entity-seed-d5-b"   # rank-1 (score=0.5)
+        n_a_id = "entity-neighbor-d5-a"  # from rank-0 seed, survives
+        n_b_id = "entity-neighbor-d5-b"  # from rank-1 seed, dropped
+
+        # List has seeds as wiki objects so count=2 triggers Tier-2.
+        # Neighbor ids are NOT in the list; they are fetched via get_object.
+        list_resp = {"data": [
+            schema_obj,
+            {"id": seed_a_id, "name": "SeedA", "type": {"key": "wiki_entity"},
+             "properties": [
+                 {"key": "wiki_description", "text": "seed a"},
+                 {"key": "wiki_relations", "objects": [n_a_id]},
+             ]},
+            {"id": seed_b_id, "name": "SeedB", "type": {"key": "wiki_entity"},
+             "properties": [
+                 {"key": "wiki_description", "text": "seed b"},
+                 {"key": "wiki_relations", "objects": [n_b_id]},
+             ]},
+        ], "pagination": {"has_more": False}}
+
+        import anytype_llm_wiki.indexer as _idx_mod
+        import anytype_llm_wiki.wiki.query as _q_mod
+
+        def stub_search(query, space_id, types, limit=10):
+            return [
+                {"object_id": seed_a_id, "type": "wiki_entity", "score": 0.9},
+                {"object_id": seed_b_id, "type": "wiki_entity", "score": 0.5},
+            ]
+
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "d5 order answer " * 10)
+
+        def _dispatch(request, **kwargs):
+            url = str(request.url)
+            path = url.split("?")[0].rstrip("/")
+            if path.endswith("/objects"):
+                return httpx.Response(200, json=list_resp)
+            oid = path.split("/")[-1]
+            if oid == seed_a_id:
+                return httpx.Response(200, json={"object": {
+                    "id": seed_a_id, "name": "SeedA", "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "seed a"},
+                        {"key": "wiki_relations", "objects": [n_a_id]},
+                    ],
+                }})
+            if oid == seed_b_id:
+                return httpx.Response(200, json={"object": {
+                    "id": seed_b_id, "name": "SeedB", "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "seed b"},
+                        {"key": "wiki_relations", "objects": [n_b_id]},
+                    ],
+                }})
+            if oid == n_a_id:
+                return httpx.Response(200, json={"object": {
+                    "id": n_a_id, "name": "NeighborA", "type": {"key": "wiki_entity"},
+                    "properties": [{"key": "wiki_description", "text": "n a desc"}],
+                }})
+            if oid == n_b_id:
+                return httpx.Response(200, json={"object": {
+                    "id": n_b_id, "name": "NeighborB", "type": {"key": "wiki_entity"},
+                    "properties": [{"key": "wiki_description", "text": "n b desc"}],
+                }})
+            return httpx.Response(200, json={"object": {
+                "id": oid, "name": oid, "type": {"key": "wiki_entity"}, "properties": [],
+            }})
+
+        respx.get().mock(side_effect=_dispatch)
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-001")
+        ))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(question="d5 trim test", space_id=FAKE_SPACE_ID, file_back=False)
+
+        warnings = result.get("warnings", [])
+        sources = result.get("sources_consulted", [])
+        source_ids = [s.get("object_id") for s in sources]
+
+        # Trimming must have occurred
+        assert any("synthesis_context_trimmed" in str(w) for w in warnings), (
+            f"AC9: synthesis_context_trimmed warning must be present. "
+            f"Warnings: {warnings}. Sources: {source_ids}"
+        )
+        # AC9: candidates survive before neighbors (both seeds must survive at cap=3)
+        assert seed_a_id in source_ids, (
+            f"AC9: seed-rank-0 candidate {seed_a_id!r} must survive trim. "
+            f"source_ids: {source_ids}"
+        )
+        assert seed_b_id in source_ids, (
+            f"AC9: seed-rank-1 candidate {seed_b_id!r} must survive trim "
+            f"(candidates survive before neighbors). source_ids: {source_ids}"
+        )
+        # AC9 / D5: n_a (from rank-0 seed) survives; n_b (from rank-1 seed) dropped
+        assert n_a_id in source_ids, (
+            f"AC9 / D5: neighbor from seed-rank-0 ({n_a_id!r}) must survive trim. "
+            f"source_ids: {source_ids}"
+        )
+        assert n_b_id not in source_ids, (
+            f"AC9 / D5: neighbor from seed-rank-1 ({n_b_id!r}) must be dropped by D5 trim. "
+            f"source_ids: {source_ids}"
+        )
+
+
+class TestQueryMaxNeighborsConfig:
+    """AC10 — WIKI_QUERY_MAX_NEIGHBORS config knob validation."""
+
+    def test_query_max_neighbors_config_rejects_zero_and_negative(self, monkeypatch):
+        """AC10 / SF10: WIKI_QUERY_MAX_NEIGHBORS=0 and -1 fall back to 16;
+        non-numeric input also falls back to 16.
+        """
+        from anytype_llm_wiki.wiki.config import query_max_neighbors
+
+        monkeypatch.delenv("WIKI_QUERY_MAX_NEIGHBORS", raising=False)
+        assert query_max_neighbors() == 16, (
+            f"AC10: unset WIKI_QUERY_MAX_NEIGHBORS must default to 16. "
+            f"Got: {query_max_neighbors()}"
+        )
+
+        monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "0")
+        assert query_max_neighbors() == 16, (
+            f"AC10 / SF10: WIKI_QUERY_MAX_NEIGHBORS=0 must fall back to 16. "
+            f"Got: {query_max_neighbors()}"
+        )
+
+        monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "-1")
+        assert query_max_neighbors() == 16, (
+            f"AC10 / SF10: WIKI_QUERY_MAX_NEIGHBORS=-1 must fall back to 16. "
+            f"Got: {query_max_neighbors()}"
+        )
+
+        monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "bad")
+        assert query_max_neighbors() == 16, (
+            f"AC10 / SF10: non-numeric WIKI_QUERY_MAX_NEIGHBORS must fall back to 16. "
+            f"Got: {query_max_neighbors()}"
+        )
+
+        monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "8")
+        assert query_max_neighbors() == 8, (
+            f"AC10: valid WIKI_QUERY_MAX_NEIGHBORS=8 must return 8. "
+            f"Got: {query_max_neighbors()}"
+        )
