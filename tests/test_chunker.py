@@ -408,6 +408,69 @@ class TestPropertyChunkMissingSpaceIdTolerated:
             )
 
 
+# ---------------------------------------------------------------------------
+# v1 (issue #323) — Chunker date-payload tests (AC-F8, AC-F9)
+# These tests FAIL until chunk_object extracts last_modified_date and injects
+# it into every chunk.
+# ---------------------------------------------------------------------------
+
+
+class TestChunkerLastModifiedDate:
+    """AC-F8/F9: chunk_object injects last_modified_date when present; omits when absent."""
+
+    def test_chunker_writes_last_modified_date(self):
+        """AC-F8: entity with body + last_modified_date property → every chunk carries it."""
+        from anytype_llm_wiki.chunker import chunk_object
+
+        obj = {
+            "id": "ent-1",
+            "space_id": "sp-1",
+            "name": "Neural Networks",
+            "type": {"key": "wiki_entity"},
+            "markdown": "# Overview\nTransformers use attention.",
+            "properties": [{"key": "last_modified_date", "date": "2026-05-01T00:00:00+00:00"}],
+        }
+        chunks = chunk_object(obj)
+        assert chunks, "Expected at least one chunk from the markdown body"
+        assert all(c.get("last_modified_date") == "2026-05-01T00:00:00+00:00" for c in chunks), (
+            f"Every chunk must carry last_modified_date='2026-05-01T00:00:00+00:00'. "
+            f"Chunk dates: {[c.get('last_modified_date') for c in chunks]}"
+        )
+
+    def test_chunker_property_concept_date_and_absence(self):
+        """AC-F9: property-only concept with date → all chunks carry it;
+        object without date → field absent from chunks.
+        """
+        from anytype_llm_wiki.chunker import chunk_object
+
+        obj = {
+            "id": "con-1",
+            "space_id": "sp-1",
+            "name": "Attention",
+            "type": {"key": "wiki_concept"},
+            "markdown": "",
+            "properties": [
+                {"key": "wiki_definition", "text": "A mechanism for weighting inputs."},
+                {"key": "last_modified_date", "date": "2026-05-02T00:00:00+00:00"},
+            ],
+        }
+        chunks = chunk_object(obj)
+        assert chunks, "Expected at least one property chunk"
+        assert all(c.get("last_modified_date") == "2026-05-02T00:00:00+00:00" for c in chunks), (
+            f"Every chunk must carry last_modified_date='2026-05-02T00:00:00+00:00'. "
+            f"Got: {[c.get('last_modified_date') for c in chunks]}"
+        )
+
+        # Same object but without last_modified_date property
+        obj_nodate = {**obj, "properties": [{"key": "wiki_definition", "text": "A mechanism."}]}
+        chunks2 = chunk_object(obj_nodate)
+        assert chunks2, "Expected at least one property chunk from wiki_definition"
+        assert all("last_modified_date" not in c for c in chunks2), (
+            f"Chunks must NOT carry last_modified_date when property is absent. "
+            f"Got: {[c.get('last_modified_date') for c in chunks2]}"
+        )
+
+
 class TestPropertyValueSanitized:
     """AC#16 delta (SF2): property values containing bidi/control chars are sanitized on write.
 

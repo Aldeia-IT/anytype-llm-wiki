@@ -15,8 +15,22 @@ New tests added for v0.3.0:
   Deterministic seam test — simulate a property-only update where
   last_modified_date does NOT advance (V2-fail condition); assert wiki_ingest
   fires the re-embed bypass for the affected object.
+
+New tests added for v1 (issue #323) — type+date metadata filter:
+- FakeQdrantClientWithSearch: fake client supporting query_points and
+  create_payload_index, used by all filter tests below.
+- AC-F1 test_no_filter_regression: no filter params → query_filter=None
+- AC-F2 test_type_filter_applied: types → nested Filter(should=[...]) shape
+- AC-F4 test_date_range_filter_applied: DatetimeRange condition on last_modified_date
+- AC-F5 test_combined_filter_and, test_empty_list_types_is_no_filter,
+        test_zero_result_filter
+- AC-F6 test_invalid_date_raises_value_error (from semantic_search)
+- AC-F7 test_reindex_creates_payload_indexes, test_reembed_does_not_create_payload_indexes
+- AC-F11 test_schema_version_bump_forces_full_reembed, test_no_bump_keeps_incremental_skip
+- AC-F12 test_reembed_writes_last_modified_date
 """
 
+import json
 import pytest
 
 from anytype_llm_wiki.indexer import reindex, _load_state, _save_state, _ensure_collection, _qdrant
@@ -335,3 +349,387 @@ class TestUpdatePathForcesReembed:
         assert len(matching) >= 1, (
             f"Expected upserted payload with updated wiki_facts text; payloads={payloads}"
         )
+
+
+# ---------------------------------------------------------------------------
+# v1 (issue #323) — Type+date metadata filter: CI-runnable seam tests
+# These tests FAIL until:
+#   - semantic_search_core accepts ingested_after / ingested_before params
+#   - _ensure_payload_indexes is added (reindex path only)
+#   - _chunk_to_payload helper is added (writes last_modified_date)
+#   - config.PAYLOAD_SCHEMA_VERSION constant is added
+# ---------------------------------------------------------------------------
+
+
+class FakeQdrantClientWithSearch:
+    """Fake Qdrant client for metadata-filter tests (spec §10.1).
+
+    Supports query_points (captures query_filter), create_payload_index
+    (records which fields were indexed), upsert, delete, get_collections,
+    create_collection.  Never emits UserWarning.
+    """
+
+    def __init__(self, mock_results=None):
+        self.upserted_points = []
+        self.deleted = []
+        self.query_calls = []
+        self.query_filter = None
+        self.created_indexes = []
+        self._mock_results = mock_results or []
+
+    def get_collections(self):
+        class _Col:
+            name = config.QDRANT_COLLECTION
+
+        class _Result:
+            collections = [_Col()]
+
+        return _Result()
+
+    def create_collection(self, **kwargs):
+        pass
+
+    def create_payload_index(self, collection_name, field_name, field_schema=None, **kwargs):
+        self.created_indexes.append(field_name)  # no-op; never emits a warning
+
+    def upsert(self, collection_name, points):
+        self.upserted_points.extend(points)
+
+    def delete(self, collection_name, points_selector):
+        self.deleted.append(points_selector)
+
+    def query_points(self, collection_name, query, query_filter=None, limit=10, with_payload=True):
+        self.query_filter = query_filter
+        self.query_calls.append({
+            "collection_name": collection_name,
+            "query_filter": query_filter,
+            "limit": limit,
+            "with_payload": with_payload,
+        })
+
+        class _Result:
+            points = self._mock_results
+
+        _Result.points = self._mock_results
+        return _Result()
+
+
+# ---------------------------------------------------------------------------
+# AC-F1 — No-filter regression
+# ---------------------------------------------------------------------------
+
+
+def test_no_filter_regression(monkeypatch):
+    """AC-F1: no filter params → query_filter=None, collection+limit+with_payload unchanged."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(query="test")
+    call = fake.query_calls[-1]
+    assert call["query_filter"] is None
+    assert call["collection_name"] == config.QDRANT_COLLECTION
+    assert call["limit"] == 10
+    assert call["with_payload"] is True
+
+
+# ---------------------------------------------------------------------------
+# AC-F2 — Type filter applied (nested should shape)
+# ---------------------------------------------------------------------------
+
+
+def test_type_filter_applied(monkeypatch):
+    """AC-F2: types → nested Filter(should=[FieldCondition(MatchValue)]) appended to must."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(query="test", types=["wiki_entity", "wiki_concept"])
+    must = fake.query_filter.must
+    type_cond = next((c for c in must if hasattr(c, "should") and c.should), None)
+    assert type_cond is not None, f"No nested type Filter in must: {must}"
+    keys = {c.match.value for c in type_cond.should if hasattr(c, "match")}
+    assert {"wiki_entity", "wiki_concept"} <= keys
+
+
+# ---------------------------------------------------------------------------
+# AC-F4 — Date range filter applied (DatetimeRange, both bounds)
+# ---------------------------------------------------------------------------
+
+
+def test_date_range_filter_applied(monkeypatch):
+    """AC-F4: ingested_after/before → FieldCondition(last_modified_date, DatetimeRange)."""
+    from qdrant_client.models import DatetimeRange, FieldCondition
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(
+        query="test",
+        ingested_after="2026-01-01T00:00:00Z",
+        ingested_before="2026-06-30T23:59:59Z",
+    )
+    must = fake.query_filter.must
+    date_cond = next(
+        (c for c in must if isinstance(c, FieldCondition) and c.key == "last_modified_date"),
+        None,
+    )
+    assert date_cond is not None, f"No date FieldCondition in must: {must}"
+    assert isinstance(date_cond.range, DatetimeRange), (
+        f"Expected DatetimeRange (not Range), got {type(date_cond.range)}"
+    )
+    assert date_cond.range.gte is not None and date_cond.range.lte is not None
+
+
+# ---------------------------------------------------------------------------
+# AC-F5 — Combined AND filter (type + date)
+# ---------------------------------------------------------------------------
+
+
+def test_combined_filter_and(monkeypatch):
+    """AC-F5: type + date both present → both conditions in must list."""
+    from qdrant_client.models import FieldCondition
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(
+        query="test",
+        types=["wiki_entity"],
+        ingested_after="2026-01-01T00:00:00Z",
+    )
+    must = fake.query_filter.must
+    assert any(hasattr(c, "should") and c.should for c in must), "Missing nested type Filter"
+    assert any(
+        isinstance(c, FieldCondition) and c.key == "last_modified_date" for c in must
+    ), "Missing date FieldCondition"
+
+
+# ---------------------------------------------------------------------------
+# AC-F5b — Empty-list types == no filter
+# ---------------------------------------------------------------------------
+
+
+def test_empty_list_types_is_no_filter(monkeypatch):
+    """AC-F5b: types=[] is falsy → query_filter=None (no type condition)."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(query="test", types=[])
+    assert fake.query_filter is None
+
+
+# ---------------------------------------------------------------------------
+# AC-F5c — Zero-result filter returns empty list (no error)
+# ---------------------------------------------------------------------------
+
+
+def test_zero_result_filter(monkeypatch):
+    """AC-F5c: zero-result filter returns [] without raising."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch(mock_results=[])
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    out = _indexer.semantic_search_core(query="test", types=["wiki_entity"])
+    assert out == []
+
+
+# ---------------------------------------------------------------------------
+# AC-F6 — Invalid date raises ValueError from semantic_search
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_date_raises_value_error():
+    """AC-F6: malformed ingested_after raises ValueError from semantic_search MCP tool."""
+    import pytest as _pytest
+    from anytype_llm_wiki.server import semantic_search
+    with _pytest.raises(ValueError, match="ingested_after"):
+        semantic_search(query="test", ingested_after="not-a-date")
+
+
+# ---------------------------------------------------------------------------
+# AC-F7 — Payload indexes on reindex path; NOT on reembed hot path
+# ---------------------------------------------------------------------------
+
+
+def test_reindex_creates_payload_indexes(monkeypatch):
+    """AC-F7a: reindex() calls _ensure_payload_indexes → type_key, space_id,
+    last_modified_date in created_indexes; source_type must NOT be there.
+    """
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [])
+    _indexer.reindex()
+    assert set(fake.created_indexes) >= {"type_key", "space_id", "last_modified_date"}, (
+        f"Expected payload indexes for type_key/space_id/last_modified_date; "
+        f"got: {fake.created_indexes}"
+    )
+    assert "source_type" not in fake.created_indexes, (
+        "source_type must NOT be indexed (deferred to #336)"
+    )
+
+
+def test_reembed_does_not_create_payload_indexes(monkeypatch):
+    """AC-F7b: reembed_object() must NOT call create_payload_index."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(
+        _indexer, "embed", lambda texts: [[0.1] * config.EMBED_DIMS for _ in texts]
+    )
+    _indexer.reembed_object(
+        "sp-1",
+        "obj-1",
+        {
+            "id": "obj-1",
+            "space_id": "sp-1",
+            "name": "X",
+            "type": {"key": "wiki_entity"},
+            "markdown": "# H\nbody",
+            "properties": [],
+        },
+    )
+    assert fake.created_indexes == [], (
+        f"reembed_object must NOT call create_payload_index. "
+        f"Got: {fake.created_indexes}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC-F11 — Schema-version bump forces full re-embed; no bump preserves skip
+# ---------------------------------------------------------------------------
+
+
+def test_schema_version_bump_forces_full_reembed(monkeypatch, tmp_path):
+    """AC-F11a: stored _payload_schema_version < code version → unchanged object
+    is still re-embedded; new version stamped in state file.
+    """
+    import anytype_llm_wiki.indexer as _indexer
+
+    state = {"_payload_schema_version": 1, "sp-1": {"obj-1": "2026-01-01T00:00:00Z"}}
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr(config, "INDEX_STATE_FILE", state_file)
+    monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", 2)
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [{"id": "sp-1"}])
+    monkeypatch.setattr(
+        _indexer,
+        "list_objects",
+        lambda sid: [
+            {
+                "id": "obj-1",
+                "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _indexer,
+        "get_object",
+        lambda sid, oid: {
+            "id": "obj-1",
+            "space_id": "sp-1",
+            "name": "X",
+            "type": {"key": "wiki_entity"},
+            "markdown": "# H\nbody",
+            "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}],
+        },
+    )
+    monkeypatch.setattr(
+        _indexer, "embed", lambda texts: [[0.1] * config.EMBED_DIMS for _ in texts]
+    )
+
+    stats = _indexer.reindex()
+    assert stats["objects_indexed"] == 1, (
+        f"With schema version bump, unchanged object MUST be re-indexed; stats={stats}"
+    )
+    assert fake.upserted_points, "Expected Qdrant upsert after forced re-embed"
+    new_state = json.loads(state_file.read_text())
+    assert new_state["_payload_schema_version"] == 2, (
+        f"State file must be stamped with new PAYLOAD_SCHEMA_VERSION=2; got {new_state}"
+    )
+
+
+def test_no_bump_keeps_incremental_skip(monkeypatch, tmp_path):
+    """AC-F11b: stored version == code version → unchanged object skipped (objects_indexed=0)."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    state = {"_payload_schema_version": 2, "sp-1": {"obj-1": "2026-01-01T00:00:00Z"}}
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr(config, "INDEX_STATE_FILE", state_file)
+    monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", 2)
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [{"id": "sp-1"}])
+    monkeypatch.setattr(
+        _indexer,
+        "list_objects",
+        lambda sid: [
+            {
+                "id": "obj-1",
+                "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _indexer, "embed", lambda texts: [[0.1] * config.EMBED_DIMS for _ in texts]
+    )
+
+    stats = _indexer.reindex()
+    assert stats["objects_indexed"] == 0, (
+        f"No schema version bump → incremental skip must be preserved; stats={stats}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC-F12 — reembed_object writes last_modified_date
+# ---------------------------------------------------------------------------
+
+
+def test_reembed_writes_last_modified_date(monkeypatch):
+    """AC-F12: reembed_object with a dated object → every upserted point's payload
+    carries last_modified_date.
+    """
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(
+        _indexer, "embed", lambda texts: [[0.1] * config.EMBED_DIMS for _ in texts]
+    )
+    _indexer.reembed_object(
+        "sp-1",
+        "obj-1",
+        {
+            "id": "obj-1",
+            "space_id": "sp-1",
+            "name": "X",
+            "type": {"key": "wiki_entity"},
+            "markdown": "# H\nbody",
+            "properties": [{"key": "last_modified_date", "date": "2026-05-01T00:00:00Z"}],
+        },
+    )
+    assert fake.upserted_points, "Expected at least one upserted point"
+    assert all(
+        p.payload.get("last_modified_date") == "2026-05-01T00:00:00Z"
+        for p in fake.upserted_points
+    ), (
+        f"All upserted payloads must carry last_modified_date='2026-05-01T00:00:00Z'. "
+        f"Got: {[p.payload for p in fake.upserted_points]}"
+    )
