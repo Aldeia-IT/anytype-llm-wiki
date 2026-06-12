@@ -3049,3 +3049,347 @@ class TestQueryMaxNeighborsConfig:
             f"AC10: valid WIKI_QUERY_MAX_NEIGHBORS=8 must return 8. "
             f"Got: {query_max_neighbors()}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Section 22 — Type+date metadata filter tests (issue #323)
+# These tests FAIL until:
+#   - wiki_query accepts types / ingested_after / ingested_before params
+#   - _passes_type_filter / _passes_date_filter / _parse_iso exist in query.py
+#   - semantic_search_core accepts ingested_after / ingested_before params
+#   - wiki_query threads effective_types to Tier-2 core
+# ---------------------------------------------------------------------------
+
+
+# Fake Qdrant client (inline copy — mirrored from test_indexer.py so this file
+# is self-contained for the cross-tier equivalence test).
+class _FakeQdrantForCrossTier:
+    """Minimal fake Qdrant client for the cross-tier equivalence test."""
+
+    def __init__(self):
+        self.query_calls = []
+        self.query_filter = None
+
+    def get_collections(self):
+        from anytype_llm_wiki import config as _cfg
+
+        class _Col:
+            name = _cfg.QDRANT_COLLECTION
+
+        class _Result:
+            collections = [_Col()]
+
+        return _Result()
+
+    def create_collection(self, **kwargs):
+        pass
+
+    def upsert(self, collection_name, points):
+        pass
+
+    def delete(self, collection_name, points_selector):
+        pass
+
+    def create_payload_index(self, collection_name, field_name, field_schema=None, **kwargs):
+        pass
+
+    def query_points(self, collection_name, query, query_filter=None, limit=10, with_payload=True):
+        self.query_filter = query_filter
+        self.query_calls.append({"query_filter": query_filter})
+
+        class _Result:
+            points = []
+
+        return _Result()
+
+
+# ---------------------------------------------------------------------------
+# Tier-2 enumeration helper — builds the mock data for Tier-2 tests
+# ---------------------------------------------------------------------------
+
+def _tier2_list_resp():
+    """Return a list_objects response with schema marker + 1 wiki entity.
+
+    Used in Tier-2 type-threading tests: threshold=1, count=1 → tier2=True.
+    Mirrors the pattern from TestRetrieval.test_retrieval_mode_boundary_matrix.
+    """
+    schema_obj = _make_schema_ok_response()["data"][0]
+    wiki_ent = _make_wiki_entity("wiki-ent-tier2-001", "Tier2 Fixture Entity")
+    return {"data": [schema_obj, wiki_ent], "pagination": {"has_more": False}}
+
+
+# ---------------------------------------------------------------------------
+# AC-F6b/F6c — wiki_query validation (error dict, never raises)
+# ---------------------------------------------------------------------------
+
+
+class TestWikiQueryDateValidation:
+    """AC-F6b/F6c: bad dates and empty type intersections return error dicts from wiki_query."""
+
+    def test_wiki_query_bad_date_returns_error_dict(self):
+        """AC-F6b: wiki_query with invalid ingested_after returns error dict, never raises."""
+        # Import inside test so missing param fails per-test, not at collection time
+        from anytype_llm_wiki.wiki.query import wiki_query
+        out = wiki_query(question="q", space_id="sp-1", ingested_after="not-a-date")
+        assert out["status"] == "error", (
+            f"Expected status='error' for bad ingested_after, got {out['status']!r}"
+        )
+        assert out["error_category"] == "config_error", (
+            f"Expected error_category='config_error', got {out['error_category']!r}"
+        )
+
+    def test_wiki_query_empty_type_intersection_error(self):
+        """AC-F6c: wiki_query with types that don't intersect _WIKI_TYPE_KEYS → error dict."""
+        from anytype_llm_wiki.wiki.query import wiki_query
+        out = wiki_query(question="q", space_id="sp-1", types=["not_a_wiki_type"])
+        assert out["status"] == "error", (
+            f"Expected status='error' for empty type intersection, got {out['status']!r}"
+        )
+        assert out["error_category"] == "config_error", (
+            f"Expected error_category='config_error', got {out['error_category']!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC-F10 — Tier-1 predicates (module-level pure functions)
+# ---------------------------------------------------------------------------
+
+
+class TestTier1Predicates:
+    """AC-F10: _passes_type_filter and _passes_date_filter are testable pure functions."""
+
+    def test_tier1_type_predicate(self):
+        """AC-F10: _passes_type_filter returns True/False based on object type key."""
+        from anytype_llm_wiki.wiki.query import _passes_type_filter
+
+        ent = {"type": {"key": "wiki_entity"}}
+        con = {"type": {"key": "wiki_concept"}}
+        assert _passes_type_filter(ent, {"wiki_entity"})
+        assert not _passes_type_filter(con, {"wiki_entity"})
+
+    def test_tier1_date_predicate(self):
+        """AC-F10: _passes_date_filter handles in-range, out-of-range, and missing date."""
+        from datetime import datetime, timezone
+        from anytype_llm_wiki.wiki.query import _passes_date_filter
+
+        after = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        before = datetime(2026, 12, 31, tzinfo=timezone.utc)
+
+        in_range = {"properties": [{"key": "last_modified_date", "date": "2026-06-01T00:00:00Z"}]}
+        too_old = {"properties": [{"key": "last_modified_date", "date": "2025-06-01T00:00:00Z"}]}
+        no_date = {"properties": []}
+
+        assert _passes_date_filter(in_range, after, before), "In-range date must pass"
+        assert not _passes_date_filter(too_old, after, before), "Pre-bound date must fail"
+        assert not _passes_date_filter(no_date, after, before), "Missing field must fail"
+
+
+# ---------------------------------------------------------------------------
+# AC-F1b — Default wiki_query passes full _WIKI_TYPE_KEYS to core (Tier-2 seam)
+# AC-F10b — Mixed valid+invalid types silently narrowed before reaching core
+# ---------------------------------------------------------------------------
+
+
+class TestWikiQueryTypeFiltering:
+    """AC-F1b/F10b: wiki_query Tier-2 type threading tests.
+
+    Both tests use the pattern from TestRetrieval.test_retrieval_mode_boundary_matrix
+    and TestCompoundingBackstop.test_filed_query_retrievable_after_reindex:
+    - @respx.mock decorator
+    - respx.get().mock(return_value=...) for list_objects
+    - monkeypatch on query_mod.config.index_threshold → 1
+    - monkeypatch on query_mod.indexer.semantic_search_core to capture kwargs
+    - monkeypatch on query_mod.synthesize to avoid Ollama call
+
+    The respx ordering pitfall (Mem0 lesson): register the POST mock AFTER the GET
+    mock so the catch-all GET does not intercept POSTs.  We use the same pattern
+    as TestRetrieval where respx.get() is registered first, then respx.post().
+    """
+
+    @respx.mock
+    def test_wiki_query_default_passes_full_type_keys(self, monkeypatch):
+        """AC-F1b: wiki_query with no types arg passes the full _WIKI_TYPE_KEYS to core.
+
+        Tier-2 seam: threshold=1, count=1 (schema marker + 1 wiki entity) → tier2=True.
+        Captures the types kwarg on semantic_search_core.
+        """
+        import anytype_llm_wiki.wiki.query as query_mod
+
+        captured = {}
+
+        def _fake_core(query, space_id=None, types=None, ingested_after=None,
+                       ingested_before=None, limit=10):
+            captured["types"] = types
+            return []
+
+        monkeypatch.setattr(query_mod.config, "index_threshold", lambda: 1)
+        monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
+        monkeypatch.setattr(query_mod, "synthesize", lambda q, ctx: "SENTINEL ANSWER")
+
+        list_resp = _tier2_list_resp()
+        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+        respx.get(
+            f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/objects/wiki-ent-tier2-001"
+        ).mock(return_value=httpx.Response(
+            200, json=_make_get_object_response("wiki-ent-tier2-001", "Tier2 Fixture Entity")
+        ))
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-f1b-001")
+        ))
+
+        query_mod.wiki_query(question="q", space_id=FAKE_SPACE_ID)  # no `types` arg
+
+        assert captured.get("types") is not None, (
+            "wiki_query must pass types (not None) to semantic_search_core by default"
+        )
+        assert set(captured["types"]) == set(query_mod._WIKI_TYPE_KEYS), (
+            f"Default types must be the full _WIKI_TYPE_KEYS set. "
+            f"Got: {captured.get('types')!r}"
+        )
+
+    @respx.mock
+    def test_wiki_query_mixed_types_silently_narrowed(self, monkeypatch):
+        """AC-F10b: types=[wiki_entity, wiki_source] → wiki_source silently dropped,
+        only wiki_entity passed to semantic_search_core.
+
+        Tier-2 seam: same setup as test_wiki_query_default_passes_full_type_keys.
+        """
+        import anytype_llm_wiki.wiki.query as query_mod
+
+        captured = {}
+
+        def _fake_core(query, space_id=None, types=None, ingested_after=None,
+                       ingested_before=None, limit=10):
+            captured["types"] = types
+            return []
+
+        monkeypatch.setattr(query_mod.config, "index_threshold", lambda: 1)
+        monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
+        monkeypatch.setattr(query_mod, "synthesize", lambda q, ctx: "SENTINEL ANSWER")
+
+        list_resp = _tier2_list_resp()
+        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+        respx.get(
+            f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/objects/wiki-ent-tier2-001"
+        ).mock(return_value=httpx.Response(
+            200, json=_make_get_object_response("wiki-ent-tier2-001", "Tier2 Fixture Entity")
+        ))
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-f10b-001")
+        ))
+
+        # wiki_source ∉ _WIKI_TYPE_KEYS → silently dropped; wiki_entity survives
+        query_mod.wiki_query(
+            question="q",
+            space_id=FAKE_SPACE_ID,
+            types=["wiki_entity", "wiki_source"],
+        )
+
+        assert set(captured.get("types", [])) == {"wiki_entity"}, (
+            f"wiki_source must be silently dropped; only wiki_entity must reach the core. "
+            f"Got: {captured.get('types')!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CSO-5 — Cross-tier date-filter equivalence test
+# ---------------------------------------------------------------------------
+
+
+class TestCrossTierDateFilterEquivalence:
+    """CSO-5: Tier-1 _passes_date_filter and Tier-2 DatetimeRange agree on the same
+    object and bounds — including inclusive edges and timezone normalization.
+    """
+
+    def test_cross_tier_date_filter_equivalence(self, monkeypatch):
+        """CSO-5: same object + same bounds → Tier-1 predicate and Tier-2 DatetimeRange
+        construction agree on include/exclude.
+
+        Tests:
+        1. In-range object → Tier-1 passes AND Tier-2 gte/lte are set (inclusive bounds).
+        2. Inclusive lower edge (exactly equal to ingested_after) → Tier-1 includes it
+           (obj_dt >= after_dt); Tier-2 uses gte (>=) — both inclusive.
+        3. Out-of-range object (too old) → Tier-1 rejects; Tier-2 gte is set (boundary
+           would also reject since obj_dt < gte).
+        4. Timezone normalization: "Z" and "+00:00" parse to the same datetime in Tier-1.
+
+        Tier-2 side: assert DatetimeRange uses gte/lte (inclusive), not gt/lt (exclusive).
+        The cross-tier agreement is: if Tier-2 used gt/lt, the edge case would disagree
+        with Tier-1 — the assertion here documents and enforces that agreement.
+        """
+        from qdrant_client.models import DatetimeRange, FieldCondition
+        import anytype_llm_wiki.indexer as _indexer
+        from anytype_llm_wiki.wiki.query import _passes_date_filter, _parse_iso
+
+        after_str = "2026-01-01T00:00:00Z"
+        before_str = "2026-12-31T23:59:59Z"
+        after_dt = _parse_iso(after_str)
+        before_dt = _parse_iso(before_str)
+
+        # --- Tier-1 checks ---
+
+        # Object in range
+        in_range_obj = {
+            "properties": [{"key": "last_modified_date", "date": "2026-06-01T00:00:00Z"}]
+        }
+        assert _passes_date_filter(in_range_obj, after_dt, before_dt), (
+            "Tier-1: in-range object must pass date filter"
+        )
+
+        # Inclusive lower edge (exactly == ingested_after)
+        edge_obj = {
+            "properties": [{"key": "last_modified_date", "date": after_str}]
+        }
+        assert _passes_date_filter(edge_obj, after_dt, before_dt), (
+            "Tier-1: object at exactly ingested_after must pass (inclusive lower bound)"
+        )
+
+        # Out of range (before lower bound)
+        old_obj = {
+            "properties": [{"key": "last_modified_date", "date": "2025-06-01T00:00:00Z"}]
+        }
+        assert not _passes_date_filter(old_obj, after_dt, before_dt), (
+            "Tier-1: object before ingested_after must be rejected"
+        )
+
+        # Timezone normalization: Z == +00:00 for _parse_iso
+        dt_z = _parse_iso("2026-06-01T00:00:00Z")
+        dt_plus = _parse_iso("2026-06-01T00:00:00+00:00")
+        assert dt_z is not None and dt_plus is not None, "_parse_iso must parse both forms"
+        assert dt_z == dt_plus, (
+            "Tier-1: 'Z' and '+00:00' suffixes must parse to the same datetime"
+        )
+
+        # --- Tier-2 checks: DatetimeRange construction ---
+        fake = _FakeQdrantForCrossTier()
+        monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+        monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+
+        _indexer.semantic_search_core(
+            query="test",
+            ingested_after=after_str,
+            ingested_before=before_str,
+        )
+        must = fake.query_filter.must
+        date_cond = next(
+            (c for c in must if isinstance(c, FieldCondition) and c.key == "last_modified_date"),
+            None,
+        )
+        assert date_cond is not None, "Tier-2: DatetimeRange condition must be in must list"
+        assert isinstance(date_cond.range, DatetimeRange), (
+            f"Tier-2: range must be DatetimeRange (not Range), got {type(date_cond.range)}"
+        )
+        # Tier-2 gte/lte must be set when both bounds are provided
+        assert date_cond.range.gte is not None, "Tier-2: gte must be set from ingested_after"
+        assert date_cond.range.lte is not None, "Tier-2: lte must be set from ingested_before"
+
+        # Cross-tier equivalence: both tiers use inclusive bounds (>= and <=).
+        # Tier-1 uses `obj_dt < after_dt` (rejects) / `obj_dt >= after_dt` (passes).
+        # Tier-2 must use gte (not gt) for the lower bound.
+        # If date_cond.range has a 'gt' field that is not None, the lower bound is
+        # exclusive — which disagrees with Tier-1. Assert it is absent or None.
+        gt_val = getattr(date_cond.range, "gt", None)
+        assert gt_val is None, (
+            f"Tier-2 lower bound must be gte (inclusive), not gt (exclusive). "
+            f"Got gt={gt_val!r}. This would disagree with Tier-1 on the edge case."
+        )
