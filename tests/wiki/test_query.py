@@ -2804,70 +2804,15 @@ class TestRelationKeySet:
     wiki_subjects. Traversal tests confirm those keys are followed.
     """
 
-    @respx.mock
-    def test_wiki_sources_relation_traversed(self, monkeypatch):
-        """AC2: a seed with wiki_sources objects → those objects are fetched and
-        appear in sources_consulted (relation key must be in _RELATION_KEYS).
+    def test_wiki_sources_relation_key_present(self, monkeypatch):
+        """AC2 (constant guard): 'wiki_sources' must be in _RELATION_KEYS.
+
+        The full traversal assertion (source reachable only via wiki_sources) is in
+        TestWikiSourcesTraversal in test_query_fetch_paths.py (dispatcher pattern).
         """
-        seed_id = "entity-seed-wksrc-001"
-        source_neighbor_id = "entity-wiki-source-001"
-
-        schema_obj = _make_schema_ok_response()["data"][0]
-        # Seed has wiki_sources relation pointing to source_neighbor_id
-        seed_obj = {
-            "id": seed_id,
-            "name": "Seed With Sources",
-            "type": {"key": "wiki_entity"},
-            "properties": [
-                {"key": "wiki_description", "text": "entity with wiki_sources"},
-                {"key": "wiki_sources", "objects": [source_neighbor_id]},
-            ],
-        }
-        source_neighbor_obj = {
-            "id": source_neighbor_id,
-            "name": "Source Neighbor",
-            "type": {"key": "wiki_entity"},
-            "properties": [
-                {"key": "wiki_description", "text": "this is a cited source"},
-            ],
-        }
-        list_resp = {
-            "data": [schema_obj, seed_obj, source_neighbor_obj],
-            "pagination": {"has_more": False},
-        }
-
-        import anytype_llm_wiki.wiki.query as _q_mod
-        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "wiki_sources answer " * 10)
-        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
-
-        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
-        respx.get(
-            f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/objects/{seed_id}"
-        ).mock(return_value=httpx.Response(200, json=_make_get_object_response(
-            seed_id, "Seed With Sources",
-            relations=[]  # get_object returns same properties via list data
-        )))
-        respx.post().mock(return_value=httpx.Response(
-            201, json=_make_create_object_response("log-001")
-        ))
-
-        from anytype_llm_wiki.wiki.query import wiki_query, _RELATION_KEYS
-        # First verify the constant itself
+        from anytype_llm_wiki.wiki.query import _RELATION_KEYS
         assert "wiki_sources" in _RELATION_KEYS, (
             f"AC2: 'wiki_sources' must be in _RELATION_KEYS. Got: {_RELATION_KEYS}"
-        )
-
-        result = wiki_query(
-            question="wiki_sources traversal test",
-            space_id=FAKE_SPACE_ID,
-            file_back=False,
-        )
-
-        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
-        assert source_neighbor_id in source_ids, (
-            f"AC2: wiki_sources neighbor {source_neighbor_id!r} must appear in "
-            f"sources_consulted (wiki_sources must be in _RELATION_KEYS). "
-            f"Got source_ids: {source_ids}. Full result: {result}"
         )
 
     @respx.mock

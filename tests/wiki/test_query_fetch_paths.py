@@ -617,8 +617,8 @@ class TestFanOutCap:
         monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "2")
         # Keep synth budget high so cap is the only limiter
         monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
-        # Force Tier-2 by setting index threshold low
-        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
+        # Force Tier-2: threshold=2, list has 2 wiki_entity objects → count=2 >= 2
+        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "2")
 
         import anytype_llm_wiki.indexer as _idx_mod
         import anytype_llm_wiki.wiki.query as _q_mod
@@ -633,7 +633,13 @@ class TestFanOutCap:
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "cap answer " * 10)
 
         fetch_counts: dict[str, int] = {}
-        list_resp = {"data": [_schema_obj()], "pagination": {"has_more": False}}
+        # Include seeds as wiki_entity stubs so count=2 >= threshold=2 → Tier-2 selected.
+        # Dispatcher handles the full get_object response (with wiki_relations).
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_a_id, "name": "SeedA", "type": {"key": "wiki_entity"}, "properties": []},
+            {"id": seed_b_id, "name": "SeedB", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
 
         def dispatcher(request, **kwargs):
             if _is_list_request(request):
@@ -706,7 +712,8 @@ class TestFanOutCap:
         good_neighbor_id = "entity-neighbor-good-001"
         bad_neighbor_id = "entity-neighbor-bad-001"
 
-        # Use Tier-2 stub search for determinism
+        # Use Tier-2 stub search for determinism.
+        # threshold=1, list has 1 wiki_entity → count=1 >= 1 → Tier-2 selected.
         monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
         monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
 
@@ -719,7 +726,11 @@ class TestFanOutCap:
         monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "partial answer " * 10)
 
-        list_resp = {"data": [_schema_obj()], "pagination": {"has_more": False}}
+        # Seed in list so count=1 >= threshold=1 → Tier-2. Dispatcher provides full obj.
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_id, "name": "Seed", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
 
         def dispatcher(request, **kwargs):
             if _is_list_request(request):
@@ -801,7 +812,8 @@ class TestDeterministicTrimOrder:
         # neighbors in D5 order: [n_rank0 (seed-rank 0), n_rank1 (seed-rank 1)]
         # Ordered = [seed_a, seed_b, n_rank0, n_rank1] → cap 3 → drop n_rank1
         monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "3")
-        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
+        # threshold=2, list has 2 wiki_entity objects → count=2 >= 2 → Tier-2 selected
+        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "2")
         monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "16")
 
         import anytype_llm_wiki.indexer as _idx_mod
@@ -816,7 +828,12 @@ class TestDeterministicTrimOrder:
         monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "trim order " * 10)
 
-        list_resp = {"data": [_schema_obj()], "pagination": {"has_more": False}}
+        # Both seeds in list so count=2 >= threshold=2 → Tier-2. Dispatcher provides full objs.
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_a_id, "name": "SeedA", "type": {"key": "wiki_entity"}, "properties": []},
+            {"id": seed_b_id, "name": "SeedB", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
         fetch_counts: dict[str, int] = {}
 
         def dispatcher(request, **kwargs):
@@ -898,7 +915,8 @@ class TestFileBackSeedOnly:
         monkeypatch.setenv("WIKI_FILE_BACK_MIN_WORDS", "5")
         monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
         monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "16")
-        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
+        # threshold=2, list has 2 wiki_entity objects → count=2 >= 2 → Tier-2 selected
+        monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "2")
 
         import anytype_llm_wiki.indexer as _idx_mod
         import anytype_llm_wiki.wiki.query as _q_mod
@@ -913,7 +931,12 @@ class TestFileBackSeedOnly:
         monkeypatch.setattr(_q_mod, "synthesize",
                             lambda q, ctx: "filed answer with enough words here now")
 
-        list_resp = {"data": [_schema_obj()], "pagination": {"has_more": False}}
+        # Both seeds in list so count=2 >= threshold=2 → Tier-2. Dispatcher provides full objs.
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_a_id, "name": "SeedA", "type": {"key": "wiki_entity"}, "properties": []},
+            {"id": seed_b_id, "name": "SeedB", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
         patch_calls: list[tuple[str, dict]] = []
 
         def track_patch(request, **kwargs):
@@ -1009,18 +1032,17 @@ class TestFanOutDebugLog:
     @respx.mock
     def test_fanout_debug_logged(self, monkeypatch, caplog):
         """AC6 / D6: logger.debug with 'neighbor_fanout:' is emitted when neighbors
-        are present. Also asserts the conditional neighbor_fanout: fetched=N warning
-        is in result['warnings'] when fetching > synth_max_objects // 2.
+        are present. Uses Tier-2 with seed in list so query actually runs.
         """
         import logging
         seed_id = "entity-seed-debug-001"
-        # Create enough neighbors to exceed synth_max_objects // 2
-        # WIKI_SYNTH_MAX_OBJECTS=4 → threshold = 4//2 = 2
-        # We'll have 3 neighbors → fetching=3 > 2 → INFO warning expected
+        # 3 neighbors; with WIKI_SYNTH_MAX_OBJECTS=24 → synth threshold = 12;
+        # fetching=3 <= 12 so no INFO warning (just DEBUG). Test only checks DEBUG.
         neighbor_ids = [f"entity-neighbor-debug-{i}" for i in range(3)]
 
         monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
         monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "16")
+        # threshold=1, list has 1 wiki_entity → count=1 >= 1 → Tier-2 selected
         monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
 
         import anytype_llm_wiki.indexer as _idx_mod
@@ -1032,7 +1054,11 @@ class TestFanOutDebugLog:
         monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "debug log answer " * 10)
 
-        list_resp = {"data": [_schema_obj()], "pagination": {"has_more": False}}
+        # Seed in list so count=1 >= threshold=1 → Tier-2. Dispatcher provides full obj.
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_id, "name": "Seed", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
 
         def dispatcher(request, **kwargs):
             if _is_list_request(request):
@@ -1068,14 +1094,16 @@ class TestFanOutDebugLog:
     @respx.mock
     def test_fanout_info_warning_above_threshold(self, monkeypatch):
         """AC6 / SF-E: when fetching > synth_max_objects // 2, result['warnings']
-        contains 'neighbor_fanout: fetched=N'.
+        contains 'neighbor_fanout: fetched=N'. Uses Tier-2 with seed in list.
+        WIKI_SYNTH_MAX_OBJECTS=4 → synth threshold=2; 3 neighbors → fetching=3 > 2.
         """
         seed_id = "entity-seed-fwarn-001"
-        # WIKI_SYNTH_MAX_OBJECTS=4 → threshold=2; need >2 neighbors fetched
+        # 3 neighbors; WIKI_SYNTH_MAX_OBJECTS=4 → threshold=4//2=2; 3 > 2 → warning
         neighbor_ids = [f"entity-neighbor-fwarn-{i}" for i in range(3)]
 
         monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "4")
         monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "16")
+        # threshold=1, list has 1 wiki_entity → count=1 >= 1 → Tier-2 selected
         monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
 
         import anytype_llm_wiki.indexer as _idx_mod
@@ -1087,7 +1115,11 @@ class TestFanOutDebugLog:
         monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "fanout warn answer " * 10)
 
-        list_resp = {"data": [_schema_obj()], "pagination": {"has_more": False}}
+        # Seed in list so count=1 >= threshold=1 → Tier-2.
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_id, "name": "Seed", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
 
         def dispatcher(request, **kwargs):
             if _is_list_request(request):
@@ -1122,13 +1154,19 @@ class TestFanOutDebugLog:
     def test_fanout_info_warning_absent_below_threshold(self, monkeypatch):
         """AC6 / SF-E: when fetching <= synth_max_objects // 2, no
         'neighbor_fanout: fetched=N' entry in result['warnings'].
+
+        Uses Tier-2 with seed in list so the query actually runs through D6 code.
+        Setup: WIKI_SYNTH_MAX_OBJECTS=4 → synth threshold=2; 1 neighbor → fetching=1 <= 2
+        → INFO warning must NOT appear. Mirrors test_fanout_info_warning_above_threshold
+        (3 neighbors → warning present) but with 1 neighbor → warning absent.
         """
         seed_id = "entity-seed-fnowarn-001"
-        # WIKI_SYNTH_MAX_OBJECTS=24 → threshold=12; 1 neighbor → no warning
+        # 1 neighbor; WIKI_SYNTH_MAX_OBJECTS=4 → threshold=4//2=2; 1 <= 2 → no warning
         neighbor_ids = ["entity-neighbor-fnowarn-001"]
 
-        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "4")
         monkeypatch.setenv("WIKI_QUERY_MAX_NEIGHBORS", "16")
+        # threshold=1, list has 1 wiki_entity → count=1 >= 1 → Tier-2 selected
         monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
 
         import anytype_llm_wiki.indexer as _idx_mod
@@ -1140,7 +1178,11 @@ class TestFanOutDebugLog:
         monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "no fanout warn " * 10)
 
-        list_resp = {"data": [_schema_obj()], "pagination": {"has_more": False}}
+        # Seed in list so count=1 >= threshold=1 → Tier-2.
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_id, "name": "Seed", "type": {"key": "wiki_entity"}, "properties": []},
+        ], "pagination": {"has_more": False}}
 
         def dispatcher(request, **kwargs):
             if _is_list_request(request):
@@ -1165,10 +1207,94 @@ class TestFanOutDebugLog:
         from anytype_llm_wiki.wiki.query import wiki_query
         result = wiki_query(question="no fanout warn test", space_id=FAKE_SPACE_ID, file_back=False)
 
+        # Query must have run (not early-exit): answer must not be the no-sources sentinel
+        assert result.get("answer", "") != "No sources found in this wiki for that question.", (
+            f"AC6 / SF-E: query must have run (not early-exit). Result: {result}"
+        )
         warnings = result.get("warnings", [])
         assert not any("neighbor_fanout: fetched=" in str(w) for w in warnings), (
             f"AC6 / SF-E: 'neighbor_fanout: fetched=N' must NOT appear when "
-            f"fetching <= synth_max_objects//2. Got warnings: {warnings}"
+            f"fetching (1) <= synth_max_objects//2 (2). Got warnings: {warnings}"
+        )
+
+
+class TestWikiSourcesTraversal:
+    """AC2 (traversal-binding) — wiki_sources neighbor is reachable ONLY via
+    get_object traversal, not as a Tier-1 candidate. The source_neighbor_id is
+    absent from list_resp, so it cannot appear in sources_consulted unless
+    _RELATION_KEYS includes 'wiki_sources' AND the traversal code follows it.
+    """
+
+    @respx.mock
+    def test_wiki_sources_neighbor_only_reachable_via_traversal(self, monkeypatch):
+        """AC2 (binding traversal): seed has wiki_sources → source_neighbor_id.
+        source_neighbor_id is NOT in list_resp (not a candidate), so the only
+        path to sources_consulted is via wiki_sources traversal.
+        Must fail pre-D3 (wiki_sources not in _RELATION_KEYS) — neighbor never fetched.
+        Must pass post-D3+D1 (wiki_sources in keys, neighbor cited in sources_consulted).
+        """
+        seed_id = "entity-seed-wksrc-binding-001"
+        source_neighbor_id = "entity-wiki-source-binding-001"
+
+        # source_neighbor_id is NOT in list_resp → cannot be a Tier-1 candidate
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_id, "name": "Seed With Sources", "type": {"key": "wiki_entity"},
+             "properties": [
+                 {"key": "wiki_description", "text": "entity with wiki_sources"},
+                 {"key": "wiki_sources", "objects": [source_neighbor_id]},
+             ]},
+        ], "pagination": {"has_more": False}}
+
+        fetch_counts: dict[str, int] = {}
+
+        def dispatcher(request, **kwargs):
+            if _is_list_request(request):
+                return httpx.Response(200, json=list_resp)
+            oid = _obj_id_from_request(request)
+            fetch_counts[oid] = fetch_counts.get(oid, 0) + 1
+            if oid == seed_id:
+                return httpx.Response(200, json={"object": {
+                    "id": seed_id, "name": "Seed With Sources", "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "entity with wiki_sources"},
+                        {"key": "wiki_sources", "objects": [source_neighbor_id]},
+                    ],
+                }})
+            if oid == source_neighbor_id:
+                return httpx.Response(200, json={"object": {
+                    "id": source_neighbor_id, "name": "Source Neighbor",
+                    "type": {"key": "wiki_entity"},
+                    "properties": [{"key": "wiki_description", "text": "cited source content"}],
+                }})
+            return httpx.Response(200, json={"object": {
+                "id": oid, "name": oid, "type": {"key": "wiki_entity"}, "properties": [],
+            }})
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "wiki_sources answer " * 10)
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+
+        respx.get().mock(side_effect=dispatcher)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001"}}))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(
+            question="wiki_sources traversal binding test",
+            space_id=FAKE_SPACE_ID,
+            file_back=False,
+        )
+
+        # The neighbor must have been fetched via get_object (traversal path)
+        assert fetch_counts.get(source_neighbor_id, 0) >= 1, (
+            f"AC2: source_neighbor_id {source_neighbor_id!r} must be fetched via traversal "
+            f"(wiki_sources in _RELATION_KEYS). fetch_counts: {fetch_counts}"
+        )
+        # And must appear in sources_consulted (D1 + D3 both required)
+        source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
+        assert source_neighbor_id in source_ids, (
+            f"AC2: wiki_sources neighbor {source_neighbor_id!r} must appear in "
+            f"sources_consulted. Got: {source_ids}. Full result: {result}"
         )
 
 
