@@ -513,8 +513,9 @@ class TestNeighborCitation:
 
         source_ids = [s.get("object_id") for s in result.get("sources_consulted", [])]
         count = source_ids.count(shared_id)
-        assert count <= 1, (
-            f"AC3: shared object {shared_id!r} must appear at most once in sources_consulted. "
+        assert count == 1, (
+            f"AC3: shared object {shared_id!r} must appear exactly once in sources_consulted "
+            f"(present, and deduped across the seed/neighbour merge). "
             f"Got count={count}, full ids: {source_ids}"
         )
 
