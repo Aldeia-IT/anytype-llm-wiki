@@ -46,6 +46,9 @@ DEFAULT_WIKI_FILE_BACK_MIN_WORDS = 100
 DEFAULT_WIKI_SYNTH_MAX_OBJECTS = 24
 DEFAULT_WIKI_SYNTH_MAX_OBJECT_TOKENS = 1024
 
+# #324 — global cap on distinct neighbour ids fetched per query (1-hop fan-out).
+DEFAULT_WIKI_QUERY_MAX_NEIGHBORS = 16
+
 
 def _positive_int(env: str, default: int) -> int:
     """Resolve an int env var at call time; reject 0/negative → default (SF10).
@@ -180,6 +183,15 @@ def synth_max_object_tokens() -> int:
     """Resolve WIKI_SYNTH_MAX_OBJECT_TOKENS — per-object token cap (default 1024)."""
     return _positive_int(
         "WIKI_SYNTH_MAX_OBJECT_TOKENS", DEFAULT_WIKI_SYNTH_MAX_OBJECT_TOKENS
+    )
+
+
+def query_max_neighbors() -> int:
+    """Resolve WIKI_QUERY_MAX_NEIGHBORS — global cap on distinct neighbour ids
+    fetched per query (default 16). Applied after seed-dedup, before fetch loop.
+    Rejects 0/negative (SF10 _positive_int guard)."""
+    return _positive_int(
+        "WIKI_QUERY_MAX_NEIGHBORS", DEFAULT_WIKI_QUERY_MAX_NEIGHBORS
     )
 
 
