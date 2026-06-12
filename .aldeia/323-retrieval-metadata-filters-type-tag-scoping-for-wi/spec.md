@@ -14,7 +14,7 @@ parent_spec: 285-anytype-llm-wiki-v0-4-0-wiki-query-tiered-retrieva
 **Status:** SPEC
 **Date:** 2026-06-12
 **Author:** spec-writer agent
-**Review rounds:** 0
+**Review rounds:** 1
 **Epic:** aldeia-box#140 | **Sibling (deferred fusion half):** aldeia-box#327
 
 ---
@@ -35,36 +35,33 @@ object_id | space_id | object_name | type_key | heading | text
 ```
 
 `domain_tags`, `source_type`, and any date field are **not in the payload**. They exist only as
-Anytype object properties (`wiki_domain_tags` multi_select, `wiki_ingested_at` date,
-`wiki_source_type` select — defined in `wiki/types_schema.py:69-154`) and are never read by the
-indexer or written to Qdrant.
+Anytype object properties and are never read by the indexer or written to Qdrant.
 
-A second gap compounds the first: `wiki_domain_tags` is **never written onto Anytype objects**
-by the current ingest/remember pipeline. `ingest.py` and `remember.py` both validate the
-`domain_hint`/`domain_tags` parameter against the taxonomy but never persist it onto the created
-Source, Entity, or Concept objects. Any domain_tags filter against the current corpus would
-silently return zero results.
+Two filter dimensions the ticket asks for are inert against the real corpus and are **deferred**
+to a single follow-up ticket (see §3 D4/D5 and §4):
 
-This creates a direct contradiction between the ticket's own **non-goal** ("no indexing /
-payload-schema change") and its **acceptance criteria** (domain_tags + source + date filters;
-"create payload index if missing"). The non-goal reflects a mistaken belief about the current
-payload. The acceptance criteria reflect the ticket's actual intent.
+- **`source_type`** — `wiki_source` objects are created body-less (properties only) and
+  `wiki_excerpt` is not in the chunker's text allowlist, so sources produce **zero chunks** and
+  never reach Qdrant. A `source_type` filter would return zero for all inputs.
+- **`domain_tags`** — `wiki_domain_tags` is never written onto any Anytype object by the
+  ingest/remember pipelines (validate-only), so the field never exists to filter on.
 
-**This spec resolves the contradiction.** It does NOT paper over it.
+Both are the same footgun: an accepted-but-inert parameter that silently returns nothing. v1
+ships only the two dimensions that work against the real corpus: **`type`** and **`date`**.
 
 ### 1.2 What Works Today
 
-`semantic_search_core` (`indexer.py:50-62`) already builds a conjunctive Qdrant `Filter` for
-`space_id` and `types`. `semantic_search` (`server.py:22-39`) already exposes `types`/`space_id`
-as MCP params. The `type` scoping half of this ticket is therefore largely built. The gaps are:
-exposing type scoping on `wiki_query`, adding payload indexes, input validation, tests, and the
-two new payload fields (`source_type`, `last_modified_date`).
+`semantic_search_core` (`indexer.py:20-82`) already builds a conjunctive Qdrant `Filter` for
+`space_id` and `types`. `semantic_search` already exposes `types`/`space_id` as MCP params. The
+`type` scoping half of this ticket is therefore largely built. The gaps for v1 are: exposing
+type scoping on `wiki_query`, adding the `last_modified_date` payload field + a date filter,
+payload indexes, input validation, a forced-backfill migration, and tests.
 
 ### 1.3 Compliance / Egress Check
 
 Metadata filters are evaluated entirely within Qdrant (local Docker container). No new data
-leaves the machine. No new network calls to any external service are introduced by this feature.
-The local-first posture of `.aldeia/context/compliance.md` is preserved.
+leaves the machine. No new network calls to any external service are introduced. The local-first
+posture of `.aldeia/context/compliance.md` is preserved.
 
 ---
 
@@ -74,18 +71,20 @@ The local-first posture of `.aldeia/context/compliance.md` is preserved.
 
 | File | Nature |
 |------|--------|
-| `src/anytype_llm_wiki/indexer.py` | Extend `semantic_search_core` (new filter params); extend `_ensure_collection` (payload indexes); extend `reindex`/`reembed_object` payload writes |
-| `src/anytype_llm_wiki/chunker.py` | Extend `chunk_object` / `_chunk_body` / `_chunk_properties` to extract and return `source_type` and `last_modified_date` |
-| `src/anytype_llm_wiki/server.py` | Add `source_type`, `ingested_after`, `ingested_before` params to `semantic_search`; add `types`, `source_type`, `ingested_after`, `ingested_before` to `wiki_query` |
-| `src/anytype_llm_wiki/wiki/query.py` | Thread new filter params from `wiki_query` into `semantic_search_core` (Tier 2) and apply equivalent in-memory predicates (Tier 1) |
-| `tests/test_indexer.py` | Add `FakeQdrantClientWithSearch`; add filter unit tests, regression test, validation tests |
+| `src/anytype_llm_wiki/indexer.py` | `semantic_search_core` date filter param; `reindex` payload-schema-version backfill; shared `_chunk_to_payload`; `_ensure_payload_indexes` on the reindex path only |
+| `src/anytype_llm_wiki/chunker.py` | Extract `last_modified_date` in `chunk_object`, inject into every chunk |
+| `src/anytype_llm_wiki/server.py` | Add `ingested_after`/`ingested_before` to `semantic_search`; add `types`, `ingested_after`, `ingested_before` to `wiki_query` |
+| `src/anytype_llm_wiki/wiki/query.py` | Thread filter params into Tier-2 core; module-level Tier-1 predicates (`_passes_type_filter`, `_passes_date_filter`) |
+| `src/anytype_llm_wiki/config.py` | `PAYLOAD_SCHEMA_VERSION` constant |
+| `tests/test_indexer.py` / `tests/test_chunker.py` / `tests/wiki/test_query.py` | Filter, regression, validation, payload-index, Tier-1 predicate, and migration-backfill tests |
 
 ### Out of Scope (v1)
 
-- `domain_tags` filter — deferred (see D4 and Open Decisions for Jan)
+- `source_type` filter — **deferred** (see D4 and Open Decisions for Jan)
+- `domain_tags` filter — **deferred** (see D5 and Open Decisions for Jan)
 - Filtering by exact source URL or file path
-- Filtering by `wiki_last_reviewed` date (can be added as a trivial follow-on once the pattern is established)
-- Filtering by `wiki_asked_at` on `wiki_query` objects
+- Filtering by `wiki_last_reviewed` / `wiki_asked_at` dates (trivial follow-on once the pattern
+  is established)
 
 ---
 
@@ -93,132 +92,176 @@ The local-first posture of `.aldeia/context/compliance.md` is preserved.
 
 ### D1 — `type` Filter: Full, Ship in v1
 
-**Decision:** Expose type scoping on `wiki_query` (it already exists on `semantic_search`).
-Use the existing `semantic_search_core` `types` parameter. No payload schema change needed;
-`type_key` is already in the payload. Add a `PayloadSchemaType.KEYWORD` index for `type_key`
-(and `space_id`) in `_ensure_collection` for query performance.
+**Decision:** Expose type scoping on `wiki_query` (it already exists on `semantic_search`). Use
+the existing `semantic_search_core` `types` parameter. No payload schema change needed; `type_key`
+is already in the payload. Add a `PayloadSchemaType.KEYWORD` index for `type_key` (and `space_id`)
+on the reindex path for query performance.
 
 **Rationale:** The filter wire is already built. The only gap is the `wiki_query` tool surface.
 
-**Caller semantics for `wiki_query`:** The `types` parameter specifies which wiki type keys the
-caller wants included. It intersects with (does NOT replace) the hardcoded `_WIKI_TYPE_KEYS`
-tuple `("wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query")`. A caller passing
-`types=["wiki_entity"]` gets only entities; `types=["wiki_entity", "wiki_source"]` is silently
-narrowed to `["wiki_entity"]` (non-wiki types are filtered out). An empty intersection is an
-error (see §6.3).
+**Caller semantics for `wiki_query`:** `types` specifies which wiki type keys the caller wants
+included. It intersects with (does NOT replace) the hardcoded `_WIKI_TYPE_KEYS` tuple
+`("wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query")`. `types=["wiki_entity"]` gets
+only entities; `types=["wiki_entity", "wiki_source"]` is silently narrowed to `["wiki_entity"]`
+(non-wiki types dropped). An empty intersection is an error (see §9.2). When `types` is omitted,
+`wiki_query` passes the full `_WIKI_TYPE_KEYS` to the core (unchanged default behavior).
 
-### D2 — `source_type` Filter: Ship in v1 via Additive Payload Extension
-
-**Decision:** Add a `source_type` payload field. During chunking, read the `wiki_source_type`
-select property from the object's `get_object` response properties and store the tag `name`
-string (e.g. `"url"`, `"agent"`, `"conversation"`). For objects without this property (all
-`wiki_entity`, `wiki_concept`, `wiki_comparison`, `wiki_query` objects), the field is `None`
-and is not written to the payload (absent key, not `null`). A `source_type` filter therefore
-matches only `wiki_source` chunks.
-
-**Consequence:** This is an additive, backward-compatible payload extension. Existing chunks
-lack `source_type`. A one-time reindex is required to populate the field for existing objects.
-New chunks from objects indexed after this change will carry the field. The filter safely
-returns zero matches on unindexed chunks (Qdrant treats missing field as non-matching for
-equality conditions — correct behavior).
-
-**Deviation from non-goal:** This is a payload schema change. The lead has adjudicated this
-as necessary to deliver the ticket's stated intent. See Open Decisions for Jan (§4).
-
-### D3 — Date Filter: Ship in v1 via Additive Payload Extension
+### D2 — Date Filter: Ship in v1 via Additive Payload Extension
 
 **Decision:** Add a `last_modified_date` payload field (ISO-8601 string) and expose
-`ingested_after` / `ingested_before` MCP params that translate to a `DatetimeRange` condition
-on `last_modified_date`.
+`ingested_after` / `ingested_before` MCP params that translate to a `DatetimeRange` condition on
+`last_modified_date`.
 
-**Date field selection — `last_modified_date` (recommended) vs `wiki_ingested_at`:**
+**Date field selection — `last_modified_date`:** It is universal (all object types), already read
+by `indexer._get_last_modified` (`indexer.py:105-110`), and system-managed. The alternative
+`wiki_ingested_at` exists only on `wiki_source` objects and would be `None` on most chunks —
+producing confusing null results. `last_modified_date` gives uniform date filtering across every
+chunked type.
 
-| Candidate | Coverage | Availability |
-|---|---|---|
-| `last_modified_date` | ALL object types (`wiki_entity`, `wiki_concept`, `wiki_source`, etc.) | Already read by `indexer._get_last_modified`; universal system-managed field |
-| `wiki_ingested_at` | `wiki_source` objects only; `None` for entity/concept | Set by the ingest pipeline on source creation; not on all object types |
+**Implementation:** The chunker extracts `last_modified_date` from object properties (same read
+shape as `_get_last_modified`, see §7.2) and injects it into every chunk. The shared
+`_chunk_to_payload` helper (§7.4) writes it into the `PointStruct` payload in BOTH `reindex` and
+`reembed_object`.
 
-**Recommendation: `last_modified_date`.** It provides uniform date filtering across all chunk
-types. A caller wanting "sources since January 2026" gets exactly that (because `wiki_source`
-objects are modified at ingest time). A caller wanting "entities modified since last week"
-also works. `wiki_ingested_at` would only be meaningful for one type and produce confusing
-null results on most chunks.
+**Consequence:** Additive, backward-compatible payload extension. Existing chunks lack the field;
+the date filter safely returns zero matches for them (Qdrant treats a missing field as
+non-matching). A one-time **forced** reindex backfills the field for the whole corpus — see D3.
+This is a payload schema change; the lead has adjudicated it as necessary. See Open Decisions (§4).
 
-**Implementation:** `indexer._get_last_modified` already reads `last_modified_date` from
-object properties. The payload write in `reindex` and `reembed_object` must include
-`"last_modified_date": chunk["last_modified_date"]` where chunks will carry this field from
-the chunker.
+### D3 — Forced Backfill via Payload-Schema-Version Marker (Migration)
 
-**Consequence:** Same as D2 — additive payload extension, one-time reindex required.
+**Problem:** `reindex` skips any object whose `last_modified_date` is unchanged
+(`indexer.py:134-136`). After upgrade, almost every object is unchanged, so its chunks would keep
+the old 6-field payload **indefinitely** — the new field would only land for objects edited
+post-upgrade. The launchd cron (`docs/samples/com.aldeia.anytype-llm-wiki-reindex.plist`) runs
+plain `reindex()` and would never backfill either. The date filter would silently under-return
+against the historical corpus.
 
-### D4 — `domain_tags` Filter: Defer, Do NOT Ship a Non-Functional Param in v1
+**Decision:** Store a **payload-schema-version marker** in the index state file
+(`config.INDEX_STATE_FILE`, a JSON dict currently keyed by `space_id`). Define:
+
+- **Code constant:** `config.PAYLOAD_SCHEMA_VERSION = 2` (was implicitly `1` = the 6-field
+  payload; `2` = adds `last_modified_date`).
+- **State key:** top-level `"_payload_schema_version"` in the state dict (leading underscore
+  avoids collision with `space_id` keys, which are Anytype object-space IDs).
+
+**Behavior in `reindex`:** Read `stored = state.get("_payload_schema_version", 1)`. If
+`config.PAYLOAD_SCHEMA_VERSION > stored`, set a `force_full = True` flag for this run. When
+`force_full`, the unchanged-skip at `indexer.py:134-136` is bypassed (every object is re-fetched,
+re-chunked, re-embedded, re-upserted). After the loop completes successfully, stamp
+`state["_payload_schema_version"] = config.PAYLOAD_SCHEMA_VERSION` before `_save_state`. Subsequent
+runs see `stored == code version`, `force_full` is `False`, and normal incremental behavior
+resumes.
+
+This auto-heals **both** the manual `reindex` and the launchd cron — neither needs a flag or a
+human step. The force is one-time per version bump.
+
+```python
+# In reindex(), after _load_state():
+stored_schema = state.get("_payload_schema_version", 1)
+force_full = config.PAYLOAD_SCHEMA_VERSION > stored_schema
+
+# In the per-object loop, replace the unchanged-skip guard:
+last_mod = _get_last_modified(obj_summary) or "unknown"
+if not force_full and space_state.get(oid) == last_mod:
+    continue  # unchanged
+
+# After all spaces processed, before _save_state(state):
+state["_payload_schema_version"] = config.PAYLOAD_SCHEMA_VERSION
+```
+
+**Note:** `_load_state`/`_save_state` already round-trip the whole dict, so the new top-level key
+persists with no serialization change. The space-iteration code reads `state.get(sid, {})` per
+space, so the `"_payload_schema_version"` key is never mistaken for a space.
+
+### D4 — `source_type` Filter: DEFER (root cause verified)
+
+**Decision:** Do NOT add `source_type` as an MCP filter parameter in v1. Removed from the API
+surface, filter build, chunker, payload writes, payload indexes, and tests.
+
+**Root cause (Lead-verified):** `wiki_source` objects are created **body-less** — `_create_source`
+(`ingest.py:924-971`) and `remember.py:172-195` write properties only (`wiki_excerpt`,
+`wiki_ingested_at`, `wiki_url`/`wiki_file_path`), never a markdown body (AC-L1: "NEVER a
+body/markdown key"). The chunker emits property chunks only for keys in `WIKI_TEXT_PROPERTY_KEYS`
+(`chunker.py:13-16`), which does **not** include `wiki_excerpt`. Therefore `chunk_object` returns
+**zero chunks** for every `wiki_source` object → sources never reach Qdrant → no payload ever
+carries `source_type`. A `source_type` filter returns zero for ALL inputs on both tools. (On
+`wiki_query` this is doubly inert: `wiki_source ∉ _WIKI_TYPE_KEYS`.)
+
+**Optional enable-path (Open Decision, NOT v1 default):** To make sources filterable, add
+`wiki_excerpt` to `WIKI_TEXT_PROPERTY_KEYS` so sources get chunked and `source_type` can be read
+and indexed. **This changes `semantic_search` retrieval semantics** — source excerpts would start
+appearing in semantic results that today only contain entity/concept/comparison/query content.
+That is a product-facing behavior change requiring Jan/product sign-off (OD-2), not a silent v1
+inclusion.
+
+### D5 — `domain_tags` Filter: DEFER (root cause verified)
 
 **Decision:** Do NOT add `domain_tags` as an MCP filter parameter in v1.
 
-**Rationale:** `wiki_domain_tags` is never written onto Anytype objects by the current ingest
-or remember pipelines. A `domain_tags` filter cannot work against the current corpus. Shipping
-an accepted-but-inert parameter is a footgun: it silently returns nothing, misleads callers,
-and is harder to revoke later than to defer now.
+**Root cause:** `wiki_domain_tags` is never written onto Anytype objects by the current ingest or
+remember pipelines. `extraction.py` produces domain tags and `ingest.py`/`remember.py` validate
+the `domain_hint`/`domain_tags` input against the taxonomy, but neither pipeline persists
+`wiki_domain_tags` as a `multi_select` property on the created objects (tag IDs are never resolved
+or stored). A `domain_tags` filter cannot match anything against the current corpus.
 
-**Root cause (documented for the follow-up ticket):** The extraction prompt in `extraction.py`
-does produce domain tags per entity/concept, and `ingest.py`/`remember.py` validate the
-`domain_hint`/`domain_tags` input against the taxonomy, but neither pipeline writes
-`wiki_domain_tags` as a `multi_select` property onto the created `wiki_source`, `wiki_entity`,
-or `wiki_concept` objects. The tag IDs are never resolved and never persisted.
+### D6 — Single Follow-Up Ticket (source_type + domain_tags)
 
-**Follow-up ticket scope (recommended):**
-1. Extend the ingest and remember pipelines to persist `wiki_domain_tags` as a multi_select
-   property on created/updated objects (resolve tag names to IDs via the space tag registry).
-2. Extend the chunker to read `wiki_domain_tags` from the `get_object` property response
-   and include a `domain_tags: list[str]` field in the chunk payload (storing tag names,
-   not IDs — names are stable and human-meaningful).
-3. Add `PayloadSchemaType.KEYWORD` index for `domain_tags` in `_ensure_collection`.
-4. Expose `domain_tags: list[str] | None` filter param on `semantic_search` and `wiki_query`.
-5. Filter via `FieldCondition(key="domain_tags", match=MatchAny(any=[...]))` — confirmed by
-   research to perform ANY-overlap matching against list-valued payload fields.
+D4 and D5 are blocked by the same class of upstream gap (metadata not persisted/indexed onto
+chunks) and fold into **one** follow-up ticket: **"Persist `wiki_domain_tags` onto objects AND
+index source excerpts, then expose both filters."** Scope:
 
-**Prerequisite verification for the follow-up:** The `multi_select` GET response shape from
-`get_object` is UNVERIFIED in the codebase. The codebase never reads `multi_select` values
-back. The `select` property returns `{"select": {"id": "...", "name": "...", "color": "..."}}`.
-By analogy, `multi_select` likely returns `{"multi_select": [{"id": "...", "name": "..."}]}`.
-This must be verified against a live space before the follow-up implements chunker extraction.
+1. Extend ingest/remember to persist `wiki_domain_tags` as a `multi_select` property (resolve tag
+   names → IDs via the space tag registry).
+2. Add `wiki_excerpt` to `WIKI_TEXT_PROPERTY_KEYS` so `wiki_source` objects are chunked (with
+   product sign-off on the retrieval-semantics change).
+3. Extend the chunker to read `wiki_source_type` (select) and `wiki_domain_tags` (multi_select)
+   into chunk payload (`source_type: str`, `domain_tags: list[str]` of tag names).
+4. Add `PayloadSchemaType.KEYWORD` indexes for `source_type` and `domain_tags`; bump
+   `PAYLOAD_SCHEMA_VERSION` (the D3 marker auto-backfills).
+5. Expose `source_type` and `domain_tags` filter params on both tools. `domain_tags` filters via
+   `FieldCondition(key="domain_tags", match=MatchAny(any=[...]))` (ANY-overlap on list-valued
+   fields).
 
-**If Jan overrides at Decide to include domain_tags now:** The filter-translation design
-in §5 already accommodates a `domain_tags` list payload field via
-`FieldCondition(key="domain_tags", match=MatchAny(any=[...]))`. The blocker is not the filter
-mechanism but the absent write path. Including domain_tags now requires also including the
-ingest/remember write path in scope, which expands the ticket to a different complexity class.
+**Prerequisite verification for the follow-up:** the `multi_select` GET response shape is
+UNVERIFIED in the codebase (the code never reads `multi_select` values back). `select` returns
+`{"select": {"id","name","color"}}`; by analogy `multi_select` likely returns
+`{"multi_select": [{"id","name"}, ...]}`. Verify against a live space before implementing chunker
+extraction.
 
 ---
 
 ## 4. Open Decisions for Jan (Decide Gate)
 
-These items deviate from the ticket's stated non-goal and require ratification before
-implementation begins.
+These deviate from the ticket's stated non-goal and require ratification before implementation.
 
-### OD-1: Payload Extension (D2 + D3)
+### OD-1: Date payload field + forced one-time re-embed (D2 + D3)
 
-**Question:** Do you accept `source_type` and `last_modified_date` as additive payload
-fields (requiring a one-time reindex) as part of this ticket?
+**Question:** Accept `last_modified_date` as an additive payload field plus a **forced one-time
+full re-embed** (auto-healed via the payload-schema-version marker) as part of this ticket?
 
-**Recommendation:** Yes. The extension is additive and backward-compatible. Old chunks
-without the new fields return no results for the new filters (correct behavior, not an error).
-The reindex is cheap (small corpus, 32GB box, ~7s projected). This is the only way to deliver
-the ticket's stated intent; the literal non-goal reflects a mistaken belief about the payload.
+**Recommendation:** Yes. The field is additive and backward-compatible; the forced re-embed is a
+complete Ollama pass over a small corpus (seconds — see §13), auto-triggered by the version bump
+on the next manual or cron `reindex`. This is the only way to make the date filter work against
+the historical corpus rather than only objects edited post-upgrade.
 
-**Option B (rejected larger scope):** Include `domain_tags` in the same reindex pass. Blocked
-by the absent write path in ingest/remember. Expands scope significantly. Deferred to follow-up.
+**Fallback (Option A):** Ship `type` + `space` scoping only (no payload change, no migration).
+Delivers the type half; misses date filtering entirely.
 
-**Option A (fallback):** Ship only `type` + `space` scoping (no payload change). Delivers
-~30% of the ticket's value. Misses the date and source filters entirely.
+### OD-2: Defer both `source_type` and `domain_tags` to one follow-up (D4 + D5 + D6)
 
-### OD-2: `domain_tags` Deferral (D4)
+**Question:** Accept deferring **both** `source_type` and `domain_tags` to a single follow-up
+ticket (persist `wiki_domain_tags` onto objects AND index source excerpts, then expose both
+filters)?
 
-**Question:** Do you accept deferring domain_tags filtering to a follow-up ticket?
+**Recommendation:** Yes. Each is blocked by a verified upstream indexing gap and cannot be made to
+work by a Qdrant-only change. Shipping either param now is a footgun (silently returns nothing).
+The ticket is titled "type/**tag** scoping" and lists these as ACs, so this deferral needs Jan's
+explicit acceptance and a linked follow-up ticket created at the Decide gate.
 
-**Recommendation:** Yes. The prerequisite (writing `wiki_domain_tags` onto objects) is absent
-from the codebase and cannot be remedied by a Qdrant-only change. Shipping the param now would
-be a footgun (silently returns nothing). The follow-up ticket has a clear, bounded scope (see D4).
+**Alternative to weigh:** Opt into indexing `wiki_excerpt` now to enable `source_type` on
+`semantic_search` — but note this **changes `semantic_search` retrieval semantics** (source
+excerpts enter semantic results). Not recommended for v1 without product agreement.
 
 ---
 
@@ -232,21 +275,17 @@ def semantic_search(
     query: str,
     space_id: str | None = None,
     types: list[str] | None = None,       # existing
-    source_type: str | None = None,       # NEW: "url" | "agent" | "conversation"
-    ingested_after: str | None = None,    # NEW: ISO-8601 datetime string (inclusive lower bound)
-    ingested_before: str | None = None,   # NEW: ISO-8601 datetime string (inclusive upper bound)
+    ingested_after: str | None = None,    # NEW: ISO-8601 datetime (inclusive lower bound)
+    ingested_before: str | None = None,   # NEW: ISO-8601 datetime (inclusive upper bound)
     limit: int = 10,
 ) -> list[dict]:
 ```
 
-All new params are optional, default `None`. The existing return type `list[dict]` is unchanged.
-Validation errors raise `ValueError` (surfaced as `CallToolResult(isError=True)` by FastMCP).
+All new params optional, default `None`. Return type `list[dict]` unchanged. Validation errors
+raise `ValueError` (surfaced as `CallToolResult(isError=True)` by FastMCP).
 
 **Docstring additions:**
 ```
-    source_type: Optional filter by ingestion channel — "url", "agent", or "conversation".
-        Only chunks from wiki_source objects carry this field; entity/concept chunks will
-        not match.
     ingested_after: Optional ISO-8601 datetime lower bound on last_modified_date, inclusive.
         Example: "2026-01-01T00:00:00Z".
     ingested_before: Optional ISO-8601 datetime upper bound on last_modified_date, inclusive.
@@ -262,16 +301,15 @@ def wiki_query(
     space_id: str,
     file_back: bool | None = None,
     types: list[str] | None = None,       # NEW: subset of wiki type keys
-    source_type: str | None = None,       # NEW: same semantics as semantic_search
     ingested_after: str | None = None,    # NEW: same semantics as semantic_search
     ingested_before: str | None = None,   # NEW: same semantics as semantic_search
 ) -> dict:
 ```
 
-All new params are optional, default `None`. The existing return type `dict` (QueryResult) is
-unchanged. Validation errors fit into the existing error-dict pattern
-`{"status": "error", "error": "...", "error_category": "config_error"}` (NOT raised as
-exceptions, consistent with `wiki_query`'s current never-raise contract).
+All new params optional, default `None`. Return type `dict` (QueryResult) unchanged. Validation
+errors fit the existing error-dict pattern `{"status": "error", "error": "...",
+"error_category": "config_error"}` (NOT raised — consistent with `wiki_query`'s never-raise
+contract).
 
 ### 5.3 `semantic_search_core` (extended)
 
@@ -280,15 +318,13 @@ def semantic_search_core(
     query: str,
     space_id: str | None = None,
     types: list[str] | None = None,       # existing
-    source_type: str | None = None,       # NEW
     ingested_after: str | None = None,    # NEW
     ingested_before: str | None = None,   # NEW
     limit: int = 10,
 ) -> list[dict]:
 ```
 
-The core does not validate inputs; validation is the caller's responsibility. The core trusts
-its callers (test isolation).
+The core does not validate inputs; validation is the caller's responsibility (test isolation).
 
 ---
 
@@ -301,14 +337,19 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,      # single-value equality (existing use)
-    MatchAny,        # IN operator — used for type_key and source_type
     DatetimeRange,   # range over ISO-8601 datetime payload fields (NOT Range)
     PayloadSchemaType,
 )
 ```
 
-All imports are from `qdrant_client.models` (re-exported from `qdrant_client.http.models.models`).
-Confirmed in qdrant-client 1.18.0 (pinned `>=1.18.0,<2.0.0` in `pyproject.toml`).
+All imports are from `qdrant_client.models` (re-exported from `qdrant_client.http.models.models`),
+confirmed in qdrant-client 1.18.0 (pinned `>=1.18.0,<2.0.0`).
+
+**`MatchAny` is intentionally NOT imported.** The type filter uses the nested
+`Filter(should=[FieldCondition(... MatchValue ...)])` form (see §6.2) — this matches the existing
+code (`indexer.py:53-61`) and AC-F2. Do not "simplify" to `MatchAny`: the regression and AC-F2
+both depend on the nested-`should` shape, and a contradictory shape makes the test suite
+unsatisfiable.
 
 ### 6.2 Filter Construction in `semantic_search_core`
 
@@ -330,9 +371,6 @@ if types:
         )
     )
 
-if source_type:
-    must.append(FieldCondition(key="source_type", match=MatchValue(value=source_type)))
-
 if ingested_after or ingested_before:
     must.append(
         FieldCondition(
@@ -347,102 +385,83 @@ if ingested_after or ingested_before:
 search_filter = Filter(must=must) if must else None
 ```
 
-**Critical:** `DatetimeRange` is used, not `Range`. `Range` accepts floats/ints only;
-`DatetimeRange` accepts ISO-8601 strings via Pydantic coercion. Using `Range` on ISO strings
-is a silent failure (wrong type, no match).
+**Critical:** `DatetimeRange` (not `Range`). `Range` accepts floats/ints only; `DatetimeRange`
+accepts ISO-8601 strings via Pydantic coercion. Using `Range` on ISO strings silently fails.
 
 **No-filter guarantee:** When all filter params are `None`/empty, `must` stays empty and
-`search_filter` is `None` — byte-identical to the current behavior.
+`search_filter` is `None` — byte-identical to current behavior. An empty-list `types=[]` is falsy,
+so it also yields no filter (no-op, by design).
 
-### 6.3 Payload Index Creation in `_ensure_collection`
+### 6.3 Payload Index Creation (reindex path only)
 
-The extended `_ensure_collection` (`indexer.py:85-91`):
+Index creation moves OUT of `_ensure_collection` (which runs on every `reembed_object` hot-path
+call, `indexer.py:198`) into a dedicated `_ensure_payload_indexes` called **only** from `reindex`:
 
 ```python
-def _ensure_collection(client: QdrantClient) -> None:
+def _ensure_payload_indexes(client: QdrantClient) -> None:
     from qdrant_client.models import PayloadSchemaType
-
-    collections = [c.name for c in client.get_collections().collections]
-    if config.QDRANT_COLLECTION not in collections:
-        client.create_collection(
-            collection_name=config.QDRANT_COLLECTION,
-            vectors_config=VectorParams(size=config.EMBED_DIMS, distance=Distance.COSINE),
-        )
-    # Payload indexes — idempotent, safe to call unconditionally.
-    # In-memory Qdrant emits a UserWarning that indexes have no effect — expected in tests.
+    # Idempotent; called once per full reindex, not on the per-object reembed path.
     for field, schema in [
-        ("type_key",          PayloadSchemaType.KEYWORD),
-        ("space_id",          PayloadSchemaType.KEYWORD),
-        ("source_type",       PayloadSchemaType.KEYWORD),
+        ("type_key",           PayloadSchemaType.KEYWORD),
+        ("space_id",           PayloadSchemaType.KEYWORD),
         ("last_modified_date", PayloadSchemaType.DATETIME),
     ]:
-        client.create_payload_index(
-            config.QDRANT_COLLECTION,
-            field,
-            field_schema=schema,
-        )
+        client.create_payload_index(config.QDRANT_COLLECTION, field, field_schema=schema)
 ```
 
-`create_payload_index` signature (verified via `inspect.signature`):
+`reindex` calls `_ensure_collection(client)` then `_ensure_payload_indexes(client)`.
+`reembed_object` calls only `_ensure_collection(client)` (no index calls). Indexes are:
+`type_key`, `space_id`, `last_modified_date` (no `source_type`).
+
+`create_payload_index` signature (verified): `(collection_name, field_name, field_schema=None,
+wait=True) -> UpdateResult`. Use `field_schema=` (not legacy `field_type=`). Idempotent: repeat
+calls return `UpdateStatus.COMPLETED` without raising.
+
+**In-memory Qdrant `UserWarning`:** the in-memory client emits a `UserWarning` that
+`create_payload_index` has no effect. To keep a warnings-as-errors CI run green, the migration
+test (and any test exercising `_ensure_payload_indexes` against a real in-memory client) must
+register an explicit filter:
+
 ```python
-client.create_payload_index(
-    collection_name: str,
-    field_name: str,
-    field_schema: PayloadSchemaType | ... | None = None,
-    wait: bool = True,
-) -> UpdateResult
+@pytest.mark.filterwarnings("ignore::UserWarning")
 ```
 
-Use `field_schema=` (not the legacy `field_type=`). Confirmed idempotent: calling twice with
-the same schema type returns `UpdateStatus.COMPLETED` without raising. Safe to call
-unconditionally every time `_ensure_collection` runs (called at the top of `reindex` at
-`indexer.py:116` and `reembed_object` at `indexer.py:197`).
+or, narrower, `warnings.filterwarnings("ignore", message=".*payload.*index.*", category=UserWarning)`
+in the test. The fakes in §10 are no-ops and never emit the warning; this guard is for any test
+using a genuine in-memory `QdrantClient`.
 
 ---
 
 ## 7. Chunker / Indexer Payload Extension
 
-### 7.1 New Chunk Fields
+### 7.1 New Chunk Field
 
-The chunk dict produced by `chunk_object` / `_chunk_body` / `_chunk_properties` gains two
-optional fields:
+The chunk dict produced by `chunk_object` gains one optional field:
 
 | Field | Type | Source | Objects present on |
 |---|---|---|---|
-| `source_type` | `str \| None` | `wiki_source_type` select property → `select.name` | `wiki_source` only |
-| `last_modified_date` | `str \| None` | `last_modified_date` date property → `date` | All object types |
+| `last_modified_date` | `str \| None` | `last_modified_date` date property → `date` | All object types (when the property is present) |
 
-### 7.2 Property Extraction Patterns (Verified)
+(No `source_type` field — deferred per D4.)
 
-**`select` property GET response** (confirmed from `lint.py:388-389, 519-526`):
+### 7.2 Property Extraction Pattern (Verified)
+
+The chunker reads `last_modified_date` with the **same shape** as `indexer._get_last_modified`
+(`indexer.py:105-110`) and `lint.py` date readers — `prop.get("date")` — so chunker and Tier-1
+predicate agree on the read shape:
+
 ```python
-# GET response shape:
-{"key": "wiki_source_type", "select": {"id": "tag-xxx", "name": "url", "color": "grey"}}
-
-# Extraction:
-for prop in obj.get("properties", []):
-    if prop.get("key") == "wiki_source_type":
-        sel = prop.get("select")
-        source_type = sel.get("name") if isinstance(sel, dict) else None
-```
-
-**`date` property GET response** (confirmed from `indexer.py:105-110`, `lint.py:372`,
-`ingest.py:937`):
-```python
-# GET response shape:
+# GET response shape (confirmed indexer.py:105-110, ingest.py:937):
 {"key": "last_modified_date", "date": "2026-06-12T10:00:00+00:00"}
 
-# Extraction (mirrors existing _get_last_modified):
 for prop in obj.get("properties", []):
-    if prop.get("key") == "last_modified_date":
+    if isinstance(prop, dict) and prop.get("key") == "last_modified_date":
         last_modified_date = prop.get("date")
 ```
 
-### 7.3 `chunk_object` Signature Extension
+### 7.3 `chunk_object` Extension
 
-`chunk_object` receives the full `obj` dict (already the case). It must extract `source_type`
-and `last_modified_date` before delegating to `_chunk_body` / `_chunk_properties`, then inject
-them into every chunk dict returned.
+`chunk_object` extracts `last_modified_date` before dispatch, then injects it into every chunk:
 
 ```python
 def chunk_object(obj: dict) -> list[dict]:
@@ -451,123 +470,93 @@ def chunk_object(obj: dict) -> list[dict]:
     object_name = obj.get("name", "")
     type_key = obj.get("type", {}).get("key", "unknown")
 
-    # NEW: extract metadata payload fields
-    source_type = None
+    # NEW: extract date payload field
     last_modified_date = None
     for prop in obj.get("properties", []):
-        if not isinstance(prop, dict):
-            continue
-        key = prop.get("key")
-        if key == "wiki_source_type":
-            sel = prop.get("select")
-            if isinstance(sel, dict):
-                source_type = sel.get("name")
-        elif key == "last_modified_date":
+        if isinstance(prop, dict) and prop.get("key") == "last_modified_date":
             last_modified_date = prop.get("date")
+            break
 
-    # ... existing markdown / property-only dispatch ...
+    markdown = obj.get("markdown", "") or ""
     chunks = (
         _chunk_body(markdown, object_id, space_id, object_name, type_key)
         if markdown.strip()
         else _chunk_properties(obj, object_id, space_id, object_name, type_key)
     )
 
-    # Inject new metadata fields into every chunk (None values omitted from payload)
-    for chunk in chunks:
-        if source_type is not None:
-            chunk["source_type"] = source_type
-        if last_modified_date is not None:
+    # Inject into every chunk (None omitted from payload by _chunk_to_payload)
+    if last_modified_date is not None:
+        for chunk in chunks:
             chunk["last_modified_date"] = last_modified_date
 
     return chunks
 ```
 
-### 7.4 Indexer Payload Write Extension
+### 7.4 Shared Payload Helper
 
-In both `reindex` (`indexer.py:162-168`) and `reembed_object` (`indexer.py:218-225`), the
-`PointStruct` payload must include the new fields when present in the chunk:
+Both `reindex` and `reembed_object` currently hand-duplicate the `PointStruct` payload dict
+(`indexer.py:161-168, 218-225`), which drifts. Extract a single helper used by both:
 
 ```python
-payload = {
-    "object_id": chunk["object_id"],
-    "space_id": chunk["space_id"],
-    "object_name": chunk["object_name"],
-    "type_key": chunk["type_key"],
-    "heading": chunk["heading"],
-    "text": chunk["text"],
-}
-# NEW: write optional metadata fields only when present (avoids polluting payload
-# with explicit null values — missing key is cleaner than null for Qdrant filtering)
-if "source_type" in chunk:
-    payload["source_type"] = chunk["source_type"]
-if "last_modified_date" in chunk:
-    payload["last_modified_date"] = chunk["last_modified_date"]
+def _chunk_to_payload(chunk: dict) -> dict:
+    payload = {
+        "object_id": chunk["object_id"],
+        "space_id": chunk["space_id"],
+        "object_name": chunk["object_name"],
+        "type_key": chunk["type_key"],
+        "heading": chunk["heading"],
+        "text": chunk["text"],
+    }
+    # Optional metadata written only when present (missing key is cleaner than
+    # null for Qdrant filtering).
+    if "last_modified_date" in chunk:
+        payload["last_modified_date"] = chunk["last_modified_date"]
+    return payload
 ```
+
+Both `reindex` and `reembed_object` build `PointStruct(..., payload=_chunk_to_payload(chunk))`.
 
 ---
 
 ## 8. `wiki_query` Two-Tier Filter Semantics
 
 `wiki_query` has two retrieval tiers selected by `config.index_threshold()`:
-- **Tier 1 (index_navigation):** below threshold — enumerates all wiki objects directly, no
-  Qdrant call (`query.py:479-485`)
+- **Tier 1 (index_navigation):** below threshold — enumerates wiki objects directly, no Qdrant
+  call (`query.py:478-485`).
 - **Tier 2 (vector_augmented):** at/above threshold — calls `semantic_search_core`
-  (`query.py:444-462`)
+  (`query.py:443-463`).
 
-Filters must behave consistently across both tiers.
-
-### 8.1 `types` Parameter in `wiki_query`
-
-The caller-supplied `types` is **intersected** with `_WIKI_TYPE_KEYS` before use:
+Filters must behave consistently across both tiers. Tier-1 predicates are **module-level pure
+functions** in `query.py` (testable seam — see §10 AC-F10):
 
 ```python
-# In wiki_query, before tier dispatch:
-_WIKI_TYPE_KEYS_SET = set(_WIKI_TYPE_KEYS)
-effective_types: list[str] | None = None
-if types:
-    intersection = [t for t in types if t in _WIKI_TYPE_KEYS_SET]
-    if not intersection:
-        return {**_empty_result(), "status": "error",
-                "error": f"[CONFIG ERROR] type_filter_empty: none of {types!r} are "
-                         f"valid wiki type keys {list(_WIKI_TYPE_KEYS)}",
-                "error_category": "config_error"}
-    effective_types = intersection
-```
+def _passes_type_filter(obj: dict, effective_types: set[str]) -> bool:
+    """True if the object's type key is in the effective type set."""
+    return _type_of(obj) in effective_types
 
-- **Tier 2:** pass `types=effective_types` to `semantic_search_core` (replaces the current
-  hardcoded `types=list(_WIKI_TYPE_KEYS)`).
-- **Tier 1:** filter `wiki_objects` by `_type_of(o) in set(effective_types or _WIKI_TYPE_KEYS)`.
 
-### 8.2 `source_type` in `wiki_query`
+def _passes_date_filter(
+    obj: dict, after_dt: datetime | None, before_dt: datetime | None
+) -> bool:
+    """True if the object's last_modified_date falls within [after, before].
 
-- **Tier 2:** pass `source_type=source_type` to `semantic_search_core`.
-- **Tier 1:** filter `wiki_objects` by reading the `wiki_source_type` select property from
-  each object's property list and matching against the requested `source_type` name. An object
-  without `wiki_source_type` does not match when `source_type` is specified.
-
-```python
-# Tier-1 source_type predicate (applied after type filter):
-if source_type:
-    def _has_source_type(obj: dict, target: str) -> bool:
-        for prop in obj.get("properties", []):
-            if not isinstance(prop, dict):
-                continue
-            if prop.get("key") == "wiki_source_type":
-                sel = prop.get("select")
-                return isinstance(sel, dict) and sel.get("name") == target
+    No date property → does NOT pass when any bound is set (mirrors Qdrant:
+    a missing field never matches a range condition). When both bounds are
+    None this is never called.
+    """
+    obj_dt = None
+    for prop in obj.get("properties", []):
+        if isinstance(prop, dict) and prop.get("key") == "last_modified_date":
+            obj_dt = _parse_iso(prop.get("date") or "")
+            break
+    if obj_dt is None:
         return False
-    wiki_objects = [o for o in wiki_objects if _has_source_type(o, source_type)]
-```
+    if after_dt and obj_dt < after_dt:
+        return False
+    if before_dt and obj_dt > before_dt:
+        return False
+    return True
 
-### 8.3 Date Filter (`ingested_after` / `ingested_before`) in `wiki_query`
-
-- **Tier 2:** pass `ingested_after=ingested_after, ingested_before=ingested_before` to
-  `semantic_search_core`.
-- **Tier 1:** apply in-memory date filter over `last_modified_date` property values.
-
-```python
-# Tier-1 date predicate:
-from datetime import datetime, timezone
 
 def _parse_iso(s: str) -> datetime | None:
     try:
@@ -575,36 +564,47 @@ def _parse_iso(s: str) -> datetime | None:
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+```
 
+### 8.1 `types` in `wiki_query`
+
+Compute `effective_types` once, before tier dispatch:
+
+```python
+_WIKI_TYPE_KEYS_SET = set(_WIKI_TYPE_KEYS)
+effective_types_set = _WIKI_TYPE_KEYS_SET
+if types:
+    intersection = [t for t in types if t in _WIKI_TYPE_KEYS_SET]
+    if not intersection:
+        return {**_empty_result(), "status": "error",
+                "error": f"[CONFIG ERROR] type_filter_empty: none of {types!r} are "
+                         f"valid wiki type keys {list(_WIKI_TYPE_KEYS)}",
+                "error_category": "config_error"}
+    effective_types_set = set(intersection)
+```
+
+- **Tier 2:** pass `types=sorted(effective_types_set)` to `semantic_search_core` (replaces the
+  current hardcoded `types=list(_WIKI_TYPE_KEYS)`; default = full set when `types` omitted).
+- **Tier 1:** `wiki_objects = [o for o in wiki_objects if _passes_type_filter(o, effective_types_set)]`.
+
+### 8.2 Date Filter in `wiki_query`
+
+- **Tier 2:** pass `ingested_after`/`ingested_before` straight through to `semantic_search_core`.
+- **Tier 1:** parse bounds once, then filter:
+
+```python
 if ingested_after or ingested_before:
     after_dt = _parse_iso(ingested_after) if ingested_after else None
     before_dt = _parse_iso(ingested_before) if ingested_before else None
-
-    def _in_date_range(obj: dict) -> bool:
-        for prop in obj.get("properties", []):
-            if isinstance(prop, dict) and prop.get("key") == "last_modified_date":
-                obj_dt = _parse_iso(prop.get("date") or "")
-                if obj_dt is None:
-                    return False
-                if after_dt and obj_dt < after_dt:
-                    return False
-                if before_dt and obj_dt > before_dt:
-                    return False
-                return True
-        return False  # no date property → does not match date filter
-
-    wiki_objects = [o for o in wiki_objects if _in_date_range(o)]
+    wiki_objects = [o for o in wiki_objects if _passes_date_filter(o, after_dt, before_dt)]
 ```
 
-Note: Tier-1 date filtering operates on the **object's** `last_modified_date` (same field as
-the Qdrant payload). This is consistent.
+Tier-1 operates on the object's `last_modified_date` — the same field as the Qdrant payload, so
+the two tiers are consistent.
 
-### 8.4 Filter Ordering in `wiki_query`
+### 8.3 Tier-1 Filter Ordering
 
-Apply Tier-1 filters in this order (mirrors cheapest-to-most-expensive):
-1. type filter (`_type_of(o) in effective_types`)
-2. source_type filter
-3. date range filter
+Apply cheapest-to-most-expensive: (1) type filter, (2) date filter.
 
 ---
 
@@ -614,46 +614,44 @@ Apply Tier-1 filters in this order (mirrors cheapest-to-most-expensive):
 
 | Param | Check | Error |
 |---|---|---|
-| `ingested_after` | Passes to `DatetimeRange(gte=...)` — catch `pydantic.ValidationError`, re-raise `ValueError` | `"Invalid date format for ingested_after: {v!r}. Expected ISO-8601, e.g. 2026-01-01T00:00:00Z"` |
+| `ingested_after` | Probe via `DatetimeRange(gte=...)`; on `pydantic.ValidationError` re-raise `ValueError` | `"Invalid date format for ingested_after: {v!r}. Expected ISO-8601, e.g. 2026-01-01T00:00:00Z"` |
 | `ingested_before` | Same | `"Invalid date format for ingested_before: {v!r}. ..."` |
-| `source_type` | Accept any non-empty string (lenient — callers may have custom source types). No allowlist. | N/A |
-| `types` | Accept any non-empty list of strings. `semantic_search` is a general tool, not wiki-only; do NOT validate against `_WIKI_TYPE_KEYS`. | N/A |
+| `types` | Accept any non-empty list of strings. `semantic_search` is a general tool — do NOT validate against `_WIKI_TYPE_KEYS`. | N/A |
 
-Date validation in `server.py` `semantic_search`:
 ```python
 from pydantic import ValidationError as _PydanticValidationError
 from qdrant_client.models import DatetimeRange as _DatetimeRange
 
-for param_name, param_val in [("ingested_after", ingested_after), ("ingested_before", ingested_before)]:
-    if param_val is not None:
+for name, val in [("ingested_after", ingested_after), ("ingested_before", ingested_before)]:
+    if val is not None:
         try:
-            _DatetimeRange(gte=param_val)  # probe only; not stored
+            _DatetimeRange(gte=val)  # probe only; not stored
         except _PydanticValidationError:
             raise ValueError(
-                f"Invalid date format for {param_name}: {param_val!r}. "
+                f"Invalid date format for {name}: {val!r}. "
                 f"Expected ISO-8601, e.g. 2026-01-01T00:00:00Z"
             )
 ```
 
-### 9.2 `wiki_query` Validation (returns error dict, does not raise)
+### 9.2 `wiki_query` Validation (returns error dict, never raises)
 
-Fits into the existing `{"status": "error", "error": "...", "error_category": "config_error"}`
-pattern used throughout `query.py`.
+Fits the existing `{"status": "error", "error": "...", "error_category": "config_error"}` pattern.
 
 | Param | Check | Error key |
 |---|---|---|
-| `ingested_after` / `ingested_before` | Same probe as above; on `ValidationError` return error dict | `config_error` |
-| `types` (intersection empty) | All supplied types outside `_WIKI_TYPE_KEYS` → empty intersection | `config_error` |
+| `ingested_after` / `ingested_before` | Same probe; on `ValidationError` return error dict | `config_error` |
+| `types` (intersection empty) | All supplied types outside `_WIKI_TYPE_KEYS` | `config_error` |
 
-Validation occurs before the `AnytypeReadClient` / `WikiClient` are constructed (early return,
-no WikiLog written — same pattern as schema-check failures in `query.py:390-410`).
+Validation occurs before the `AnytypeReadClient` / `WikiClient` are constructed (early return, no
+WikiLog written — same pattern as schema-check failures in `query.py:390-410`).
 
 ---
 
 ## 10. Test Plan
 
-Tests live in `tests/test_indexer.py` (filter unit tests, using the extended fake) and
-`tests/wiki/test_query.py` (Tier-1 filter predicate tests, if the file exists) or inline.
+Tests live in `tests/test_indexer.py` (Qdrant filter + payload-index + migration tests),
+`tests/test_chunker.py` (chunker date extraction), and `tests/wiki/test_query.py` (Tier-1
+predicate tests).
 
 ### 10.1 Extended Fake Qdrant Client
 
@@ -665,21 +663,19 @@ class FakeQdrantClientWithSearch:
         self.upserted_points = []
         self.deleted = []
         self.query_calls = []
-        self.query_filter = None        # last query_filter passed to query_points
+        self.query_filter = None
+        self.created_indexes = []
         self._mock_results = mock_results or []
 
     def get_collections(self):
-        class _Col:
-            name = config.QDRANT_COLLECTION
-        class _Result:
-            collections = [_Col()]
+        class _Col: name = config.QDRANT_COLLECTION
+        class _Result: collections = [_Col()]
         return _Result()
 
-    def create_collection(self, **kwargs):
-        pass
+    def create_collection(self, **kwargs): pass
 
     def create_payload_index(self, collection_name, field_name, field_schema=None, **kwargs):
-        pass  # no-op; in-memory Qdrant emits a UserWarning — suppress or monkeypatch
+        self.created_indexes.append(field_name)  # no-op; never emits a warning
 
     def upsert(self, collection_name, points):
         self.upserted_points.extend(points)
@@ -689,105 +685,110 @@ class FakeQdrantClientWithSearch:
 
     def query_points(self, collection_name, query, query_filter=None, limit=10, with_payload=True):
         self.query_filter = query_filter
-        self.query_calls.append({"collection_name": collection_name,
-                                  "query_filter": query_filter, "limit": limit})
-        class _Result:
-            points = self._mock_results
+        self.query_calls.append({"collection_name": collection_name, "query_filter": query_filter,
+                                 "limit": limit, "with_payload": with_payload})
+        class _Result: points = self._mock_results
         return _Result()
 ```
 
 ### 10.2 Acceptance Criteria Tests
 
-Each test maps to a ticket AC. All use `FakeQdrantClientWithSearch` + monkeypatch of
-`_indexer._qdrant` and `_indexer.embed_query`.
-
-**AC-F1 — No-filter regression (byte-identical behavior)**
+**AC-F1 — No-filter regression (byte-identical Qdrant call)**
 ```python
 def test_no_filter_regression(monkeypatch):
     fake = FakeQdrantClientWithSearch()
     monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
     monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
     _indexer.semantic_search_core(query="test")
-    assert fake.query_filter is None, (
-        f"No-filter regression: query_filter must be None; got {fake.query_filter}"
-    )
+    call = fake.query_calls[-1]
+    assert call["query_filter"] is None
+    assert call["collection_name"] == config.QDRANT_COLLECTION
+    assert call["limit"] == 10
+    assert call["with_payload"] is True
 ```
 
-**AC-F2 — Type filter applied**
+**AC-F1b — Default `wiki_query` passes the full `_WIKI_TYPE_KEYS` (not `None`) to the core**
+```python
+def test_wiki_query_default_passes_full_type_keys(monkeypatch):
+    # Force Tier 2; capture the types kwarg threaded into semantic_search_core.
+    captured = {}
+    def _fake_core(query, space_id=None, types=None, ingested_after=None,
+                   ingested_before=None, limit=10):
+        captured["types"] = types
+        return []
+    monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
+    # ... drive wiki_query through Tier 2 with no `types` arg (setup per existing
+    #     test_query Tier-2 harness) ...
+    assert set(captured["types"]) == set(query_mod._WIKI_TYPE_KEYS)
+    assert captured["types"] is not None
+```
+
+**AC-F2 — Type filter applied (nested `should` shape)**
 ```python
 def test_type_filter_applied(monkeypatch):
-    from qdrant_client.models import FieldCondition, MatchAny, MatchValue
     fake = FakeQdrantClientWithSearch()
     monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
     monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
     _indexer.semantic_search_core(query="test", types=["wiki_entity", "wiki_concept"])
-    assert fake.query_filter is not None
     must = fake.query_filter.must
-    # types produce a nested Filter(should=[...]) — existing pattern preserved
-    type_cond = next(
-        (c for c in must if hasattr(c, "should") and c.should), None
-    )
-    assert type_cond is not None, f"No type condition in must: {must}"
-    type_keys_in_filter = {c.match.value for c in type_cond.should if hasattr(c, "match")}
-    assert "wiki_entity" in type_keys_in_filter
-    assert "wiki_concept" in type_keys_in_filter
+    type_cond = next((c for c in must if hasattr(c, "should") and c.should), None)
+    assert type_cond is not None, f"No nested type Filter in must: {must}"
+    keys = {c.match.value for c in type_cond.should if hasattr(c, "match")}
+    assert {"wiki_entity", "wiki_concept"} <= keys
 ```
 
-**AC-F3 — `source_type` filter applied**
-```python
-def test_source_type_filter_applied(monkeypatch):
-    from qdrant_client.models import FieldCondition, MatchValue
-    fake = FakeQdrantClientWithSearch()
-    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
-    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
-    _indexer.semantic_search_core(query="test", source_type="url")
-    assert fake.query_filter is not None
-    must = fake.query_filter.must
-    st_cond = next((c for c in must if isinstance(c, FieldCondition) and c.key == "source_type"), None)
-    assert st_cond is not None, f"No source_type condition in must: {must}"
-    assert isinstance(st_cond.match, MatchValue)
-    assert st_cond.match.value == "url"
-```
-
-**AC-F4 — Date range filter applied**
+**AC-F4 — Date range filter applied (`DatetimeRange`, both bounds)**
 ```python
 def test_date_range_filter_applied(monkeypatch):
     from qdrant_client.models import DatetimeRange, FieldCondition
     fake = FakeQdrantClientWithSearch()
     monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
     monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
-    _indexer.semantic_search_core(query="test", ingested_after="2026-01-01T00:00:00Z")
-    assert fake.query_filter is not None
+    _indexer.semantic_search_core(
+        query="test",
+        ingested_after="2026-01-01T00:00:00Z",
+        ingested_before="2026-06-30T23:59:59Z",
+    )
     must = fake.query_filter.must
     date_cond = next(
-        (c for c in must if isinstance(c, FieldCondition) and c.key == "last_modified_date"),
-        None
-    )
-    assert date_cond is not None, f"No last_modified_date condition in must: {must}"
+        (c for c in must if isinstance(c, FieldCondition) and c.key == "last_modified_date"), None)
+    assert date_cond is not None
     assert isinstance(date_cond.range, DatetimeRange)
-    assert date_cond.range.gte is not None
+    assert date_cond.range.gte is not None and date_cond.range.lte is not None
 ```
 
-**AC-F5 — Combined AND filter (type + source_type + date)**
+**AC-F5 — Combined AND filter (type + date)**
 ```python
 def test_combined_filter_and(monkeypatch):
-    from qdrant_client.models import DatetimeRange, FieldCondition, MatchValue
+    from qdrant_client.models import FieldCondition
     fake = FakeQdrantClientWithSearch()
     monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
     monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
     _indexer.semantic_search_core(
-        query="test",
-        types=["wiki_entity"],
-        source_type="agent",
-        ingested_after="2026-01-01T00:00:00Z",
-        ingested_before="2026-12-31T23:59:59Z",
-    )
-    assert fake.query_filter is not None
+        query="test", types=["wiki_entity"], ingested_after="2026-01-01T00:00:00Z")
     must = fake.query_filter.must
-    assert len(must) >= 3  # type Filter, source_type FieldCondition, date FieldCondition
-    keys = {getattr(c, "key", None) for c in must}
-    assert "source_type" in keys
-    assert "last_modified_date" in keys
+    assert any(hasattr(c, "should") and c.should for c in must)            # type group
+    assert any(isinstance(c, FieldCondition) and c.key == "last_modified_date" for c in must)
+```
+
+**AC-F5b — Empty-list filter param == no filter**
+```python
+def test_empty_list_types_is_no_filter(monkeypatch):
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(query="test", types=[])
+    assert fake.query_filter is None
+```
+
+**AC-F5c — Zero-result filter returns empty list (no error)**
+```python
+def test_zero_result_filter(monkeypatch):
+    fake = FakeQdrantClientWithSearch(mock_results=[])  # query matches nothing
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    out = _indexer.semantic_search_core(query="test", types=["wiki_entity"])
+    assert out == []
 ```
 
 **AC-F6 — Invalid date raises `ValueError` from `semantic_search`**
@@ -799,257 +800,340 @@ def test_invalid_date_raises_value_error():
         semantic_search(query="test", ingested_after="not-a-date")
 ```
 
-**AC-F7 — Payload indexes created by `_ensure_collection`**
+**AC-F6b — Bad date on `wiki_query` returns error dict (never raises)**
 ```python
-def test_ensure_collection_creates_payload_indexes(monkeypatch):
-    from anytype_llm_wiki.indexer import _ensure_collection
-    created_indexes = []
-    class _FakeClient:
-        def get_collections(self):
-            class _Col:
-                name = config.QDRANT_COLLECTION
-            class _R:
-                collections = [_Col()]
-            return _R()
-        def create_collection(self, **kwargs): pass
-        def create_payload_index(self, collection_name, field_name, field_schema=None, **kwargs):
-            created_indexes.append(field_name)
-    _ensure_collection(_FakeClient())
-    assert "type_key" in created_indexes
-    assert "source_type" in created_indexes
-    assert "last_modified_date" in created_indexes
+def test_wiki_query_bad_date_returns_error_dict():
+    out = wiki_query(question="q", space_id="sp-1", ingested_after="not-a-date")
+    assert out["status"] == "error"
+    assert out["error_category"] == "config_error"
+    # never raised
 ```
 
-**AC-F8 — Chunker writes `source_type` for `wiki_source` objects**
+**AC-F6c — Empty type intersection on `wiki_query` returns error dict**
 ```python
-def test_chunker_writes_source_type():
-    from anytype_llm_wiki.chunker import chunk_object
-    obj = {
-        "id": "src-1", "space_id": "sp-1", "name": "My Source",
-        "type": {"key": "wiki_source"}, "markdown": "# Body\nContent here.",
-        "properties": [
-            {"key": "wiki_source_type", "select": {"id": "t1", "name": "url", "color": "blue"}},
-            {"key": "last_modified_date", "date": "2026-06-01T10:00:00Z"},
-        ],
-    }
-    chunks = chunk_object(obj)
-    assert chunks, "Expected at least one chunk"
-    assert all(c.get("source_type") == "url" for c in chunks)
-    assert all(c.get("last_modified_date") == "2026-06-01T10:00:00Z" for c in chunks)
+def test_wiki_query_empty_type_intersection_error():
+    out = wiki_query(question="q", space_id="sp-1", types=["not_a_wiki_type"])
+    assert out["status"] == "error"
+    assert out["error_category"] == "config_error"
 ```
 
-**AC-F9 — Chunker omits `source_type` for non-source objects**
+**AC-F7 — Payload indexes created on the reindex path (not the reembed hot path)**
 ```python
-def test_chunker_omits_source_type_for_entity():
+def test_reindex_creates_payload_indexes(monkeypatch):
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [])
+    _indexer.reindex()
+    assert set(fake.created_indexes) >= {"type_key", "space_id", "last_modified_date"}
+    assert "source_type" not in fake.created_indexes
+
+def test_reembed_does_not_create_payload_indexes(monkeypatch):
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed", lambda texts: [[0.1]*config.EMBED_DIMS for _ in texts])
+    _indexer.reembed_object("sp-1", "obj-1", {
+        "id": "obj-1", "space_id": "sp-1", "name": "X",
+        "type": {"key": "wiki_entity"}, "markdown": "# H\nbody",
+        "properties": [],
+    })
+    assert fake.created_indexes == []  # index creation gated out of the hot path
+```
+
+**AC-F8 — Chunker writes `last_modified_date` (entity with body)**
+```python
+def test_chunker_writes_last_modified_date():
     from anytype_llm_wiki.chunker import chunk_object
     obj = {
         "id": "ent-1", "space_id": "sp-1", "name": "Neural Networks",
-        "type": {"key": "wiki_entity"}, "markdown": "",
+        "type": {"key": "wiki_entity"}, "markdown": "# Overview\nTransformers use attention.",
+        "properties": [{"key": "last_modified_date", "date": "2026-05-01T00:00:00+00:00"}],
+    }
+    chunks = chunk_object(obj)
+    assert chunks
+    assert all(c.get("last_modified_date") == "2026-05-01T00:00:00+00:00" for c in chunks)
+```
+
+**AC-F9 — Chunker on property-only concept also carries the date; omits field when absent**
+```python
+def test_chunker_property_concept_date_and_absence():
+    from anytype_llm_wiki.chunker import chunk_object
+    obj = {
+        "id": "con-1", "space_id": "sp-1", "name": "Attention",
+        "type": {"key": "wiki_concept"}, "markdown": "",
         "properties": [
-            {"key": "wiki_facts", "text": "Transformers use attention."},
-            {"key": "last_modified_date", "date": "2026-05-01T00:00:00Z"},
+            {"key": "wiki_definition", "text": "A mechanism for weighting inputs."},
+            {"key": "last_modified_date", "date": "2026-05-02T00:00:00+00:00"},
         ],
     }
     chunks = chunk_object(obj)
     assert chunks
-    assert all("source_type" not in c for c in chunks)
-    assert all(c.get("last_modified_date") == "2026-05-01T00:00:00Z" for c in chunks)
+    assert all(c.get("last_modified_date") == "2026-05-02T00:00:00+00:00" for c in chunks)
+
+    obj_nodate = {**obj, "properties": [{"key": "wiki_definition", "text": "A mechanism."}]}
+    chunks2 = chunk_object(obj_nodate)
+    assert chunks2 and all("last_modified_date" not in c for c in chunks2)
 ```
 
-**AC-F10 — `wiki_query` Tier-1 type filter (in-memory predicate)**
-
-Unit test against `wiki_query`'s internal filter logic (test against the Tier-1 path by
-forcing `count < threshold` via monkeypatching `config.index_threshold` to return a large
-value, and pre-populating wiki objects with both entity and concept types):
+**AC-F10 — Tier-1 predicates (runnable, both filters)**
 ```python
-# Asserts that wiki_objects list is narrowed to only the requested type before synthesis.
-# Full test setup omitted here; test must monkeypatch synthesize to return a sentinel,
-# and verify sources_consulted contains only objects of the requested type.
+def test_tier1_type_predicate():
+    from anytype_llm_wiki.wiki.query import _passes_type_filter
+    ent = {"type": {"key": "wiki_entity"}}
+    con = {"type": {"key": "wiki_concept"}}
+    assert _passes_type_filter(ent, {"wiki_entity"})
+    assert not _passes_type_filter(con, {"wiki_entity"})
+
+def test_tier1_date_predicate():
+    from datetime import datetime, timezone
+    from anytype_llm_wiki.wiki.query import _passes_date_filter
+    after = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    before = datetime(2026, 12, 31, tzinfo=timezone.utc)
+    in_range = {"properties": [{"key": "last_modified_date", "date": "2026-06-01T00:00:00Z"}]}
+    too_old  = {"properties": [{"key": "last_modified_date", "date": "2025-06-01T00:00:00Z"}]}
+    no_date  = {"properties": []}
+    assert _passes_date_filter(in_range, after, before)
+    assert not _passes_date_filter(too_old, after, before)
+    assert not _passes_date_filter(no_date, after, before)  # missing field never matches
 ```
 
-See `tests/wiki/test_query.py` for the full Tier-1 filter test (or add to
-`tests/test_indexer.py` alongside the Qdrant filter tests).
+**AC-F10b — Mixed valid+invalid `types` silently narrowed (Tier-2 threading)**
+```python
+def test_wiki_query_mixed_types_silently_narrowed(monkeypatch):
+    captured = {}
+    def _fake_core(query, space_id=None, types=None, ingested_after=None,
+                   ingested_before=None, limit=10):
+        captured["types"] = types
+        return []
+    monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
+    # drive wiki_query Tier 2 with types=["wiki_entity", "wiki_source"]
+    # ... (existing Tier-2 harness) ...
+    assert set(captured["types"]) == {"wiki_entity"}  # non-wiki type dropped
+```
+
+**AC-F11 — Migration: schema-version bump forces a full re-embed**
+```python
+def test_schema_version_bump_forces_full_reembed(monkeypatch, tmp_path):
+    # Pre-seed state with an OLD schema version and an unchanged object.
+    state = {"_payload_schema_version": 1, "sp-1": {"obj-1": "2026-01-01T00:00:00Z"}}
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr(config, "INDEX_STATE_FILE", state_file)
+    monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", 2)
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [{"id": "sp-1"}])
+    monkeypatch.setattr(_indexer, "list_objects",
+                        lambda sid: [{"id": "obj-1", "properties":
+                            [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}]}])
+    monkeypatch.setattr(_indexer, "get_object", lambda sid, oid: {
+        "id": "obj-1", "space_id": "sp-1", "name": "X", "type": {"key": "wiki_entity"},
+        "markdown": "# H\nbody",
+        "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}]})
+    monkeypatch.setattr(_indexer, "embed",
+                        lambda texts: [[0.1]*config.EMBED_DIMS for _ in texts])
+
+    stats = _indexer.reindex()
+    assert stats["objects_indexed"] == 1            # unchanged object STILL re-embedded
+    assert fake.upserted_points                     # payload re-written
+    new_state = json.loads(state_file.read_text())
+    assert new_state["_payload_schema_version"] == 2  # version stamped
+
+def test_no_bump_keeps_incremental_skip(monkeypatch, tmp_path):
+    # Same setup but stored version already == code version → unchanged object skipped.
+    state = {"_payload_schema_version": 2, "sp-1": {"obj-1": "2026-01-01T00:00:00Z"}}
+    # ... identical harness ...
+    monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", 2)
+    stats = _indexer.reindex()
+    assert stats["objects_indexed"] == 0            # skip preserved when no bump
+```
+
+**AC-F12 — `reembed_object` writes `last_modified_date`**
+```python
+def test_reembed_writes_last_modified_date(monkeypatch):
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed", lambda texts: [[0.1]*config.EMBED_DIMS for _ in texts])
+    _indexer.reembed_object("sp-1", "obj-1", {
+        "id": "obj-1", "space_id": "sp-1", "name": "X", "type": {"key": "wiki_entity"},
+        "markdown": "# H\nbody",
+        "properties": [{"key": "last_modified_date", "date": "2026-05-01T00:00:00Z"}]})
+    assert fake.upserted_points
+    assert all(p.payload.get("last_modified_date") == "2026-05-01T00:00:00Z"
+               for p in fake.upserted_points)
+```
 
 ### 10.3 Test File Location
 
-- `FakeQdrantClientWithSearch` and AC-F1 through AC-F7: `tests/test_indexer.py`
-  (mirrors the monkeypatch pattern at `test_indexer.py:203`)
-- AC-F8, AC-F9 (chunker): `tests/test_chunker.py` (or `tests/test_indexer.py`)
-- AC-F10 (Tier-1 predicate): `tests/wiki/test_query.py`
+- `FakeQdrantClientWithSearch`, AC-F1/F2/F4/F5(+b/c)/F7/F11/F12: `tests/test_indexer.py`
+- AC-F6, AC-F6b/c: `tests/test_indexer.py` (server import) / `tests/wiki/test_query.py`
+- AC-F8, AC-F9: `tests/test_chunker.py`
+- AC-F1b, AC-F10/F10b: `tests/wiki/test_query.py`
 
 ---
 
 ## 11. Implementation Plan
 
-Steps are ordered by dependency. Steps 1–3 have no dependencies on each other and can be
-done in any order; step 4 depends on 1 and 2; step 5 depends on 3 and 4.
+Steps ordered by dependency. Steps 1–4 are independent; step 5 depends on 1+3; step 6 depends on 5.
 
-**Step 1 — Extend `chunk_object` (chunker.py)**
-Read `wiki_source_type` (select) and `last_modified_date` (date) from `obj.properties`.
-Inject `source_type` (if non-None) and `last_modified_date` (if non-None) into every chunk dict.
-No change to `_chunk_body` or `_chunk_properties` signatures needed — inject after the dispatch.
+**Step 1 — `config.PAYLOAD_SCHEMA_VERSION = 2`** (config.py). One constant.
 
-**Step 2 — Extend `_ensure_collection` (indexer.py)**
-Add `create_payload_index` calls for `type_key`, `space_id`, `source_type`,
-`last_modified_date` as shown in §6.3. Import `PayloadSchemaType` inside the function.
+**Step 2 — Extend `chunk_object`** (chunker.py): read `last_modified_date` from
+`obj.properties`, inject into every chunk (§7.3). No change to `_chunk_body`/`_chunk_properties`.
 
-**Step 3 — Extend `semantic_search_core` signature and filter build (indexer.py)**
-Add `source_type`, `ingested_after`, `ingested_before` params. Extend the `must`-list build
-as shown in §6.2. Import `DatetimeRange` inside the function alongside existing imports.
+**Step 3 — Shared `_chunk_to_payload` + payload writes** (indexer.py): add the helper (§7.4),
+use it in both `reindex` and `reembed_object`.
 
-**Step 4 — Extend payload writes in `reindex` and `reembed_object` (indexer.py)**
-Add `source_type` and `last_modified_date` to the `PointStruct` payload dict in both
-functions as shown in §7.4. Conditional on the key being present in the chunk (absent for
-entity/concept objects that lack `wiki_source_type`).
+**Step 4 — Payload indexes off the hot path** (indexer.py): add `_ensure_payload_indexes`
+(§6.3); call it from `reindex` only; leave `_ensure_collection` to collection creation.
 
-**Step 5 — Extend MCP tool surfaces (server.py, wiki/query.py)**
-- `server.py`: Add `source_type`, `ingested_after`, `ingested_before` to `semantic_search`.
-  Add date validation (§9.1). Thread new params to `semantic_search_core`.
-- `server.py`: Add `types`, `source_type`, `ingested_after`, `ingested_before` to `wiki_query`.
-  Thread to the internal `_wiki_query` call.
-- `wiki/query.py`: Add params to `wiki_query` function. Add validation (§9.2 — error dict
-  return, not raise). Compute `effective_types` intersection (§8.1). Thread params into the
-  Tier-2 `semantic_search_core` call. Apply Tier-1 in-memory predicates (§8.2, §8.3).
+**Step 5 — Migration + filter build** (indexer.py): in `reindex`, read/stamp the
+`_payload_schema_version` marker and force-full on bump (§3 D3); extend `semantic_search_core`
+with `ingested_after`/`ingested_before` and the date `must` clause (§6.2). Import `DatetimeRange`
+inside the function.
 
-**Step 6 — Tests (tests/test_indexer.py, tests/test_chunker.py)**
-Add `FakeQdrantClientWithSearch`. Add AC-F1 through AC-F9. Run `pytest tests/test_indexer.py`
-to confirm no regressions on existing seam tests.
+**Step 6 — MCP surfaces + Tier-1 predicates** (server.py, wiki/query.py):
+- `server.py`: add `ingested_after`/`ingested_before` to `semantic_search` + date validation
+  (§9.1); add `types`, `ingested_after`, `ingested_before` to `wiki_query`; thread through.
+- `wiki/query.py`: add module-level `_passes_type_filter`, `_passes_date_filter`, `_parse_iso`
+  (§8); add `wiki_query` params + validation (§9.2, error-dict); compute `effective_types_set`
+  (§8.1); thread into Tier-2 core; apply Tier-1 predicates (§8.1, §8.2).
 
-**Step 7 — Documentation updates**
-- Update `.aldeia/context/technical.md` payload-schema section to reflect the 8-field payload.
-- Update README tool documentation for `semantic_search` and `wiki_query` new params.
-- Add release note: "v1 reindex required — payload schema extended with `source_type` and
-  `last_modified_date` fields."
+**Step 7 — Tests** (tests/test_indexer.py, tests/test_chunker.py, tests/wiki/test_query.py): add
+`FakeQdrantClientWithSearch` and AC-F1 … AC-F12. Run the suite to confirm no regressions.
+
+**Step 8 — Docs:** update `.aldeia/context/technical.md` payload-schema section to the 7-field
+payload (`+ last_modified_date`); update README tool docs for the new params; add release note
+(see §15).
 
 ---
 
 ## 12. Acceptance Criteria Checklist
 
-Mapped to ticket ACs, adjusted for D4 deferral.
+Mapped to ticket ACs, adjusted for the type+date scope (source_type and domain_tags deferred).
 
-- [ ] **AC-F1** `semantic_search` and `wiki_query` with no filter params produce
-  byte-identical Qdrant calls to today (`query_filter=None`). Test: `test_no_filter_regression`.
-
-- [ ] **AC-F2** `types` filter on `wiki_query` narrows retrieval to requested wiki type keys
-  (intersected with `_WIKI_TYPE_KEYS`); consistent across Tier 1 and Tier 2.
-
-- [ ] **AC-F3** `source_type` filter on `semantic_search` and `wiki_query` produces a
-  `FieldCondition(key="source_type", match=MatchValue(value=...))` in `must`.
-  Test: `test_source_type_filter_applied`.
-
-- [ ] **AC-F4** `ingested_after` / `ingested_before` produce a
-  `FieldCondition(key="last_modified_date", range=DatetimeRange(gte=..., lte=...))` in `must`.
-  `DatetimeRange` used (not `Range`). Test: `test_date_range_filter_applied`.
-
-- [ ] **AC-F5** Multiple filters compose as AND (all conditions in `must`).
-  Test: `test_combined_filter_and`.
-
-- [ ] **AC-F6** Malformed date string raises `ValueError` from `semantic_search`
-  (surfaces as `isError=True` via FastMCP) and returns error dict from `wiki_query`.
-  Test: `test_invalid_date_raises_value_error`.
-
-- [ ] **AC-F7** `_ensure_collection` calls `create_payload_index` for `type_key`,
-  `space_id`, `source_type`, `last_modified_date` (idempotent, `wait=True`).
-  Test: `test_ensure_collection_creates_payload_indexes`.
-
-- [ ] **AC-F8** Chunker writes `source_type` field to chunks from `wiki_source` objects;
-  omits it for `wiki_entity` / `wiki_concept` / other types.
-  Test: `test_chunker_writes_source_type`, `test_chunker_omits_source_type_for_entity`.
-
-- [ ] **AC-F9** Chunker writes `last_modified_date` to chunks for all object types
-  (when the property is present). Test: AC-F8/F9 tests above.
-
-- [ ] **AC-F10** `wiki_query` Tier-1 in-memory filter predicates consistent with Tier-2
-  Qdrant filter semantics for `types`, `source_type`, and date range.
-
-- [ ] **DEFERRED — domain_tags:** `domain_tags` filter is NOT implemented in v1.
-  Rationale: `wiki_domain_tags` is never written onto Anytype objects by the current
-  ingest/remember pipeline. A non-functional param would silently return nothing.
-  Follow-up ticket required (see D4).
+- [ ] **AC-F1** No filter params → byte-identical Qdrant call (`query_filter=None`; collection,
+  limit, with_payload unchanged). Test: `test_no_filter_regression`.
+- [ ] **AC-F1b** Default `wiki_query` (no `types`) passes the full `_WIKI_TYPE_KEYS` to the core
+  (not `None`). Test: `test_wiki_query_default_passes_full_type_keys`.
+- [ ] **AC-F2** `types` narrows retrieval via a nested `Filter(should=[FieldCondition(MatchValue)])`;
+  consistent across tiers. Test: `test_type_filter_applied`.
+- [ ] **AC-F4** `ingested_after`/`ingested_before` produce
+  `FieldCondition(key="last_modified_date", range=DatetimeRange(...))` (`DatetimeRange`, not
+  `Range`). Test: `test_date_range_filter_applied`.
+- [ ] **AC-F5** Filters compose as AND (all in `must`). Empty-list param == no filter; zero-result
+  filter returns `[]`. Tests: `test_combined_filter_and`, `test_empty_list_types_is_no_filter`,
+  `test_zero_result_filter`.
+- [ ] **AC-F6** Malformed date raises `ValueError` from `semantic_search`; returns error dict
+  (`config_error`) from `wiki_query`. Empty type intersection returns error dict from `wiki_query`.
+  Tests: `test_invalid_date_raises_value_error`, `test_wiki_query_bad_date_returns_error_dict`,
+  `test_wiki_query_empty_type_intersection_error`.
+- [ ] **AC-F7** Payload indexes (`type_key`, `space_id`, `last_modified_date`) created on the
+  `reindex` path only — NOT on `reembed_object`. Tests: `test_reindex_creates_payload_indexes`,
+  `test_reembed_does_not_create_payload_indexes`.
+- [ ] **AC-F8/F9** Chunker writes `last_modified_date` to chunks for all object types when the
+  property is present; omits the key when absent. Tests: `test_chunker_writes_last_modified_date`,
+  `test_chunker_property_concept_date_and_absence`.
+- [ ] **AC-F10** Tier-1 module-level predicates (`_passes_type_filter`, `_passes_date_filter`)
+  match Tier-2 semantics; mixed valid+invalid `types` silently narrowed. Tests:
+  `test_tier1_type_predicate`, `test_tier1_date_predicate`,
+  `test_wiki_query_mixed_types_silently_narrowed`.
+- [ ] **AC-F11** Schema-version bump forces a full re-embed (unchanged objects re-indexed) and
+  stamps the new version; no bump preserves the incremental skip. Tests:
+  `test_schema_version_bump_forces_full_reembed`, `test_no_bump_keeps_incremental_skip`.
+- [ ] **AC-F12** `reembed_object` writes `last_modified_date`. Test:
+  `test_reembed_writes_last_modified_date`.
+- [ ] **DEFERRED — source_type:** not implemented (D4). `wiki_source` objects are body-less and
+  not chunked → inert. Single follow-up ticket (D6).
+- [ ] **DEFERRED — domain_tags:** not implemented (D5). `wiki_domain_tags` never persisted onto
+  objects → inert. Same follow-up ticket (D6).
 
 ---
 
 ## 13. Resource Impact
 
-**Reindex cost:** Additive payload fields (`source_type`, `last_modified_date`) require a
-one-time full reindex to populate existing chunks. Projected reindex time: ~7s for 500 chunks
-(benchmarked in `.aldeia/context/technical.md`). Negligible on the 32GB Mac Mini.
+**One-time forced re-embed (migration):** the D3 schema-version bump forces a **full** re-embed
+pass through Ollama on the next `reindex` (manual or cron) — not an incremental delta. On this
+corpus (~500 chunks on the 32GB Mac Mini) the full pass is on the order of seconds (bge-m3 embed
+throughput per `.aldeia/context/technical.md`). It runs once per version bump; subsequent reindexes
+return to incremental.
 
-**Payload index build:** `create_payload_index` on a small-to-medium collection is sub-second
-for KEYWORD and DATETIME indexes. Synchronous with `wait=True`. No impact on query latency
-after index build.
+**Payload index build:** `create_payload_index` on a small collection is sub-second for KEYWORD
+and DATETIME indexes (synchronous, `wait=True`), and now runs only on the full `reindex` path —
+off the per-object `reembed_object` hot path. No query-latency impact after build.
 
-**Memory / CPU:** No change to embedding or vector dimensions. No additional Anytype API calls
-during query (filters are applied in Qdrant, not by fetching extra objects). The Tier-1
-in-memory predicate adds negligible cost to what is already a full-enumeration path.
+**Memory / CPU:** No change to embedding dimensions. No extra Anytype API calls during query
+(filters applied in Qdrant). Tier-1 predicates add negligible cost to an already-full enumeration.
 
 ---
 
 ## 14. Security Considerations
 
-**No egress:** All filter evaluation is local (Qdrant container). No new network calls.
+**No egress:** all filter evaluation is local (Qdrant container); no new network calls.
 
-**Input validation:** Date strings pass through `DatetimeRange` Pydantic validation before
-reaching Qdrant. Malformed dates raise `ValueError` at the MCP boundary before any Qdrant
-call. This prevents malformed input from reaching the Qdrant client.
+**Input validation:** date strings pass `DatetimeRange` Pydantic validation at the MCP boundary
+before reaching Qdrant; malformed dates raise `ValueError` (semantic_search) / return an error
+dict (wiki_query) before any Qdrant call.
 
-**`source_type` and `types` inputs:** Accepted as arbitrary strings and passed to Qdrant
-`MatchValue`/`MatchAny`. Qdrant performs equality matching; no SQL injection or query injection
-vector. Unknown values return zero results (correct, not a security issue).
+**`types` input:** arbitrary strings passed to `MatchValue` equality matching — no injection
+vector; unknown values return zero results (correct, not a security issue).
 
-**Existing trust model unchanged:** The MCP server is a local stdio tool; callers are the local
-AI assistant (Claude Code). No authentication surface added.
+**Trust model unchanged:** local stdio MCP server; callers are the local AI assistant. No new
+authentication surface.
 
 ---
 
 ## 15. Operational Considerations
 
-**Deployment steps for v1:**
-1. Install the new package version (`uv tool install --upgrade .`).
-2. Run `reindex_anytype` (via MCP tool or `anytype-llm-wiki reindex`) to populate
-   `source_type` and `last_modified_date` on all existing chunks.
-3. Payload indexes for `type_key`, `space_id`, `source_type`, `last_modified_date` are
-   created idempotently by `_ensure_collection` on the next reindex call.
+**Rollback story (trivial):** the added payload field (`last_modified_date`) and payload indexes
+are **inert under the prior code version** — old code never reads them and never sets the new
+filter params. Downgrading the package needs no data migration; the extra payload key and indexes
+are simply ignored. (The `_payload_schema_version` state key is likewise ignored by old code.)
 
-**Release note required:** "Payload schema extended in v1. A one-time full reindex is required
-after upgrading. Existing chunks without `source_type` / `last_modified_date` will not match
-those filters until reindexed."
+**Deployment steps for v1:**
+1. Install the new version (`uv tool install --upgrade .`).
+2. Run `reindex` (manual MCP tool / CLI, OR just let the launchd cron fire). Because
+   `PAYLOAD_SCHEMA_VERSION` (2) exceeds the stored marker (1, or absent), the first post-upgrade
+   `reindex` **auto-forces a full re-embed** that backfills `last_modified_date` on every chunk,
+   creates the payload indexes, and stamps the new marker. No manual flag or extra step.
+3. Subsequent reindexes return to incremental behavior automatically.
+
+**Release note required:** "v1 extends the Qdrant payload with `last_modified_date`. The first
+`reindex` after upgrade auto-runs a one-time full re-embed (seconds on this corpus) to backfill
+the field — no manual action needed; the launchd cron triggers it on its next run. Until that
+reindex completes, the date filter under-returns against the historical corpus."
 
 **Failure modes:**
-- Qdrant unavailable: `semantic_search_core` raises `httpx.HTTPError` (existing behavior,
-  unchanged). `wiki_query` catches this and returns `error_category: "api_error"` (existing).
-- Bad date string: caught at validation, not silently ignored (see §9).
-- `create_payload_index` on a missing collection: `_ensure_collection` creates the collection
-  first; index calls follow. No ordering risk.
+- Qdrant unavailable: `semantic_search_core` raises `httpx.HTTPError` (unchanged); `wiki_query`
+  catches it → `error_category: "api_error"` (existing).
+- Bad date string: caught at validation, not silently ignored (§9).
+- Interrupted forced reindex: the marker is stamped only after the loop completes, so an aborted
+  run leaves the old marker and the next `reindex` re-attempts the full backfill (safe, idempotent).
 
 ---
 
 ## 16. Open Questions
 
-*(After Jan adjudicates OD-1 and OD-2 at Decide, these should all be closed.)*
+*(After Jan adjudicates OD-1 and OD-2 at Decide, these should all close.)*
 
-1. **OD-1 ratified?** Does Jan accept the additive payload extension (D2 + D3) requiring a
-   one-time reindex? If not, scope reverts to type-filter-only (no `source_type` or date params).
-
-2. **OD-2 ratified?** Does Jan accept deferring `domain_tags` to a follow-up ticket? If not,
-   the spec must be expanded to include the ingest/remember write path.
-
-3. **`types` intersection behavior in `wiki_query`:** Is a silent narrowing acceptable
-   (non-wiki types silently dropped), or should passing a non-wiki type key always error?
-   Current recommendation: error only on empty intersection (all supplied types are non-wiki);
-   mixed lists are silently narrowed.
+1. **OD-1 ratified?** Accept the `last_modified_date` payload field + forced one-time re-embed
+   (auto-healed via the schema-version marker)? If not, scope reverts to type-filter-only.
+2. **OD-2 ratified?** Defer **both** `source_type` and `domain_tags` to one follow-up ticket (D6)?
+   Or opt into indexing `wiki_excerpt` now to enable `source_type` (changes `semantic_search`
+   retrieval semantics)?
+3. **`types` intersection behavior in `wiki_query`:** silent narrowing of non-wiki types
+   acceptable, or should any non-wiki type key always error? Recommendation: error only on empty
+   intersection; mixed lists silently narrowed.
 
 ---
 
 ## 17. Deferred Items
 
-- **domain_tags filter** (D4): Blocked by absent write path in ingest/remember pipelines.
-  See D4 for complete follow-up scope.
-- **`wiki_last_reviewed` date filter:** Trivially addable as a second `date` filter once the
-  pattern is established. Deferred to keep this ticket focused.
-- **`source_type` from non-wiki objects:** The current impl sets `source_type` only from
-  `wiki_source_type`. Other (non-wiki) Anytype object types with `source_type`-like select
-  properties are not considered. Out of scope.
-- **Multi-value `source_type` filter:** Currently a single-value `MatchValue`. If callers
-  need `source_type IN ["url", "agent"]`, extend to `MatchAny`. Deferred; single-value
-  covers the primary use case.
+- **`source_type` filter** (D4): `wiki_source` objects are body-less and `wiki_excerpt` is not in
+  `WIKI_TEXT_PROPERTY_KEYS`, so sources produce zero chunks. Enabling it requires chunking source
+  excerpts (a retrieval-semantics change needing product sign-off). Folded into the D6 follow-up.
+- **`domain_tags` filter** (D5): `wiki_domain_tags` is never persisted onto objects by
+  ingest/remember. Folded into the D6 follow-up (persist tags onto objects, then index + filter).
+- **`wiki_last_reviewed` / `wiki_asked_at` date filters:** trivially addable as second date
+  filters once the `last_modified_date` pattern is established. Deferred to keep v1 focused.
