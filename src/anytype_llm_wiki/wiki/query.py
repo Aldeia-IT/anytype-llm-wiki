@@ -49,8 +49,16 @@ logger = logging.getLogger(__name__)
 # The four wiki object types eligible as retrieval candidates.
 _WIKI_TYPE_KEYS = ("wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query")
 
-# Relation property keys carrying 1-hop neighbors per type.
-_RELATION_KEYS = ("wiki_relations", "wiki_related", "wiki_drew_from", "wiki_subjects")
+# Relation property keys carrying 1-hop neighbors per type, in DESCENDING priority
+# (#324 D3/D5: the tuple index is the relation_priority used by the deterministic
+# trim order — lower index = higher priority).
+_RELATION_KEYS = (
+    "wiki_relations",   # entity → related entities
+    "wiki_related",     # concept → related concepts
+    "wiki_sources",     # entity/concept/comparison → source objects (#324)
+    "wiki_drew_from",   # query → cited sources
+    "wiki_subjects",    # comparison → compared subjects (OQ1-retained)
+)
 
 # Slow-synthesis log signal threshold (seconds). WIKI_EXTRACT_TIMEOUT (600s) is the
 # deliberate accepted finite ceiling; this signals an unusually slow interactive call.
@@ -483,6 +491,10 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
                     "type": _type_of(o),
                     "score": 0.0,
                 })
+            # SF-D: Tier-1 enumeration order is unverified Anytype pagination order;
+            # pin seed rank by sorting candidate_entries by object_id so the D5 order
+            # is fully reproducible. (Tier-2 already arrives in score-rank order.)
+            candidate_entries.sort(key=lambda e: e["object_id"] or "")
 
         # --- Zero-candidate path (B11) ---
         if not candidate_entries:
@@ -506,10 +518,13 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
         }
         candidates: list[dict] = []  # ordered (object_id, score) with fetched objs
         candidate_id_order = {e["object_id"] for e in candidate_entries}
-        neighbor_ids: list[str] = []
+        # #324 D5: record FIRST discovery of each neighbour as (nid, seed_rank, prio).
+        # seed_rank = enumerate index of the discovering candidate_entries entry.
+        neighbor_discovery: list[tuple[str, int, int]] = []
+        seen_neighbor_ids: set[str] = set()
         fetch_failed = False
 
-        for entry in candidate_entries:
+        for seed_rank, entry in enumerate(candidate_entries):
             oid = entry["object_id"]
             obj = _fetch_cached(read_client, space_id, oid, cache, enum_map)
             if obj is None:
@@ -517,14 +532,43 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
                 result["warnings"].append(f"neighbor_fetch_failed: {oid}")
                 continue
             candidates.append({"object_id": oid, "score": entry["score"], "obj": obj})
-            for nid in _neighbor_ids_of(obj):
-                if nid not in candidate_id_order and nid not in neighbor_ids:
-                    neighbor_ids.append(nid)
+            for nid, prio in _neighbor_ids_of(obj):
+                if nid in candidate_id_order or nid in seen_neighbor_ids:
+                    continue
+                seen_neighbor_ids.add(nid)
+                neighbor_discovery.append((nid, seed_rank, prio))
 
-        # Fetch neighbors (skip ones already fetched as candidates).
+        # #324 D5: total order over distinct neighbours is
+        # (seed_rank, relation_priority, object_id). List order is the SOLE carrier
+        # of priority downstream (B3), so sort here BEFORE the D4 cap + fetch loop.
+        neighbor_discovery.sort(key=lambda t: (t[1], t[2], t[0]))
+
+        # #324 D4: bound the fan-out. The cap applies to fetch ATTEMPTS (SF-H), so it
+        # slices the ordered distinct-id list BEFORE fetching; a neighbour whose fetch
+        # later fails still consumed its slot and is simply excluded.
+        cap = config.query_max_neighbors()
+        distinct = len(neighbor_discovery)
+        fetching = min(distinct, cap)
+        if distinct > cap:
+            neighbor_discovery = neighbor_discovery[:cap]
+            result["warnings"].append(
+                f"neighbor_fan_out_capped: {distinct} -> {fetching}"
+            )
+
+        # #324 D6: measurability — DEBUG line always; INFO-visible warning when the
+        # fan-out is high relative to the synthesis ceiling (SF-E).
+        synth_max_objects = config.synth_max_objects()
+        logger.debug(
+            "neighbor_fanout: seeds=%d distinct_neighbours=%d fetching=%d cap=%d",
+            len(candidates), distinct, fetching, cap,
+        )
+        if fetching > synth_max_objects // 2:
+            result["warnings"].append(f"neighbor_fanout: fetched={fetching}")
+
+        # Fetch neighbours in D5 order (skip ones already fetched as candidates).
         candidate_id_set = {c["object_id"] for c in candidates}
         neighbors: list[dict] = []
-        for nid in neighbor_ids:
+        for nid, _seed_rank, _prio in neighbor_discovery:
             if nid in candidate_id_set:
                 continue
             obj = _fetch_cached(read_client, space_id, nid, cache, enum_map)
@@ -549,9 +593,9 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
             _attach_log_deeplink(result, space_id)
             return result
 
-        # --- Build context with budget trim (B5) ---
-        context_objects, contributing, trim_warnings = _build_context(
-            candidates, neighbors, result["warnings"]
+        # --- Build context with budget trim (B5, #324 D1) ---
+        context_objects, surviving_candidates, surviving_neighbours, trim_warnings = (
+            _build_context(candidates, neighbors)
         )
         result["warnings"].extend(trim_warnings)
 
@@ -559,18 +603,36 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
         answer = synthesize(safe_question, context_objects)
         result["answer"] = answer
 
-        # --- Sources consulted (SF3 — contributing objects, deduped) ---
+        # --- Sources consulted (#324 D1 — surviving candidates + neighbours,
+        # deduped by object_id; titles routed through _safe_object_name (SF-B), now
+        # covering BOTH candidates and neighbours). The name-policy warning for a
+        # rejected name was ALREADY emitted during context build (_truncate_object_content
+        # → _safe_object_name) for each of these same surviving objects, so the title
+        # call here is routed through a THROWAWAY list: the title still redacts to
+        # [REDACTED] for a rejected name, but the synthesis_name_rejected warning is
+        # not double-emitted. ---
         sources_consulted = []
-        for c in contributing:
+        for c in surviving_candidates + surviving_neighbours:
             obj = c["obj"]
             oid = c["object_id"]
             sources_consulted.append({
-                "title": obj.get("name", ""),
+                "title": _safe_object_name(obj, []),
                 "type": _short_type(_type_of(obj)),
                 "object_id": oid,
                 "deeplink": _bootstrap._object_deeplink(space_id, oid),
             })
         result["sources_consulted"] = sources_consulted
+
+        # #324 D2: file-back stays seed-only (preserving SF1). Only candidates feed
+        # the gate / wiki_drew_from; neighbours are cited but never filed.
+        # _maybe_file_back reads only object_id from these entries (gate count, SF4
+        # refetch, wiki_drew_from), so we forward the candidate slice of the already
+        # built sources_consulted dicts (no re-sanitization needed — and the title
+        # build above used a throwaway list, so no duplicate warnings either way).
+        candidate_ids = {c["object_id"] for c in surviving_candidates}
+        filed_sources = [
+            s for s in sources_consulted if s["object_id"] in candidate_ids
+        ]
 
         # --- Detect synthesis error sentinels ---
         synth_error = _classify_synthesis_error(answer)
@@ -594,7 +656,7 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
         # --- File-back gate ---
         filed_back, query_obj_id, fb_status, fb_warnings = _maybe_file_back(
             write_client, read_client, space_id, safe_question, answer,
-            sources_consulted, file_back, cache, enum_map,
+            filed_sources, file_back, cache, enum_map,
         )
         result["warnings"].extend(fb_warnings)
         result["filed_back"] = filed_back
@@ -676,25 +738,33 @@ def _looks_like_object(obj) -> bool:
     return isinstance(obj, dict) and bool(obj.get("id"))
 
 
-def _neighbor_ids_of(obj: dict) -> list[str]:
-    """Collect 1-hop neighbor ids from an object's relation properties (SF5)."""
-    ids: list[str] = []
+def _neighbor_ids_of(obj: dict) -> list[tuple[str, int]]:
+    """Collect 1-hop neighbor (id, relation_priority) pairs (SF5, #324 B1).
+
+    ``relation_priority`` is the index of the matching key in ``_RELATION_KEYS``
+    (lower = higher priority), preserved so the caller can apply the D5 total
+    order. Discovery order within ``properties`` is preserved.
+    """
+    pairs: list[tuple[str, int]] = []
     for prop in obj.get("properties", []) or []:
         if not isinstance(prop, dict):
             continue
-        if prop.get("key") in _RELATION_KEYS:
-            ids.extend(_parse_relation_elements(prop.get("objects")))
-    return ids
+        key = prop.get("key")
+        if key in _RELATION_KEYS:
+            prio = _RELATION_KEYS.index(key)
+            for nid in _parse_relation_elements(prop.get("objects")):
+                pairs.append((nid, prio))
+    return pairs
 
 
-def _build_context(candidates, neighbors, warnings_sink):
-    """Bound the synthesis context (B5).
+def _build_context(candidates, neighbors):
+    """Bound the synthesis context (B5, #324 D1/D5).
 
     Trim order when over budget: drop NEIGHBORS first (lowest relevance), then the
     lowest-scored CANDIDATES last. Honors the object cap and the per-object
-    head-truncation cap. Returns (context_objects, contributing_candidates,
-    trim_warnings). ``contributing`` are the surviving CANDIDATE entries (the
-    deterministic SF3 source set).
+    head-truncation cap. Returns ``(context_objects, surviving_candidates,
+    surviving_neighbours, trim_warnings)``. The split is by MEMBERSHIP against the
+    candidate id set (#324 B2) — NOT the ``score == -1.0`` sentinel or list position.
     """
     trim_warnings: list[str] = []
     max_objects = config.synth_max_objects()
@@ -703,8 +773,9 @@ def _build_context(candidates, neighbors, warnings_sink):
 
     # Candidates sorted by score descending (highest relevance first).
     sorted_candidates = sorted(candidates, key=lambda c: c["score"], reverse=True)
-    # Neighbors kept in discovery order.
-    ordered = sorted_candidates + list(neighbors)
+    # Neighbours are already in D5 order (seed_rank, relation_priority, object_id);
+    # list order is the SOLE carrier of priority (#324 B3) — do NOT re-sort here.
+    ordered = sorted_candidates + neighbors
 
     dropped = 0
 
@@ -735,11 +806,13 @@ def _build_context(candidates, neighbors, warnings_sink):
         for e in ordered
     ]
 
-    # Contributing = surviving CANDIDATES (input-side SF3 definition), deduped.
+    # #324 B2: partition surviving objects by MEMBERSHIP against the candidate id
+    # set (not the score sentinel or list position).
     surviving_ids = {e["obj"].get("id") for e in ordered}
-    contributing = [c for c in candidates if c["object_id"] in surviving_ids]
+    surviving_candidates = [c for c in candidates if c["object_id"] in surviving_ids]
+    surviving_neighbours = [n for n in neighbors if n["object_id"] in surviving_ids]
 
-    return context_objects, contributing, trim_warnings
+    return context_objects, surviving_candidates, surviving_neighbours, trim_warnings
 
 
 def _classify_synthesis_error(answer: str) -> str | None:
@@ -775,7 +848,7 @@ def _refetch_for_writeback(read_client, space_id, object_id, enum_map):
 
 
 def _maybe_file_back(write_client, read_client, space_id, question, answer,
-                     sources_consulted, file_back, cache, enum_map=None):
+                     filed_sources, file_back, cache, enum_map=None):
     """Apply the file-back gate and write the filed Query object (Decision 4).
 
     Returns (filed_back, query_object_id, status, warnings).
@@ -799,7 +872,7 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
         should_file = True
     else:
         should_file = (
-            len(sources_consulted) >= config.file_back_min_sources()
+            len(filed_sources) >= config.file_back_min_sources()
             and len(answer.split()) >= config.file_back_min_words()
         )
     if not should_file:
@@ -807,7 +880,7 @@ def _maybe_file_back(write_client, read_client, space_id, question, answer,
 
     # SF4: drop any cited id no longer resolvable at write time.
     cited_entries = []  # (object_id, type_key)
-    for src in sources_consulted:
+    for src in filed_sources:
         oid = src["object_id"]
         obj = _refetch_for_writeback(read_client, space_id, oid, enum_map)
         if obj is None:
