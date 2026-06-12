@@ -520,7 +520,9 @@ Both `reindex` and `reembed_object` build `PointStruct(..., payload=_chunk_to_pa
 
 ## 8. `wiki_query` Two-Tier Filter Semantics
 
-`wiki_query` has two retrieval tiers selected by `config.index_threshold()`:
+`wiki_query` has two retrieval tiers selected by `config.index_threshold()` (where `config` is
+**`anytype_llm_wiki.wiki.config`**, not the root `config` module — patch/seam tests against
+`anytype_llm_wiki.wiki.config.index_threshold`):
 - **Tier 1 (index_navigation):** below threshold — enumerates wiki objects directly, no Qdrant
   call (`query.py:478-485`).
 - **Tier 2 (vector_augmented):** at/above threshold — calls `semantic_search_core`
@@ -708,19 +710,35 @@ def test_no_filter_regression(monkeypatch):
 ```
 
 **AC-F1b — Default `wiki_query` passes the full `_WIKI_TYPE_KEYS` (not `None`) to the core**
+
+Tier-2 seam (all three are real, existing module attributes — anchor the test to them):
+- `index_threshold` lives on **`anytype_llm_wiki.wiki.config`** (NOT root `config`); monkeypatch
+  `query_mod.config.index_threshold` to return `1` (or set env `WIKI_INDEX_THRESHOLD=1`) so any
+  non-empty wiki enumeration takes the `vector_augmented` branch (`query.py:436` `tier2 = count >= threshold`).
+- `query_mod.write_client`/`WikiClient.list_objects` supplies the enumeration; provide ≥1 wiki-typed
+  object so `count >= threshold` and the schema pre-check passes (include the bootstrap schema-version
+  marker object so `_schema_version_from_objects` returns a current version — reuse the
+  `test_query.py` enumeration fixture / respx `/search` mock).
+- `query_mod.indexer.semantic_search_core` is the Tier-2 call site; monkeypatch it to capture kwargs.
+- `query_mod.synthesize` → monkeypatch to a sentinel string to avoid any Ollama call.
+
 ```python
-def test_wiki_query_default_passes_full_type_keys(monkeypatch):
-    # Force Tier 2; capture the types kwarg threaded into semantic_search_core.
+def test_wiki_query_default_passes_full_type_keys(monkeypatch, anytype_enum_fixture):
+    # anytype_enum_fixture: the existing test_query.py harness that mocks WikiClient.list_objects
+    # (>=1 wiki object + schema marker) and AnytypeReadClient.get_object.
     captured = {}
     def _fake_core(query, space_id=None, types=None, ingested_after=None,
                    ingested_before=None, limit=10):
         captured["types"] = types
         return []
+    monkeypatch.setattr(query_mod.config, "index_threshold", lambda: 1)
     monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
-    # ... drive wiki_query through Tier 2 with no `types` arg (setup per existing
-    #     test_query Tier-2 harness) ...
-    assert set(captured["types"]) == set(query_mod._WIKI_TYPE_KEYS)
+    monkeypatch.setattr(query_mod, "synthesize", lambda q, ctx: "SENTINEL ANSWER")
+
+    query_mod.wiki_query(question="q", space_id=FAKE_SPACE_ID)  # no `types` arg
+
     assert captured["types"] is not None
+    assert set(captured["types"]) == set(query_mod._WIKI_TYPE_KEYS)
 ```
 
 **AC-F2 — Type filter applied (nested `should` shape)**
@@ -897,16 +915,24 @@ def test_tier1_date_predicate():
 ```
 
 **AC-F10b — Mixed valid+invalid `types` silently narrowed (Tier-2 threading)**
+
+Uses the same Tier-2 seam as AC-F1b (`query_mod.config.index_threshold` → 1, the `anytype_enum_fixture`
+enumeration, `query_mod.synthesize` sentinel, capture on `query_mod.indexer.semantic_search_core`).
 ```python
-def test_wiki_query_mixed_types_silently_narrowed(monkeypatch):
+def test_wiki_query_mixed_types_silently_narrowed(monkeypatch, anytype_enum_fixture):
     captured = {}
     def _fake_core(query, space_id=None, types=None, ingested_after=None,
                    ingested_before=None, limit=10):
         captured["types"] = types
         return []
+    monkeypatch.setattr(query_mod.config, "index_threshold", lambda: 1)
     monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
-    # drive wiki_query Tier 2 with types=["wiki_entity", "wiki_source"]
-    # ... (existing Tier-2 harness) ...
+    monkeypatch.setattr(query_mod, "synthesize", lambda q, ctx: "SENTINEL ANSWER")
+
+    # "wiki_source" ∉ _WIKI_TYPE_KEYS → silently dropped; "wiki_entity" survives.
+    query_mod.wiki_query(question="q", space_id=FAKE_SPACE_ID,
+                         types=["wiki_entity", "wiki_source"])
+
     assert set(captured["types"]) == {"wiki_entity"}  # non-wiki type dropped
 ```
 
