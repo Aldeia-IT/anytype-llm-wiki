@@ -233,7 +233,6 @@ Dependencies are pinned in two layers: **`uv.lock`** locks every direct and tran
 ## Roadmap
 
 - Hybrid search — semantic similarity + keyword + metadata filters
-- Relationship-aware retrieval — follow Anytype Relations to pull connected context
 - Contradiction detection beyond linked entities (semantic pre-filter) and across Concepts
 - Cross-space federation with access control
 - Webhook-based indexing when Anytype adds webhook support
