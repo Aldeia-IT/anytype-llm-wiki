@@ -595,7 +595,7 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
 
         # --- Build context with budget trim (B5, #324 D1) ---
         context_objects, surviving_candidates, surviving_neighbours, trim_warnings = (
-            _build_context(candidates, neighbors, result["warnings"])
+            _build_context(candidates, neighbors)
         )
         result["warnings"].extend(trim_warnings)
 
@@ -605,13 +605,18 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
 
         # --- Sources consulted (#324 D1 — surviving candidates + neighbours,
         # deduped by object_id; titles routed through _safe_object_name (SF-B), now
-        # covering BOTH candidates and neighbours). ---
+        # covering BOTH candidates and neighbours). The name-policy warning for a
+        # rejected name was ALREADY emitted during context build (_truncate_object_content
+        # → _safe_object_name) for each of these same surviving objects, so the title
+        # call here is routed through a THROWAWAY list: the title still redacts to
+        # [REDACTED] for a rejected name, but the synthesis_name_rejected warning is
+        # not double-emitted. ---
         sources_consulted = []
         for c in surviving_candidates + surviving_neighbours:
             obj = c["obj"]
             oid = c["object_id"]
             sources_consulted.append({
-                "title": _safe_object_name(obj, result["warnings"]),
+                "title": _safe_object_name(obj, []),
                 "type": _short_type(_type_of(obj)),
                 "object_id": oid,
                 "deeplink": _bootstrap._object_deeplink(space_id, oid),
@@ -622,7 +627,8 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
         # the gate / wiki_drew_from; neighbours are cited but never filed.
         # _maybe_file_back reads only object_id from these entries (gate count, SF4
         # refetch, wiki_drew_from), so we forward the candidate slice of the already
-        # built sources_consulted (no re-sanitization → no duplicate warnings).
+        # built sources_consulted dicts (no re-sanitization needed — and the title
+        # build above used a throwaway list, so no duplicate warnings either way).
         candidate_ids = {c["object_id"] for c in surviving_candidates}
         filed_sources = [
             s for s in sources_consulted if s["object_id"] in candidate_ids
@@ -751,7 +757,7 @@ def _neighbor_ids_of(obj: dict) -> list[tuple[str, int]]:
     return pairs
 
 
-def _build_context(candidates, neighbors, warnings_sink):
+def _build_context(candidates, neighbors):
     """Bound the synthesis context (B5, #324 D1/D5).
 
     Trim order when over budget: drop NEIGHBORS first (lowest relevance), then the

@@ -1412,8 +1412,8 @@ class TestD5SortKeyIsolation:
 
         This proves relation_priority (from _RELATION_KEYS.index) is honored, not
         properties order and not object_id: D5 order is
-        (0, 2, 'aaa-subj-neighbor') vs (0, 0, 'zzz-rel-neighbor') → the
-        wiki_relations one wins on relation_priority (0 < 2) despite being listed
+        (0, 4, 'aaa-subj-neighbor') vs (0, 0, 'zzz-rel-neighbor') → the
+        wiki_relations one wins on relation_priority (0 < 4) despite being listed
         second AND having a later object_id.
         """
         seed_id = "entity-seed-t1b-001"
