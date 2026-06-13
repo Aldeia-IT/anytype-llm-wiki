@@ -1108,74 +1108,85 @@ def test_unknown_filter_value_yields_zero_no_raise(monkeypatch):
 
 
 def test_semantic_search_default_excludes_wiki_source(monkeypatch):
-    """#336 OD-B Option 2: semantic_search with no 'types' param must NOT scope to wiki_source.
+    """#336 OD-B Option 2: server.py:semantic_search with no 'types' param must default-exclude wiki_source.
 
-    When Option 2 is chosen (index but default-exclude wiki_source), the default
-    semantic_search must use a types guard that excludes wiki_source. Explicitly
-    passing types=['wiki_source'] OR a source_type filter must override that guard.
+    Per spec §11 Step 6, the OD-B guard lives in server.py:semantic_search — NOT in
+    semantic_search_core. semantic_search_core must remain filter-free when called with no
+    types (test_no_filter_regression guards that). This test targets the server.py seam by
+    monkeypatching semantic_search_core in the server module's namespace and inspecting the
+    `types` argument that server.semantic_search passes down.
 
-    This test asserts the default path builds a must clause that EXCLUDES wiki_source,
-    while explicit types=['wiki_source'] does NOT restrict to that exclusion guard.
+    Pre-impl (current): semantic_search passes types=None straight to semantic_search_core.
+    Post-impl (correct): semantic_search builds a default types list that omits wiki_source
+    when no types= argument is provided, then passes that list to semantic_search_core.
 
-    Implementation note: the guard may live in semantic_search (server.py) or
-    semantic_search_core (indexer.py). This test anchors to the observable outcome
-    from semantic_search_core: the default call (no types) must produce a type-scoped
-    must clause that does not include wiki_source.
+    Two assertions:
+    (a) DEFAULT call: captured types is not None AND "wiki_source" NOT in captured types.
+    (b) EXPLICIT override: semantic_search(query="test", types=["wiki_source"]) passes
+        ["wiki_source"] through unchanged (the caller's explicit intent overrides the default).
+
+    RED now: captured types is None (server.py passes None as-is). GREEN after impl.
+    test_no_filter_regression stays GREEN because that test calls semantic_search_core
+    directly — the OD-B guard is in server.py, not in semantic_search_core.
     """
-    import anytype_llm_wiki.indexer as _indexer
+    import anytype_llm_wiki.server as _server_mod
+
+    captured_calls: list[dict] = []
+
+    def fake_core(query, space_id=None, types=None, ingested_after=None,
+                  ingested_before=None, limit=10, **kwargs):
+        captured_calls.append({"types": types, "query": query})
+        return []
+
+    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+
     from anytype_llm_wiki.server import semantic_search
 
-    # Default call: no types → must NOT include wiki_source in the type scope
-    fake_default = FakeQdrantClientWithSearch(mock_results=[])
-    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake_default)
-    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    # (a) DEFAULT call — no types= supplied
+    captured_calls.clear()
+    semantic_search(query="test")
+    assert captured_calls, "semantic_search must call semantic_search_core"
+    default_types = captured_calls[-1]["types"]
 
-    # Patch to avoid ValidationError on DatetimeRange
-    try:
-        semantic_search(query="test")
-    except Exception:
-        pass  # if it raises for other reasons (not our concern here)
+    assert default_types is not None, (
+        "#336 OD-B FAIL: server.py:semantic_search must pass a non-None types list to "
+        "semantic_search_core when no types= argument is given — the default must exclude "
+        "wiki_source. Pre-impl: types=None is passed straight through (expected red)."
+    )
+    assert "wiki_source" not in default_types, (
+        f"#336 OD-B FAIL: 'wiki_source' must NOT appear in the default types list. "
+        f"Got default_types={default_types!r}. The default call must scope to the non-source "
+        f"type set (wiki_entity, wiki_concept, etc.) and exclude wiki_source."
+    )
 
-    # The type-scoped guard should produce a query_filter with a must clause
-    # that EXCLUDES wiki_source. We assert wiki_source is not a value in any
-    # type condition if a filter was built (or the result itself excludes it).
-    # The meaningful assertion: after impl, either:
-    # (a) fake_default.query_filter is not None and wiki_source NOT in the type should-group, or
-    # (b) the default call passes a types= list that omits wiki_source to semantic_search_core
-    # Both are tested here in the available seams.
+    # (b) EXPLICIT override — caller passes types=["wiki_source"] → must be honoured as-is
+    captured_calls.clear()
+    semantic_search(query="test", types=["wiki_source"])
+    assert captured_calls, "semantic_search must call semantic_search_core for explicit types too"
+    explicit_types = captured_calls[-1]["types"]
+    assert explicit_types is not None and "wiki_source" in explicit_types, (
+        f"#336 OD-B FAIL: explicit types=['wiki_source'] must be passed through unchanged. "
+        f"Got explicit_types={explicit_types!r}."
+    )
 
-    # Now test explicit types=['wiki_source'] — must NOT apply the default-exclusion guard
-    fake_explicit = FakeQdrantClientWithSearch(mock_results=[])
-    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake_explicit)
-    try:
-        semantic_search(query="test", types=["wiki_source"])
-    except Exception:
-        pass
 
-    # With explicit types=['wiki_source'], if a type filter is built it MUST include wiki_source
-    if fake_explicit.query_filter is not None:
-        must = fake_explicit.query_filter.must
-        type_group = next((c for c in must if hasattr(c, "should") and c.should), None)
-        if type_group is not None:
-            type_values = {c.match.value for c in type_group.should if hasattr(c, "match")}
-            assert "wiki_source" in type_values, (
-                f"With explicit types=['wiki_source'], filter must scope to wiki_source; "
-                f"got type_values={type_values}"
-            )
+# ---------------------------------------------------------------------------
+# #336 — B2: PAYLOAD_SCHEMA_VERSION constant guard
+# ---------------------------------------------------------------------------
 
-    # The core assertion for default-exclusion:
-    # After implementation the default query_filter must exist (OD-B Option 2 adds
-    # a default types guard) and wiki_source must not appear in the type should-group.
-    # We validate this directly on the core seam:
-    fake_core = FakeQdrantClientWithSearch(mock_results=[])
-    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake_core)
-    # Call semantic_search_core with NO types (pure default)
-    _indexer.semantic_search_core(query="test")
-    # After OD-B Option 2 impl: the default path MUST add a types guard
-    # The filter must exist AND wiki_source must NOT be in the type conditions.
-    # Pre-impl: query_filter is None → this assertion fails (correct test-first red).
-    assert fake_core.query_filter is not None, (
-        "OD-B Option 2: default semantic_search_core call (no types) must build a "
-        "query_filter (with a type scope that excludes wiki_source). "
-        "Pre-impl: query_filter=None (expected red)."
+
+def test_payload_schema_version_is_3():
+    """#336 §12: PAYLOAD_SCHEMA_VERSION must be exactly 3 in config.py.
+
+    test_schema_version_3_bump_forces_full_reembed monkeypatches the constant to 3
+    to exercise the mechanic — but that does NOT gate the actual constant in config.py.
+    An implementer who leaves PAYLOAD_SCHEMA_VERSION = 2 would pass the mechanic test
+    but break the payload index compat. This guard fails until the constant is bumped.
+
+    RED now (config has 2). GREEN after impl sets PAYLOAD_SCHEMA_VERSION = 3.
+    """
+    from anytype_llm_wiki import config as _config
+    assert _config.PAYLOAD_SCHEMA_VERSION == 3, (
+        f"PAYLOAD_SCHEMA_VERSION must be 3 after #336 (was 2 pre-impl); "
+        f"got {_config.PAYLOAD_SCHEMA_VERSION}"
     )

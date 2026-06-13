@@ -3499,6 +3499,10 @@ class TestRememberWritesDomainTags:
     def test_remember_writes_domain_tags_on_update(self, monkeypatch, tmp_path):
         """#336 AC-P5: wiki_remember with domain_tags on existing entity →
         update_object (PATCH) props contain wiki_domain_tags (OD-C SET semantics).
+
+        OD-C discriminator: existing entity has a pre-existing wiki_domain_tags value
+        ("old-rem-id"). After update with domain_tags=["ai"], the PATCH must contain ONLY
+        ["tag-id-1"] — old-rem-id must be absent. A MERGE impl produces both; SET replaces.
         """
         import anytype_llm_wiki.wiki.remember as _rem_mod
         import anytype_llm_wiki.wiki.ingest as _ingest_mod
@@ -3561,12 +3565,32 @@ class TestRememberWritesDomainTags:
             captured_update_props.append(payload.get("properties", []))
             return httpx.Response(200, json={"object": {"id": "entity-001"}})
 
+        # Entity with pre-existing wiki_domain_tags (OD-C discriminator fixture)
+        entity_with_existing_tags = {
+            "data": [
+                {
+                    "id": "entity-001",
+                    "name": "TestEntity",
+                    "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_facts", "text": "TestEntity supports Python."},
+                        {
+                            "key": "wiki_domain_tags",
+                            "format": "multi_select",
+                            "multi_select": [{"id": "old-rem-id", "name": "old-rem-tag"}],
+                        },
+                    ],
+                }
+            ],
+            "pagination": {"has_more": False},
+        }
+
         with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
             router.get(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
                 return_value=httpx.Response(200, json=_schema_current_response())
             )
             router.post(f"/v1/spaces/{FAKE_SPACE_ID}/search").mock(
-                return_value=httpx.Response(200, json=_single_entity_response())
+                return_value=httpx.Response(200, json=entity_with_existing_tags)
             )
             router.post(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
                 return_value=httpx.Response(201, json=_wikilog_create_response())
@@ -3598,6 +3622,21 @@ class TestRememberWritesDomainTags:
         assert found, (
             f"Expected wiki_domain_tags multi_select in update_object (PATCH) props (#336 AC-P5, OD-C SET). "
             f"Captured: {captured_update_props}"
+        )
+        # OD-C SET check: "old-rem-id" (pre-existing) must NOT appear in any PATCH
+        # A MERGE impl would include both "old-rem-id" and "tag-id-1"; SET replaces.
+        old_tag_absent = all(
+            all(
+                not (isinstance(p, dict) and p.get("key") == "wiki_domain_tags"
+                     and "old-rem-id" in (p.get("multi_select") or []))
+                for p in props
+            )
+            for props in captured_update_props
+        )
+        assert old_tag_absent, (
+            f"#336 AC-P5 OD-C FAIL: pre-existing 'old-rem-id' must NOT appear in PATCH props "
+            f"(SET semantics replace, not MERGE). "
+            f"Captured update props: {captured_update_props}"
         )
 
 

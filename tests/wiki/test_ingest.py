@@ -3035,11 +3035,22 @@ class TestIngestDomainTagsPersistence:
 
         captured_update_props = []
 
+        # OD-C SET semantics: existing entity has a pre-existing wiki_domain_tags value
+        # ("old-tag-id"). After update with domain_hint="ai", the PATCH must contain ONLY
+        # "tag-id-ai" — the old-tag-id must be absent. This makes SET vs MERGE distinguishable:
+        # a MERGE impl would produce ["old-tag-id", "tag-id-ai"]; SET produces ["tag-id-ai"] only.
         existing_entity = {
             "id": "existing-entity-001",
             "name": "TestEntity",
             "type": {"key": "wiki_entity"},
-            "properties": [{"key": "wiki_facts", "text": "Old facts."}],
+            "properties": [
+                {"key": "wiki_facts", "text": "Old facts."},
+                {
+                    "key": "wiki_domain_tags",
+                    "format": "multi_select",
+                    "multi_select": [{"id": "old-tag-id", "name": "old-tag"}],
+                },
+            ],
         }
 
         def capture_patch(request, **kwargs):
@@ -3095,6 +3106,22 @@ class TestIngestDomainTagsPersistence:
             f"#336 AC-P2 FAIL: expected wiki_domain_tags multi_select=['tag-id-ai'] in "
             f"update_object (PATCH) props (OD-C SET semantics — new set replaces old). "
             f"Implementation must call _resolve_multi_select_tags and write wiki_domain_tags. "
+            f"Captured update props: {captured_update_props}"
+        )
+        # OD-C SET check: "old-tag-id" (pre-existing) must NOT appear in any PATCH
+        # A MERGE impl would include both old-tag-id and tag-id-ai; SET replaces.
+        old_tag_absent = all(
+            all(
+                not (isinstance(p, dict) and p.get("key") == "wiki_domain_tags"
+                     and "old-tag-id" in (p.get("multi_select") or []))
+                for p in props
+            )
+            for props in captured_update_props
+        )
+        assert old_tag_absent, (
+            f"#336 AC-P2 OD-C FAIL: pre-existing 'old-tag-id' must NOT appear in PATCH props "
+            f"(SET semantics replace the old value, not MERGE). "
+            f"A MERGE impl produces both ids; SET produces only the new id. "
             f"Captured update props: {captured_update_props}"
         )
 
