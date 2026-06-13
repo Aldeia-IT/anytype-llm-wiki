@@ -237,7 +237,14 @@ def reindex(space_id: str | None = None) -> dict:
 
         state[sid] = space_state
 
-    state["_payload_schema_version"] = config.PAYLOAD_SCHEMA_VERSION
+    # Advance the global payload-schema marker only after a full-corpus
+    # (unscoped) reindex. A single-space reindex auto-fires after every
+    # wiki_ingest/wiki_remember (WIKI_AUTO_REINDEX); advancing the marker on a
+    # scoped run would backfill only that one space then permanently strand
+    # every other space on the old payload (force_full would never trigger
+    # for them again). A scoped reindex still backfills its named space.
+    if space_id is None:
+        state["_payload_schema_version"] = config.PAYLOAD_SCHEMA_VERSION
     _save_state(state)
     return stats
 

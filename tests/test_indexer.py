@@ -700,6 +700,65 @@ def test_no_bump_keeps_incremental_skip(monkeypatch, tmp_path):
     )
 
 
+def test_scoped_reindex_does_not_stamp_schema_marker(monkeypatch, tmp_path):
+    """Review C1: a SCOPED reindex(space_id=...) must backfill its named space
+    (force_full applies) but must NOT advance the global _payload_schema_version
+    marker. A single-space reindex auto-fires after every wiki_ingest/wiki_remember;
+    stamping the marker there would strand every other space on the old payload.
+    """
+    import anytype_llm_wiki.indexer as _indexer
+
+    state = {"_payload_schema_version": 1, "sp-1": {"obj-1": "2026-01-01T00:00:00Z"}}
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr(config, "INDEX_STATE_FILE", state_file)
+    monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", 2)
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [{"id": "sp-1"}])
+    monkeypatch.setattr(
+        _indexer,
+        "list_objects",
+        lambda sid: [
+            {
+                "id": "obj-1",
+                "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _indexer,
+        "get_object",
+        lambda sid, oid: {
+            "id": "obj-1",
+            "space_id": "sp-1",
+            "name": "X",
+            "type": {"key": "wiki_entity"},
+            "markdown": "# H\nbody",
+            "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}],
+        },
+    )
+    monkeypatch.setattr(
+        _indexer, "embed", lambda texts: [[0.1] * config.EMBED_DIMS for _ in texts]
+    )
+
+    # SCOPED reindex of the named space only.
+    stats = _indexer.reindex(space_id="sp-1")
+    assert stats["objects_indexed"] == 1, (
+        f"Scoped reindex with schema bump MUST still re-embed its named space; stats={stats}"
+    )
+    assert fake.upserted_points, "Expected Qdrant upsert after forced re-embed of scoped space"
+
+    new_state = json.loads(state_file.read_text())
+    assert new_state["_payload_schema_version"] == 1, (
+        "Scoped reindex MUST NOT advance the global _payload_schema_version marker "
+        "(it must remain 1 so a later full reindex still backfills other spaces); "
+        f"got {new_state}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AC-F12 — reembed_object writes last_modified_date
 # ---------------------------------------------------------------------------

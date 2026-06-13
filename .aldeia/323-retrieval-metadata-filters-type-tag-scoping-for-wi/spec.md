@@ -174,6 +174,12 @@ state["_payload_schema_version"] = config.PAYLOAD_SCHEMA_VERSION
 persists with no serialization change. The space-iteration code reads `state.get(sid, {})` per
 space, so the `"_payload_schema_version"` key is never mistaken for a space.
 
+**Marker advance is gated to full (unscoped) reindex:** the `_payload_schema_version` marker is
+stamped only after a full (unscoped) `reindex()` — i.e. gated by `if space_id is None`. An
+auto-fired single-space reindex (post-`wiki_ingest`/`wiki_remember` under `WIKI_AUTO_REINDEX`)
+still backfills its named space but does NOT advance the marker, so it cannot prematurely stamp the
+new version and strand every other space on the old payload.
+
 ### D4 — `source_type` Filter: DEFER (root cause verified)
 
 **Decision:** Do NOT add `source_type` as an MCP filter parameter in v1. Removed from the API
