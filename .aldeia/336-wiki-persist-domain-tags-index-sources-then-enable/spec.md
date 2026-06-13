@@ -1,6 +1,6 @@
 ---
 name: wiki-persist-domain-tags-index-sources-then-enable
-status: DRAFT
+status: SPEC
 issue: 336
 repo: anytype-llm-wiki
 target_repo: anytype-llm-wiki
@@ -11,7 +11,7 @@ author: spec-writer agent
 
 # Wiki: Persist domain_tags + Index Sources + Enable source_type/domain_tags Filters
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-13
 **Author:** spec-writer agent
 **Review rounds:** 0
