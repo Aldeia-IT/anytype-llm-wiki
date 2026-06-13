@@ -97,6 +97,19 @@ class TestState:
         loaded = _load_state()
         assert loaded == {"space-1": {"obj-1": "2026-01-01T00:00:00Z"}}
 
+    def test_save_is_atomic_and_leaves_no_temp(self, tmp_path, monkeypatch):
+        """#342: _save_state writes via a temp file + os.replace(). The result fully
+        replaces prior content (atomic rename, not append) and no stray temp file is
+        left behind in the state directory."""
+        state_file = tmp_path / "state.json"
+        monkeypatch.setattr(config, "INDEX_STATE_FILE", state_file)
+        monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+        _save_state({"space-1": {"obj-1": "v1"}})
+        _save_state({"space-2": {"obj-2": "v2"}})  # must fully replace, not merge
+        assert _load_state() == {"space-2": {"obj-2": "v2"}}
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name != "state.json"]
+        assert leftovers == [], f"temp files left behind after _save_state: {leftovers}"
+
 
 class TestReindex:
     _requires_live = True
@@ -795,3 +808,59 @@ def test_reembed_writes_last_modified_date(monkeypatch):
         f"All upserted payloads must carry last_modified_date='2026-05-01T00:00:00Z'. "
         f"Got: {[p.payload for p in fake.upserted_points]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #342 — reindex overlap guard (host-local advisory lock)
+# ---------------------------------------------------------------------------
+
+
+class TestReindexLock:
+    """#342 item 2: reindex() takes a non-blocking host-local advisory lock so two
+    concurrent runs cannot race the shared state.json write. CI-runnable (no live deps)."""
+
+    def test_reindex_skips_when_lock_held(self, tmp_path, monkeypatch):
+        """A reindex started while another holds the lock skips cleanly (does no work,
+        returns skipped=True) instead of racing the state write."""
+        import fcntl as _fcntl
+        import os as _os
+        import anytype_llm_wiki.indexer as _indexer
+
+        monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+
+        def _boom_spaces():
+            raise AssertionError("reindex did work despite the lock being held")
+
+        def _boom_qdrant():
+            raise AssertionError("reindex touched Qdrant despite the lock being held")
+
+        monkeypatch.setattr(_indexer, "list_spaces", _boom_spaces)
+        monkeypatch.setattr(_indexer, "_qdrant", _boom_qdrant)
+
+        # Simulate a concurrent reindex already holding the lock (separate fd →
+        # flock conflicts even within this process).
+        lock_path = tmp_path / "reindex.lock"
+        fd = _os.open(str(lock_path), _os.O_CREAT | _os.O_RDWR, 0o600)
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        try:
+            stats = _indexer.reindex()
+        finally:
+            _os.close(fd)
+
+        assert stats.get("skipped") is True, f"expected skip while lock held; got {stats}"
+        assert stats.get("reason") == "reindex_in_progress"
+        assert stats["objects_indexed"] == 0
+
+    def test_reindex_runs_when_lock_free(self, tmp_path, monkeypatch):
+        """With a free lock, reindex() acquires it and runs normally (no skip flag)."""
+        import anytype_llm_wiki.indexer as _indexer
+
+        monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+        fake = FakeQdrantClientWithSearch()
+        monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+        monkeypatch.setattr(_indexer, "list_spaces", lambda: [])
+        stats = _indexer.reindex()
+        assert not stats.get("skipped"), f"reindex should run with a free lock; got {stats}"
+        assert stats["spaces"] == 0
