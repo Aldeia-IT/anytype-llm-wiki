@@ -2892,3 +2892,406 @@ def test_ingest_slo_observation():
 
     finally:
         _os.unlink(fixture_file)
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-P1, AC-P2: domain_tags written on entity create/update (ingest)
+# ---------------------------------------------------------------------------
+
+
+class TestIngestDomainTagsPersistence:
+    """#336 AC-P1, AC-P2: wiki_domain_tags multi_select written on entity create and update."""
+
+    def test_ingest_writes_domain_tags_on_create(self, monkeypatch, tmp_path):
+        """#336 AC-P1: _run_ingest with domain_hint='ai' → create_object props contain
+        {"key": "wiki_domain_tags", "multi_select": ["tag-id-ai"]}.
+
+        Arrange:
+          - _domain_taxonomy monkeypatched to return {"ai"} (bypasses list_properties/list_tags)
+          - extract() monkeypatched to return a non-abort CONFIG ERROR so heading candidates are used
+          - reindex_anytype monkeypatched to no-op
+          - _resolve_multi_select_tags monkeypatched to return (["tag-id-ai"], False)
+          - respx mocks separate search (/search) from create (/objects) calls
+
+        Fails pre-implementation because domain_tags are not written to create_object props.
+        """
+        import json as _json
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+
+        # Bypass domain taxonomy validation
+        monkeypatch.setattr(
+            _ingest_mod, "_domain_taxonomy", lambda client, space_id: {"ai"}, raising=False
+        )
+        # Bypass LLM extraction (non-abort error so heading candidates are used)
+        monkeypatch.setattr(
+            _ingest_mod, "extract",
+            lambda **kwargs: {"error": "[CONFIG ERROR] extraction_unavailable"},
+            raising=False,
+        )
+        # Bypass reindex
+        monkeypatch.setattr(
+            _ingest_mod, "reindex_anytype", lambda space_id: None, raising=False
+        )
+        # Stub the multi-select tag resolver (the function under test — doesn't exist yet)
+        def fake_resolve_multi(client, space_id, property_key, tag_names):
+            return (["tag-id-ai"], False)
+
+        monkeypatch.setattr(
+            _ingest_mod, "_resolve_multi_select_tags", fake_resolve_multi, raising=False
+        )
+
+        captured_create_props = []
+
+        def capture_create_post(request, **kwargs):
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                payload = {}
+            type_key = payload.get("type_key")
+            if type_key in ("wiki_entity", "wiki_concept"):
+                captured_create_props.append(payload.get("properties", []))
+                return httpx.Response(201, json={"object": {"id": "entity-001", "name": "TestEntity"}})
+            # wiki_source, wiki_log, wiki_action tags, etc.
+            return httpx.Response(201, json={"object": {"id": "obj-001", "name": "obj"}})
+
+        md_file = tmp_path / "test_entity.md"
+        md_file.write_text("# TestEntity\n\nFacts about TestEntity.\n")
+
+        with respx.mock(assert_all_called=False) as router:
+            # Schema check (list_objects)
+            router.get(url__regex=r".*/objects(\?.*)?$").mock(
+                return_value=httpx.Response(200, json=_make_schema_ok_response())
+            )
+            # All GETs (properties, tags, etc.) → empty list (graceful degrade)
+            router.get(url__regex=r".*").mock(
+                return_value=httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            )
+            # Search returns empty (no existing objects → create path)
+            router.post(url__regex=r".*/search").mock(
+                return_value=httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            )
+            # Create: capture entity/concept creates; pass everything else through
+            router.post(url__regex=r".*/objects").mock(side_effect=capture_create_post)
+            # PATCHes (none expected on create path, but mock for safety)
+            router.patch(url__regex=r".*").mock(
+                return_value=httpx.Response(200, json={"object": {"id": "x"}})
+            )
+
+            from anytype_llm_wiki.wiki.ingest import wiki_ingest
+            wiki_ingest(source=str(md_file), space_id=FAKE_SPACE_ID, domain_hint="ai")
+
+        # Fail pre-implementation: no domain_tags written → assert fails
+        assert captured_create_props, (
+            "Expected at least one wiki_entity/wiki_concept create_object call. "
+            "If still empty, check extract() stub returns a non-abort CONFIG ERROR "
+            "and that _domain_taxonomy is patched to return {'ai'}."
+        )
+        found_domain_tag = any(
+            any(
+                isinstance(p, dict) and p.get("key") == "wiki_domain_tags"
+                and p.get("multi_select") == ["tag-id-ai"]
+                for p in props
+            )
+            for props in captured_create_props
+        )
+        assert found_domain_tag, (
+            f"#336 AC-P1 FAIL: expected wiki_domain_tags multi_select=['tag-id-ai'] in "
+            f"create_object props — implementation must call _resolve_multi_select_tags "
+            f"and include wiki_domain_tags in the props list. "
+            f"Captured props: {captured_create_props}"
+        )
+
+    def test_ingest_writes_domain_tags_on_update(self, monkeypatch, tmp_path):
+        """#336 AC-P2: _run_ingest with domain_hint='ai' on existing entity →
+        update_object props contain {"key": "wiki_domain_tags", "multi_select": ["tag-id-ai"]}.
+
+        OD-C (SET semantics): the new tag set REPLACES any existing value.
+        Arrange: search returns an existing entity so resolve_entity returns 'update'.
+        """
+        import json as _json
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+
+        # Bypass domain taxonomy validation
+        monkeypatch.setattr(
+            _ingest_mod, "_domain_taxonomy", lambda client, space_id: {"ai"}, raising=False
+        )
+        # Bypass LLM extraction
+        monkeypatch.setattr(
+            _ingest_mod, "extract",
+            lambda **kwargs: {"error": "[CONFIG ERROR] extraction_unavailable"},
+            raising=False,
+        )
+        # Bypass reindex
+        monkeypatch.setattr(
+            _ingest_mod, "reindex_anytype", lambda space_id: None, raising=False
+        )
+        # Stub multi-select resolver
+        def fake_resolve_multi(client, space_id, property_key, tag_names):
+            return (["tag-id-ai"], False)
+
+        monkeypatch.setattr(
+            _ingest_mod, "_resolve_multi_select_tags", fake_resolve_multi, raising=False
+        )
+
+        captured_update_props = []
+
+        existing_entity = {
+            "id": "existing-entity-001",
+            "name": "TestEntity",
+            "type": {"key": "wiki_entity"},
+            "properties": [{"key": "wiki_facts", "text": "Old facts."}],
+        }
+
+        def capture_patch(request, **kwargs):
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                payload = {}
+            captured_update_props.append(payload.get("properties", []))
+            return httpx.Response(200, json={"object": {"id": "existing-entity-001"}})
+
+        md_file = tmp_path / "test_entity_update.md"
+        md_file.write_text("# TestEntity\n\nUpdated facts about TestEntity.\n")
+
+        with respx.mock(assert_all_called=False) as router:
+            # Schema check (list_objects)
+            router.get(url__regex=r".*/objects(\?.*)?$").mock(
+                return_value=httpx.Response(200, json=_make_schema_ok_response())
+            )
+            # All GETs → empty list (graceful degrade for tags/properties)
+            router.get(url__regex=r".*").mock(
+                return_value=httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            )
+            # Search returns an existing entity → update path
+            router.post(url__regex=r".*/search").mock(
+                return_value=httpx.Response(200, json={
+                    "data": [existing_entity],
+                    "pagination": {"has_more": False},
+                })
+            )
+            router.post(url__regex=r".*/objects").mock(
+                return_value=httpx.Response(201, json={"object": {"id": "obj-001", "name": "obj"}})
+            )
+            # PATCH — capture entity updates
+            router.patch(url__regex=r".*").mock(side_effect=capture_patch)
+
+            from anytype_llm_wiki.wiki.ingest import wiki_ingest
+            wiki_ingest(source=str(md_file), space_id=FAKE_SPACE_ID, domain_hint="ai")
+
+        # Fail pre-implementation: no domain_tags written on update → assert fails
+        assert captured_update_props, (
+            "Expected at least one update_object (PATCH) call for the existing entity. "
+            "Check that the search mock returns the existing entity correctly."
+        )
+        found_domain_tag = any(
+            any(
+                isinstance(p, dict) and p.get("key") == "wiki_domain_tags"
+                and p.get("multi_select") == ["tag-id-ai"]
+                for p in props
+            )
+            for props in captured_update_props
+        )
+        assert found_domain_tag, (
+            f"#336 AC-P2 FAIL: expected wiki_domain_tags multi_select=['tag-id-ai'] in "
+            f"update_object (PATCH) props (OD-C SET semantics — new set replaces old). "
+            f"Implementation must call _resolve_multi_select_tags and write wiki_domain_tags. "
+            f"Captured update props: {captured_update_props}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-S-REUSE: source_type written on _create_source dedup-REUSE path (SF4)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateSourceWritesSourceTypeOnReusePath:
+    """#336 AC-S-REUSE: wiki_source_type written on the update_object branch (dedup reuse) in _create_source."""
+
+    def test_create_source_writes_source_type_on_reuse_path(self, monkeypatch):
+        """#336 AC-S-REUSE: when _create_source hits the dedup-reuse (update_object) branch,
+        wiki_source_type must be written — not just on the create branch.
+
+        Tests _create_source directly (not through full ingest pipeline) with a FakeClient
+        that simulates the dedup-reuse path by triggering update_object instead of create_object.
+        _resolve_select_tag (for 'document') → 'doc-tag-id'.
+        Assert: update_object is called with props containing wiki_source_type.
+        """
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+
+        # Stub the select tag resolver to return a deterministic id
+        def fake_resolve_select(client, space_id, property_key, tag_name):
+            if property_key == "wiki_source_type" and tag_name == "document":
+                return ("doc-tag-id", False)
+            return (None, False)
+
+        monkeypatch.setattr(
+            _ingest_mod, "_resolve_select_tag", fake_resolve_select, raising=False
+        )
+
+        # Also stub resolve_entity to return "update" (dedup reuse hit)
+        existing_source = {
+            "id": "existing-source-001",
+            "name": "Test Source",
+            "type": {"key": "wiki_source"},
+            "properties": [],
+        }
+
+        def fake_resolve_entity(client, space_id, type_key, candidate_title, *args, **kwargs):
+            return {"action": "update", "target": existing_source}
+
+        monkeypatch.setattr(
+            _ingest_mod, "resolve_entity", fake_resolve_entity, raising=False
+        )
+
+        captured_update_props = []
+
+        class FakeWikiClient:
+            def list_properties(self, space_id):
+                return [{"id": "prop-st", "key": "wiki_source_type"}]
+
+            def list_tags(self, space_id, prop_id):
+                return [{"id": "doc-tag-id", "name": "document"}]
+
+            def update_object(self, space_id, object_id, data):
+                captured_update_props.append(data.get("properties", []))
+                return {"id": object_id}
+
+            def create_object(self, space_id, type_key, name, properties):
+                # Should NOT be called in the reuse path
+                return {"id": "new-obj-999"}
+
+            def search(self, space_id, query, filter=None):
+                return [existing_source]
+
+        # Call _create_source directly with the real signature:
+        # _create_source(client, space_id, source, markdown, result)
+        from anytype_llm_wiki.wiki.ingest import _create_source  # noqa: F401
+
+        result_dict = {"warnings": []}
+        _create_source(
+            client=FakeWikiClient(),
+            space_id=FAKE_SPACE_ID,
+            source="https://example.com/paper",
+            markdown="Some source content",
+            result=result_dict,
+        )
+
+        # Assert the update (reuse) path includes wiki_source_type
+        found_source_type = any(
+            any(
+                isinstance(p, dict) and p.get("key") == "wiki_source_type"
+                and p.get("select") == "doc-tag-id"
+                for p in props
+            )
+            for props in captured_update_props
+        )
+        assert found_source_type, (
+            f"Expected wiki_source_type select='doc-tag-id' in update_object props "
+            f"(the reuse/dedup branch must also stamp source_type, SF4). "
+            f"Captured update props: {captured_update_props}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-RESOLVER: _resolve_multi_select_tags unit behavior
+# ---------------------------------------------------------------------------
+
+
+class TestResolveMultiSelectTags:
+    """#336 AC-RESOLVER: _resolve_multi_select_tags unit: success, skip unknown, degrade on error."""
+
+    def test_resolve_multi_select_tags_success(self, monkeypatch):
+        """#336 AC-RESOLVER (a): known names → their ids, degraded=False."""
+        from anytype_llm_wiki.wiki.ingest import _resolve_multi_select_tags
+
+        # Build a fake WikiClient that returns known property/tag lists
+        class FakeClient:
+            def list_properties(self, space_id):
+                return [{"id": "prop-dt", "key": "wiki_domain_tags"}]
+
+            def list_tags(self, space_id, prop_id):
+                return [
+                    {"id": "tag-ai-001", "name": "ai"},
+                    {"id": "tag-ml-001", "name": "ml"},
+                ]
+
+        ids, degraded = _resolve_multi_select_tags(
+            FakeClient(), "sp-1", "wiki_domain_tags", ["ai", "ml"]
+        )
+        assert not degraded, "degraded must be False when tags resolve successfully"
+        assert set(ids) == {"tag-ai-001", "tag-ml-001"}, (
+            f"Known names 'ai','ml' must resolve to their ids; got {ids}"
+        )
+
+    def test_resolve_multi_select_tags_unknown_name_silently_skipped(self, monkeypatch):
+        """#336 AC-RESOLVER (b): unknown name silently skipped, degraded=False.
+
+        Guards against a resolver that silently returns [] for ALL names (tautological).
+        """
+        from anytype_llm_wiki.wiki.ingest import _resolve_multi_select_tags
+
+        class FakeClient:
+            def list_properties(self, space_id):
+                return [{"id": "prop-dt", "key": "wiki_domain_tags"}]
+
+            def list_tags(self, space_id, prop_id):
+                return [{"id": "tag-ai-001", "name": "ai"}]
+
+        ids, degraded = _resolve_multi_select_tags(
+            FakeClient(), "sp-1", "wiki_domain_tags", ["ai", "unknown-tag-xyz"]
+        )
+        assert not degraded, "degraded must be False for unknown (but not erroneous) names"
+        assert "tag-ai-001" in ids, "Known name 'ai' must still resolve"
+        # "unknown-tag-xyz" has no matching tag → silently skipped (not in result)
+        # We can't assert an id for it, but the known one must be present
+
+    def test_resolve_multi_select_tags_http_error_degrades(self, monkeypatch):
+        """#336 AC-RESOLVER (c): httpx.HTTPError → ([], degraded=True); never raises."""
+        import httpx
+        from anytype_llm_wiki.wiki.ingest import _resolve_multi_select_tags
+
+        class FakeClientRaises:
+            def list_properties(self, space_id):
+                raise httpx.HTTPError("connection refused")
+
+            def list_tags(self, space_id, prop_id):
+                raise httpx.HTTPError("connection refused")
+
+        ids, degraded = _resolve_multi_select_tags(
+            FakeClientRaises(), "sp-1", "wiki_domain_tags", ["ai"]
+        )
+        assert degraded is True, "degraded must be True when HTTPError is raised"
+        assert ids == [], f"ids must be [] on HTTPError; got {ids}"
+
+
+# ---------------------------------------------------------------------------
+# #336 — Addendum Item 3 (CTO-A2): import regression for lint.py third caller
+# ---------------------------------------------------------------------------
+
+
+class TestImportRegressionForLintPy:
+    """#336 Addendum Item 3 (CTO-A2): post-refactor import regression guards.
+
+    D1 relocates _resolve_select_tag/_resolve_multi_select_tags to ingest.py.
+    lint.py:33 imports _resolve_select_tag from remember.py — it must still work
+    post-refactor (remember.py re-exports it). _resolve_multi_select_tags must be
+    importable from ingest.py (it doesn't exist yet → RED now).
+    """
+
+    def test_resolve_multi_select_tags_importable_from_ingest(self):
+        """#336 CTO-A2: _resolve_multi_select_tags must be importable from ingest.py."""
+        from anytype_llm_wiki.wiki.ingest import _resolve_multi_select_tags  # noqa: F401
+        assert callable(_resolve_multi_select_tags), (
+            "_resolve_multi_select_tags must be callable"
+        )
+
+    def test_resolve_select_tag_still_importable_from_remember(self):
+        """#336 CTO-A2: _resolve_select_tag must still be importable from remember.py (re-export)."""
+        from anytype_llm_wiki.wiki.remember import _resolve_select_tag  # noqa: F401
+        assert callable(_resolve_select_tag), (
+            "_resolve_select_tag must be callable from remember.py (re-export post-D1)"
+        )
+
+    def test_lint_module_imports_cleanly(self):
+        """#336 CTO-A2: import anytype_llm_wiki.wiki.lint must succeed post-refactor."""
+        import anytype_llm_wiki.wiki.lint  # noqa: F401

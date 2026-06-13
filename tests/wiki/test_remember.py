@@ -3267,3 +3267,403 @@ class TestLiveWikiRemember:
         assert top_cf == per_obj_cf_sum, (
             f"conflicts_flagged must be sum of per-object; top={top_cf}, sum={per_obj_cf_sum}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-P3: domain_tags threaded into meta (bug fix at remember.py:336)
+# ---------------------------------------------------------------------------
+
+
+class TestRememberDomainTagsInMeta:
+    """#336 AC-P3: domain_tags passed to wiki_remember must be in the meta dict
+    passed to worklog.begin (bug fix: domain_tags was NOT in meta before #336).
+    """
+
+    def test_remember_domain_tags_in_meta(self, monkeypatch, tmp_path):
+        """#336 AC-P3: wiki_remember(..., domain_tags=['ai', 'ml']) → meta['domain_tags'] == ['ai','ml']
+        at the worklog.begin call site, AND the value survives JSON round-trip.
+
+        SF7: assert against the REAL seam (worklog.begin meta), not _apply_batch,
+        so JSON serialization is exercised.
+        """
+        from anytype_llm_wiki.wiki import worklog
+        from anytype_llm_wiki.wiki.remember import wiki_remember
+
+        captured = {}
+
+        original_begin = worklog.begin
+
+        def spy_begin(space_id, subjects, meta=None):
+            captured["meta"] = meta
+            # Call the real begin so the rest of the pipeline can continue
+            try:
+                original_begin(space_id, subjects, meta=meta)
+            except Exception:
+                pass  # ignore worklog errors in this test
+
+        monkeypatch.setattr(worklog, "begin", spy_begin)
+
+        # Stub extraction to return one entity so the pipeline produces subjects
+        import anytype_llm_wiki.wiki.remember as _rem_mod
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+        from unittest.mock import MagicMock
+
+        # Bypass domain taxonomy validation — both the ingest source and the remember import
+        monkeypatch.setattr(
+            _ingest_mod, "_domain_taxonomy", lambda client, space_id: {"ai", "ml"}, raising=False
+        )
+        monkeypatch.setattr(
+            _rem_mod, "_domain_taxonomy", lambda client, space_id: {"ai", "ml"}, raising=False
+        )
+
+        mock_extract = MagicMock(return_value={
+            "entities": [{"name": "TestEntity", "facts": "TestEntity is important."}],
+            "concepts": [],
+        })
+        mock_consolidate = MagicMock(return_value={
+            "consolidated_text": "TestEntity is important.", "changed": False,
+            "fact_actions": [], "conflicts": [],
+        })
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+
+        monkeypatch.setattr(_rem_mod, "extract", mock_extract, raising=False)
+        monkeypatch.setattr(_rem_mod, "consolidate", mock_consolidate, raising=False)
+        monkeypatch.setattr(_rem_mod, "space_ingest_lock", mock_lock, raising=False)
+        monkeypatch.setattr(
+            _rem_mod, "_maybe_reindex", lambda space_id, result: None, raising=False
+        )
+
+        # Patch ALDEIA_DIR for patch-decision check
+        import os as _os
+        aldeia_dir = _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+            ".aldeia",
+            "140-wiki-library-module-port-llm-wiki-pattern-onto-any",
+        )
+        monkeypatch.setenv("ALDEIA_DIR", aldeia_dir)
+
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post(f"/v1/spaces/{FAKE_SPACE_ID}/search").mock(
+                return_value=httpx.Response(200, json=_empty_search_response())
+            )
+            router.post(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                return_value=httpx.Response(201, json=_create_object_response())
+            )
+
+            wiki_remember(
+                space_id=FAKE_SPACE_ID,
+                knowledge="TestEntity is important.",
+                domain_tags=["ai", "ml"],
+            )
+
+        assert "meta" in captured, (
+            "worklog.begin must have been called with meta kwarg; captured nothing. "
+            "Likely domain_tags is not threaded into meta (the AC-P3 bug)."
+        )
+        meta = captured["meta"]
+        assert "domain_tags" in meta, (
+            f"meta must contain 'domain_tags' key (bug fix: was missing before #336). "
+            f"meta keys: {list(meta.keys())}"
+        )
+        assert meta["domain_tags"] == ["ai", "ml"], (
+            f"meta['domain_tags'] must be ['ai','ml']; got {meta['domain_tags']!r}"
+        )
+
+        # JSON round-trip: worklog serializes meta as JSON; list[str] must survive
+        import json as _json
+        rt = _json.loads(_json.dumps(meta))
+        assert rt["domain_tags"] == ["ai", "ml"], (
+            f"domain_tags must survive JSON round-trip; got {rt['domain_tags']!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-P4, AC-P5: domain_tags written on entity create/update (remember path)
+# ---------------------------------------------------------------------------
+
+
+class TestRememberWritesDomainTags:
+    """#336 AC-P4, AC-P5: _apply_batch writes wiki_domain_tags on create and update."""
+
+    def test_remember_writes_domain_tags_on_create(self, monkeypatch, tmp_path):
+        """#336 AC-P4: wiki_remember with domain_tags → create_object props contain wiki_domain_tags.
+
+        Monkeypatches _resolve_multi_select_tags to return deterministic ids.
+        Also monkeypatches _domain_taxonomy so domain_hint validation passes
+        (list_properties/list_tags aren't mocked via respx here).
+        """
+        import anytype_llm_wiki.wiki.remember as _rem_mod
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+        from unittest.mock import MagicMock
+
+        # Bypass domain taxonomy validation — both the ingest copy and the remember import
+        monkeypatch.setattr(
+            _ingest_mod, "_domain_taxonomy", lambda client, space_id: {"ai", "ml"}, raising=False
+        )
+        monkeypatch.setattr(
+            _rem_mod, "_domain_taxonomy", lambda client, space_id: {"ai", "ml"}, raising=False
+        )
+
+        # Resolver stub
+        def fake_resolve_multi(client, space_id, property_key, tag_names):
+            return (["tag-id-1", "tag-id-2"], False)
+
+        monkeypatch.setattr(
+            _ingest_mod, "_resolve_multi_select_tags", fake_resolve_multi, raising=False
+        )
+        # remember.py imports from ingest — patch both to be safe
+        monkeypatch.setattr(
+            _rem_mod, "_resolve_multi_select_tags", fake_resolve_multi, raising=False
+        )
+
+        captured_create_props = []
+
+        mock_extract = MagicMock(return_value={
+            "entities": [{"name": "TestEntity", "facts": "TestEntity is important."}],
+            "concepts": [],
+        })
+        mock_consolidate = MagicMock(return_value={
+            "consolidated_text": "TestEntity is important.", "changed": False,
+            "fact_actions": [], "conflicts": [],
+        })
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+
+        monkeypatch.setattr(_rem_mod, "extract", mock_extract, raising=False)
+        monkeypatch.setattr(_rem_mod, "consolidate", mock_consolidate, raising=False)
+        monkeypatch.setattr(_rem_mod, "space_ingest_lock", mock_lock, raising=False)
+        monkeypatch.setattr(
+            _rem_mod, "_maybe_reindex", lambda space_id, result: None, raising=False
+        )
+
+        import os as _os
+        aldeia_dir = _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+            ".aldeia",
+            "140-wiki-library-module-port-llm-wiki-pattern-onto-any",
+        )
+        monkeypatch.setenv("ALDEIA_DIR", aldeia_dir)
+
+        def capture_create(request, **kwargs):
+            import json as _json
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                payload = {}
+            if payload.get("type_key") in ("wiki_entity", "wiki_concept"):
+                captured_create_props.append(payload.get("properties", []))
+            return httpx.Response(201, json=_create_object_response())
+
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post(f"/v1/spaces/{FAKE_SPACE_ID}/search").mock(
+                return_value=httpx.Response(200, json=_empty_search_response())
+            )
+            router.post(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                side_effect=capture_create
+            )
+
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            wiki_remember(
+                space_id=FAKE_SPACE_ID,
+                knowledge="TestEntity is important.",
+                domain_tags=["ai", "ml"],
+            )
+
+        assert captured_create_props, (
+            "Expected at least one entity/concept create_object call. "
+            "Check that _domain_taxonomy is patched and extract/consolidate stubs are set."
+        )
+        found = any(
+            any(
+                isinstance(p, dict) and p.get("key") == "wiki_domain_tags"
+                and isinstance(p.get("multi_select"), list)
+                and len(p.get("multi_select")) > 0
+                for p in props
+            )
+            for props in captured_create_props
+        )
+        assert found, (
+            f"Expected wiki_domain_tags multi_select in create_object props (#336 AC-P4). "
+            f"Captured: {captured_create_props}"
+        )
+
+    def test_remember_writes_domain_tags_on_update(self, monkeypatch, tmp_path):
+        """#336 AC-P5: wiki_remember with domain_tags on existing entity →
+        update_object (PATCH) props contain wiki_domain_tags (OD-C SET semantics).
+        """
+        import anytype_llm_wiki.wiki.remember as _rem_mod
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+        from unittest.mock import MagicMock
+
+        # Bypass domain taxonomy validation
+        monkeypatch.setattr(
+            _ingest_mod, "_domain_taxonomy", lambda client, space_id: {"ai"}, raising=False
+        )
+        monkeypatch.setattr(
+            _rem_mod, "_domain_taxonomy", lambda client, space_id: {"ai"}, raising=False
+        )
+
+        def fake_resolve_multi(client, space_id, property_key, tag_names):
+            return (["tag-id-1"], False)
+
+        monkeypatch.setattr(
+            _ingest_mod, "_resolve_multi_select_tags", fake_resolve_multi, raising=False
+        )
+        monkeypatch.setattr(
+            _rem_mod, "_resolve_multi_select_tags", fake_resolve_multi, raising=False
+        )
+
+        captured_update_props = []
+
+        mock_extract = MagicMock(return_value={
+            "entities": [{"name": "TestEntity", "facts": "Updated facts."}],
+            "concepts": [],
+        })
+        mock_consolidate = MagicMock(return_value={
+            "consolidated_text": "Updated facts.", "changed": True,
+            "fact_actions": [{"fact": "Updated facts.", "action": "add", "supersedes": None}],
+            "conflicts": [],
+        })
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+
+        monkeypatch.setattr(_rem_mod, "extract", mock_extract, raising=False)
+        monkeypatch.setattr(_rem_mod, "consolidate", mock_consolidate, raising=False)
+        monkeypatch.setattr(_rem_mod, "space_ingest_lock", mock_lock, raising=False)
+        monkeypatch.setattr(
+            _rem_mod, "_maybe_reindex", lambda space_id, result: None, raising=False
+        )
+
+        import os as _os
+        aldeia_dir = _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+            ".aldeia",
+            "140-wiki-library-module-port-llm-wiki-pattern-onto-any",
+        )
+        monkeypatch.setenv("ALDEIA_DIR", aldeia_dir)
+
+        def capture_patch(request, **kwargs):
+            import json as _json
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                payload = {}
+            captured_update_props.append(payload.get("properties", []))
+            return httpx.Response(200, json={"object": {"id": "entity-001"}})
+
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            router.post(f"/v1/spaces/{FAKE_SPACE_ID}/search").mock(
+                return_value=httpx.Response(200, json=_single_entity_response())
+            )
+            router.post(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            router.patch(
+                f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001"
+            ).mock(side_effect=capture_patch)
+
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            wiki_remember(
+                space_id=FAKE_SPACE_ID,
+                knowledge="Updated facts about TestEntity.",
+                domain_tags=["ai"],
+            )
+
+        assert captured_update_props, (
+            "Expected at least one entity/concept update_object (PATCH) call. "
+            "Check that _domain_taxonomy is patched and consolidate returns changed=True."
+        )
+        found = any(
+            any(
+                isinstance(p, dict) and p.get("key") == "wiki_domain_tags"
+                and isinstance(p.get("multi_select"), list)
+                and len(p.get("multi_select")) > 0
+                for p in props
+            )
+            for props in captured_update_props
+        )
+        assert found, (
+            f"Expected wiki_domain_tags multi_select in update_object (PATCH) props (#336 AC-P5, OD-C SET). "
+            f"Captured: {captured_update_props}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-S-AGENT: agent source with no note produces a chunkable excerpt (SF2)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentSourceNoNoteIsChunkable:
+    """#336 AC-S-AGENT: _create_remember_source with empty source_note writes a non-empty
+    stub excerpt (the name) so the source produces >= 1 chunk (D4b).
+    """
+
+    def test_remember_agent_source_no_note_is_chunkable(self, monkeypatch, tmp_path):
+        """#336 AC-S-AGENT: when source_note=None, _create_remember_source must write a
+        non-empty wiki_excerpt (stub = source name) so chunk_object produces >= 1 chunk.
+
+        Arrange: call _create_remember_source with source_note=None.
+        Assert (write): the wiki_excerpt prop value is NON-EMPTY.
+        Assert (chunk): chunk_object on the written source shape produces >= 1 chunk.
+        """
+        from anytype_llm_wiki.wiki.remember import _create_remember_source
+        from anytype_llm_wiki.chunker import chunk_object
+
+        captured_excerpt = {"value": None}
+        captured_name = {"value": None}
+
+        class FakeClient:
+            def create_object(self, space_id, type_key, name, properties):
+                # Capture the excerpt that was written
+                for p in properties:
+                    if isinstance(p, dict) and p.get("key") == "wiki_excerpt":
+                        captured_excerpt["value"] = p.get("text")
+                captured_name["value"] = name
+                return {"id": "source-agent-001"}
+
+        result = {}
+        _create_remember_source(
+            client=FakeClient(),
+            space_id="sp-1",
+            source_note=None,   # no note → must produce non-empty stub excerpt
+            result=result,
+            source_type_tag_id=None,
+        )
+
+        # (1) The written excerpt must be non-empty (D4b — old code wrote "")
+        assert captured_excerpt["value"], (
+            f"_create_remember_source must write a NON-EMPTY wiki_excerpt when source_note=None. "
+            f"Got excerpt={captured_excerpt['value']!r}. "
+            f"This is the D4b/SF2 fix — the stub should be the source name."
+        )
+
+        # (2) chunk_object on the written source shape must produce >= 1 chunk
+        source_obj = {
+            "id": "source-agent-001",
+            "space_id": "sp-1",
+            "name": captured_name["value"] or "agent-source",
+            "type": {"key": "wiki_source"},
+            "markdown": "",
+            "properties": [
+                {"key": "wiki_excerpt", "text": captured_excerpt["value"]},
+            ],
+        }
+        chunks = chunk_object(source_obj)
+        assert chunks, (
+            f"chunk_object on the agent source (no note) must produce >= 1 chunk "
+            f"(so source_type=['agent'] filter is not inert). "
+            f"Excerpt written: {captured_excerpt['value']!r}"
+        )

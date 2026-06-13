@@ -156,13 +156,16 @@ class TestWikiTextPropertyKeysConstant:
         from anytype_llm_wiki.chunker import WIKI_TEXT_PROPERTY_KEYS
         assert isinstance(WIKI_TEXT_PROPERTY_KEYS, frozenset)
 
-    def test_wiki_text_property_keys_has_eight_entries(self):
-        """Allowlist must contain exactly 8 keys (Decision 1 §4.1)."""
+    def test_wiki_text_property_keys_has_nine_entries(self):
+        """#336: Allowlist must contain exactly 9 keys — wiki_excerpt added for wiki_source chunking."""
         from anytype_llm_wiki.chunker import WIKI_TEXT_PROPERTY_KEYS
-        assert len(WIKI_TEXT_PROPERTY_KEYS) == 8
+        assert len(WIKI_TEXT_PROPERTY_KEYS) == 9, (
+            f"Expected 9 entries (wiki_excerpt added in #336); got {len(WIKI_TEXT_PROPERTY_KEYS)}: "
+            f"{sorted(WIKI_TEXT_PROPERTY_KEYS)}"
+        )
 
     def test_wiki_text_property_keys_exact_set(self):
-        """Allowlist must contain the 8 specified keys and no others (Decision 1 §4.1)."""
+        """#336: Allowlist must contain the 9 specified keys including wiki_excerpt."""
         from anytype_llm_wiki.chunker import WIKI_TEXT_PROPERTY_KEYS
         expected = frozenset({
             "wiki_facts",
@@ -173,13 +176,18 @@ class TestWikiTextPropertyKeysConstant:
             "wiki_verdict",
             "wiki_question",
             "wiki_answer",
+            "wiki_excerpt",   # NEW in #336: enables wiki_source chunking
         })
-        assert WIKI_TEXT_PROPERTY_KEYS == expected
+        assert WIKI_TEXT_PROPERTY_KEYS == expected, (
+            f"Expected exact set {expected}; got {WIKI_TEXT_PROPERTY_KEYS}"
+        )
 
-    def test_wiki_excerpt_not_in_allowlist(self):
-        """wiki_excerpt (wiki_source) must NOT be in WIKI_TEXT_PROPERTY_KEYS (AC-P6)."""
+    def test_wiki_excerpt_in_allowlist(self):
+        """#336 AC-S1: wiki_excerpt MUST be in WIKI_TEXT_PROPERTY_KEYS (invert of old AC-P6)."""
         from anytype_llm_wiki.chunker import WIKI_TEXT_PROPERTY_KEYS
-        assert "wiki_excerpt" not in WIKI_TEXT_PROPERTY_KEYS
+        assert "wiki_excerpt" in WIKI_TEXT_PROPERTY_KEYS, (
+            "wiki_excerpt must be in WIKI_TEXT_PROPERTY_KEYS so wiki_source objects produce chunks"
+        )
 
     def test_wiki_property_heading_exists(self):
         """WIKI_PROPERTY_HEADING must be importable from chunker (Decision 1 §4.1)."""
@@ -309,23 +317,88 @@ class TestBodyPresentDedup:
             )
 
 
-class TestWikiExcerptExcluded:
-    """AC-P6: wiki_source with wiki_excerpt populated and no body → 0 property chunks."""
+class TestWikiSourceChunksViaWikiExcerpt:
+    """#336 AC-S1: wiki_source with wiki_excerpt produces chunks (invert of old TestWikiExcerptExcluded)."""
 
-    def test_wiki_excerpt_excluded(self):
-        """AC-P6: wiki_source obj with wiki_excerpt populated, no body → 0 chunks.
+    def test_wiki_source_chunks_via_wiki_excerpt(self):
+        """#336 AC-S1: wiki_source obj with wiki_excerpt populated → >=1 chunk with heading 'Excerpt'.
 
-        wiki_excerpt is NOT in WIKI_TEXT_PROPERTY_KEYS — it must be excluded.
-        Covers: §9.2 test_wiki_excerpt_excluded.
+        wiki_excerpt IS in WIKI_TEXT_PROPERTY_KEYS after #336.
+        Replaces the old test_wiki_excerpt_excluded (which asserted 0 chunks).
         """
-        obj = _make_wiki_obj(
-            properties=[{"key": "wiki_excerpt", "text": "This is an excerpt from the source."}],
-            markdown="",
-            type_key="wiki_source",
-        )
+        obj = {
+            "id": "src-1", "space_id": "sp-1", "name": "Some Source",
+            "type": {"key": "wiki_source"}, "markdown": "",
+            "properties": [
+                {"key": "wiki_excerpt", "text": "An excerpt from the original document."},
+            ],
+        }
         chunks = chunk_object(obj)
-        assert chunks == [], (
-            f"Expected 0 chunks for wiki_excerpt property (excluded from allowlist), got {len(chunks)}"
+        assert chunks, "wiki_source with wiki_excerpt must produce at least one chunk (#336 AC-S1)"
+        assert any(c.get("heading") == "Excerpt" for c in chunks), (
+            f"At least one chunk must have heading='Excerpt' (pins WIKI_PROPERTY_HEADING['wiki_excerpt']). "
+            f"Got headings: {[c.get('heading') for c in chunks]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — New AC tests for chunk payload carrying source_type and domain_tags
+# ---------------------------------------------------------------------------
+
+
+class TestChunkPayloadSourceTypeAndDomainTags:
+    """#336 AC-S2, AC-S3, AC-S4: chunk_object extracts and injects source_type + domain_tags."""
+
+    def test_chunk_payload_carries_source_type(self):
+        """#336 AC-S2: wiki_source with wiki_source_type select property → all chunks carry source_type."""
+        obj = {
+            "id": "src-1", "space_id": "sp-1", "name": "S",
+            "type": {"key": "wiki_source"}, "markdown": "",
+            "properties": [
+                {"key": "wiki_excerpt", "text": "Some text."},
+                {"key": "wiki_source_type", "format": "select",
+                 "select": {"id": "bafy...", "key": "document", "name": "document"}},
+            ],
+        }
+        chunks = chunk_object(obj)
+        assert chunks, "Expected at least one chunk from wiki_excerpt"
+        assert all(c.get("source_type") == "document" for c in chunks), (
+            f"All chunks must carry source_type='document'. Got: {[c.get('source_type') for c in chunks]}"
+        )
+
+    def test_chunk_payload_carries_domain_tags(self):
+        """#336 AC-S3: entity with wiki_domain_tags multi_select → all chunks carry domain_tags list."""
+        obj = {
+            "id": "ent-1", "space_id": "sp-1", "name": "Neural Networks",
+            "type": {"key": "wiki_entity"}, "markdown": "# Overview\nTransformers.",
+            "properties": [
+                {"key": "wiki_domain_tags", "format": "multi_select",
+                 "multi_select": [
+                     {"id": "bafy1", "key": "ai", "name": "ai"},
+                     {"id": "bafy2", "key": "ml", "name": "ml"},
+                 ]},
+            ],
+        }
+        chunks = chunk_object(obj)
+        assert chunks, "Expected at least one chunk from markdown body"
+        assert all(c.get("domain_tags") == ["ai", "ml"] for c in chunks), (
+            f"All chunks must carry domain_tags=['ai','ml']. Got: {[c.get('domain_tags') for c in chunks]}"
+        )
+
+    def test_chunk_payload_no_source_type_when_absent(self):
+        """#336 AC-S4: entity with no wiki_source_type/wiki_domain_tags → fields ABSENT from chunks."""
+        obj = {
+            "id": "ent-1", "space_id": "sp-1", "name": "E",
+            "type": {"key": "wiki_entity"}, "markdown": "# H\nBody.",
+            "properties": [],
+        }
+        chunks = chunk_object(obj)
+        assert chunks, "Expected at least one chunk from markdown body"
+        assert all("source_type" not in c for c in chunks), (
+            "source_type must be ABSENT (not None/null) when property is missing from object"
+        )
+        assert all("domain_tags" not in c for c in chunks), (
+            "domain_tags must be ABSENT (not None/null) when property is missing from object"
         )
 
 

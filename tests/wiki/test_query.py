@@ -3394,3 +3394,285 @@ class TestCrossTierDateFilterEquivalence:
             f"Tier-2 lower bound must be gte (inclusive), not gt (exclusive). "
             f"Got gt={gt_val!r}. This would disagree with Tier-1 on the edge case."
         )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-T1-DT: Tier-1 domain_tags predicate
+# ---------------------------------------------------------------------------
+
+
+class TestTier1DomainTagsPredicate:
+    """#336 AC-T1-DT: _passes_domain_tags_filter implements ANY-overlap correctly."""
+
+    def test_tier1_domain_tags_predicate(self):
+        """#336 AC-T1-DT: _passes_domain_tags_filter with hydrated multi_select shape."""
+        from anytype_llm_wiki.wiki.query import _passes_domain_tags_filter
+
+        obj_ai_ml = {"properties": [
+            {"key": "wiki_domain_tags", "format": "multi_select",
+             "multi_select": [{"name": "ai"}, {"name": "ml"}]}
+        ]}
+        obj_no_tags = {"properties": []}
+
+        # ANY-overlap: "ai" matches (ai in {ai, ml})
+        assert _passes_domain_tags_filter(obj_ai_ml, ["ai"]), (
+            "Object with domain_tags=['ai','ml'] must pass filter=['ai'] (ANY-overlap)"
+        )
+        # ANY-overlap: "ml" overlaps (filter has 'ml' and 'nlp'; obj has 'ml')
+        assert _passes_domain_tags_filter(obj_ai_ml, ["ml", "nlp"]), (
+            "Object with domain_tags=['ai','ml'] must pass filter=['ml','nlp'] (ANY-overlap on 'ml')"
+        )
+        # No overlap: filter=['nlp'], obj has ['ai','ml']
+        assert not _passes_domain_tags_filter(obj_ai_ml, ["nlp"]), (
+            "Object with domain_tags=['ai','ml'] must NOT pass filter=['nlp'] (no overlap)"
+        )
+        # Missing property → no match when filter is non-empty
+        assert not _passes_domain_tags_filter(obj_no_tags, ["ai"]), (
+            "Object without wiki_domain_tags must NOT pass a non-empty domain_tags filter"
+        )
+        # Empty filter → always True (no filter applied)
+        assert _passes_domain_tags_filter(obj_no_tags, []), (
+            "Empty domain_tags filter must always return True"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-T1-ST: Tier-1 source_type predicate
+# ---------------------------------------------------------------------------
+
+
+class TestTier1SourceTypePredicate:
+    """#336 AC-T1-ST: _passes_source_type_filter reads hydrated select.name correctly."""
+
+    def test_tier1_source_type_predicate(self):
+        """#336 AC-T1-ST: _passes_source_type_filter with hydrated select shape."""
+        from anytype_llm_wiki.wiki.query import _passes_source_type_filter
+
+        obj_doc = {"properties": [
+            {"key": "wiki_source_type", "format": "select",
+             "select": {"name": "document"}}
+        ]}
+        obj_no_st = {"properties": []}
+
+        assert _passes_source_type_filter(obj_doc, ["document"]), (
+            "Object with wiki_source_type='document' must pass filter=['document']"
+        )
+        assert not _passes_source_type_filter(obj_doc, ["conversation"]), (
+            "Object with wiki_source_type='document' must NOT pass filter=['conversation']"
+        )
+        # Missing property → no match when filter is non-empty
+        assert not _passes_source_type_filter(obj_no_st, ["document"]), (
+            "Object without wiki_source_type must NOT pass a non-empty source_type filter"
+        )
+        # Empty filter → always True (no filter applied)
+        assert _passes_source_type_filter(obj_no_st, []), (
+            "Empty source_type filter must always return True"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-V-WQ: Invalid domain_tags returns error dict from wiki_query
+# ---------------------------------------------------------------------------
+
+
+class TestWikiQueryValidation336:
+    """#336 AC-V-WQ: wiki_query validates source_type/domain_tags at entry."""
+
+    def test_wiki_query_invalid_domain_tags_returns_error_dict(self):
+        """#336 AC-V-WQ: domain_tags with empty string → error dict, never raises."""
+        from anytype_llm_wiki.wiki.query import wiki_query
+
+        out = wiki_query(question="q", space_id="sp-1", domain_tags=[""])
+        assert isinstance(out, dict), "wiki_query must return a dict on validation error"
+        assert out.get("status") == "error", (
+            f"Expected status='error' for invalid domain_tags; got {out.get('status')!r}"
+        )
+        assert out.get("error_category") == "config_error", (
+            f"Expected error_category='config_error'; got {out.get('error_category')!r}"
+        )
+
+    def test_wiki_query_invalid_source_type_returns_error_dict(self):
+        """#336 AC-V-WQ (source_type variant): empty string in source_type → error dict."""
+        from anytype_llm_wiki.wiki.query import wiki_query
+
+        out = wiki_query(question="q", space_id="sp-1", source_type=[""])
+        assert isinstance(out, dict), "wiki_query must return a dict on validation error"
+        assert out.get("status") == "error", (
+            f"Expected status='error' for invalid source_type; got {out.get('status')!r}"
+        )
+        assert out.get("error_category") == "config_error", (
+            f"Expected error_category='config_error'; got {out.get('error_category')!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-V-ZERO (wiki_query side): unknown filter value → no raise
+# ---------------------------------------------------------------------------
+
+
+class TestWikiQueryUnknownFilterNoRaise:
+    """#336 AC-V-ZERO: unknown but structurally-valid filter value → non-error result, no raise."""
+
+    @respx.mock
+    def test_unknown_domain_tag_no_raise_wiki_query(self, monkeypatch):
+        """#336 AC-V-ZERO: domain_tags=['nonexistent-xyz'] passes validation,
+        returns status != 'error' (zero matches, not a structural error).
+        """
+        schema_obj = _make_schema_ok_response()["data"][0]
+        list_resp = {"data": [schema_obj], "pagination": {"has_more": False}}
+
+        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-001")
+        ))
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "No results.")
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        # Must NOT raise (validation passes since it's a valid string)
+        try:
+            result = wiki_query(
+                question="q", space_id=FAKE_SPACE_ID,
+                domain_tags=["nonexistent-domain-xyz"]
+            )
+        except Exception as exc:
+            raise AssertionError(
+                f"wiki_query must not raise for unknown (but valid) domain_tags; "
+                f"got {type(exc).__name__}: {exc}"
+            ) from exc
+
+        assert result.get("status") != "error" or "nonexistent" not in str(result.get("error", "")), (
+            "Unknown domain_tags must not produce status='error' "
+            "(it's a valid string, just zero matches)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-V-WARN: Out-of-taxonomy filter value emits schema_warning (D11/SF9)
+# ---------------------------------------------------------------------------
+
+
+class TestWikiQueryOutOfTaxonomyWarn:
+    """#336 AC-V-WARN: out-of-taxonomy domain_tags value → schema_warnings entry (not error)."""
+
+    @pytest.mark.xfail(
+        reason=(
+            "#336 D11/SF9: the out-of-taxonomy warning calls _domain_taxonomy() from wiki_query "
+            "which requires a live WikiClient. This may be deferred by the implementer if the "
+            "taxonomy fetch adds meaningful latency on the hot query path. "
+            "AC-V-ZERO (structural guarantee) is mandatory; AC-V-WARN is conditional on D11 "
+            "not being deferred. xfail allows the suite to report XPASS when implemented."
+        ),
+        strict=False,
+    )
+    @respx.mock
+    def test_wiki_query_out_of_taxonomy_filter_warns(self, monkeypatch):
+        """#336 AC-V-WARN: wiki_query with out-of-taxonomy domain_tag → schema_warnings entry.
+
+        Arrange: live client whose _domain_taxonomy returns {'ai', 'ml'}.
+        Act: wiki_query(..., domain_tags=['ai', 'typo-tag'])
+        Assert: result['schema_warnings'] mentions 'typo-tag' (not in taxonomy);
+                status is NOT 'error' (warning-only, never raises).
+        """
+        schema_obj = _make_schema_ok_response()["data"][0]
+        list_resp = {"data": [schema_obj], "pagination": {"has_more": False}}
+
+        # Mock the taxonomy endpoint
+        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-001")
+        ))
+
+        # Stub the taxonomy so it returns known tags
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(
+            _ingest_mod, "_domain_taxonomy",
+            lambda client, space_id: {"ai", "ml"},
+            raising=False,
+        )
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "answer")
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(
+            question="q", space_id=FAKE_SPACE_ID,
+            domain_tags=["ai", "typo-tag"],  # "typo-tag" not in taxonomy
+        )
+
+        assert result.get("status") != "error", (
+            f"Out-of-taxonomy domain_tag must not produce status='error'; got {result.get('status')!r}"
+        )
+        schema_warnings = result.get("schema_warnings", [])
+        assert any("typo-tag" in str(w) for w in schema_warnings), (
+            f"Expected schema_warnings to mention 'typo-tag'; got schema_warnings={schema_warnings}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-T1-ST-NOOP: source_type on wiki_query is a documented no-op
+# ---------------------------------------------------------------------------
+
+
+class TestWikiQuerySourceTypeNoop:
+    """#336 AC-T1-ST-NOOP: source_type param on wiki_query has no effect (SG3/SF10)."""
+
+    @respx.mock
+    def test_wiki_query_source_type_is_noop(self, monkeypatch):
+        """#336 AC-T1-ST-NOOP: entity results identical with and without source_type.
+
+        wiki_source objects are never in _WIKI_TYPE_KEYS scope, so source_type
+        filtering in wiki_query affects nothing. This test pins that no-op so a
+        future reader cannot silently 'fix' it into surprising behavior (SG3).
+        """
+        entity_id = "entity-noop-001"
+        entity = _make_wiki_entity(entity_id, "NoopEntity")
+        schema_obj = _make_schema_ok_response()["data"][0]
+        list_resp = {"data": [schema_obj, entity], "pagination": {"has_more": False}}
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "answer text")
+
+        respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+        respx.get(
+            f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/objects/{entity_id}"
+        ).mock(return_value=httpx.Response(
+            200, json=_make_get_object_response(entity_id, "NoopEntity")
+        ))
+        respx.post().mock(return_value=httpx.Response(
+            201, json=_make_create_object_response("log-001")
+        ))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+
+        # Call without source_type
+        result_plain = wiki_query(
+            question="test noop question", space_id=FAKE_SPACE_ID
+        )
+        # Call with source_type=["document"] — must produce identical entity results
+        result_st = wiki_query(
+            question="test noop question", space_id=FAKE_SPACE_ID,
+            source_type=["document"],
+        )
+
+        # Both must accept the call without error
+        assert result_plain.get("status") not in ("error",), (
+            f"Plain wiki_query must not error; got {result_plain.get('status')!r}"
+        )
+        assert result_st.get("status") not in ("error",) or (
+            # Acceptable: error dict from structural validation — but only if source_type=["document"]
+            # triggers a config_error, which it should NOT for a valid non-empty string
+            result_st.get("error_category") != "config_error"
+        ), (
+            f"wiki_query with source_type=['document'] must not config_error; got {result_st}"
+        )
+
+        # The key assertion: source_type must NOT filter out the entity/concept results
+        # (wiki_source objects are never in scope for wiki_query).
+        # Both results must include the same entity.
+        plain_ids = {s.get("object_id") for s in result_plain.get("sources_consulted", [])}
+        st_ids = {s.get("object_id") for s in result_st.get("sources_consulted", [])}
+        assert plain_ids == st_ids, (
+            f"source_type on wiki_query is a no-op — entity/concept results must be identical. "
+            f"Plain: {plain_ids}, with source_type: {st_ids}"
+        )
