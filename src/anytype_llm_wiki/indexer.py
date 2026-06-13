@@ -1,7 +1,11 @@
 """Incremental indexer: Anytype → chunks → embeddings → Qdrant."""
 
+import fcntl
 import json
+import os
+import tempfile
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from qdrant_client import QdrantClient
@@ -152,7 +156,25 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     config.INDEX_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    config.INDEX_STATE_FILE.write_text(json.dumps(state, indent=2))
+    # Atomic write: serialize to a temp file in the same directory, fsync, then
+    # os.replace() (atomic rename on POSIX). A crash mid-write can no longer leave
+    # a truncated/corrupt state.json that would make every future _load_state raise
+    # on json.loads and block all reindexing until the file is deleted by hand.
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(config.INDEX_STATE_DIR), prefix=".state-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(state, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, config.INDEX_STATE_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _get_last_modified(obj: dict) -> str | None:
@@ -163,7 +185,53 @@ def _get_last_modified(obj: dict) -> str | None:
     return None
 
 
+@contextmanager
+def _reindex_lock():
+    """Non-blocking advisory lock serializing reindex runs on this host.
+
+    Every reindex path — the scoped auto-reindex fired after each
+    wiki_ingest/wiki_remember and the full unscoped cron reindex — reads and
+    rewrites the shared state.json, so two concurrent runs can race that write
+    (lost update). The lock file lives beside the state file. Yields True when
+    acquired, False when another reindex already holds it (the caller skips; the
+    in-flight or next reindex re-scans and self-heals, so nothing is permanently
+    missed).
+    """
+    config.INDEX_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = config.INDEX_STATE_DIR / "reindex.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
 def reindex(space_id: str | None = None) -> dict:
+    """Run an incremental reindex, serialized by a host-local advisory lock.
+
+    Skips (returns zeroed stats with ``skipped=True``) when another reindex is
+    already running rather than racing the shared state.json write.
+    """
+    with _reindex_lock() as acquired:
+        if not acquired:
+            return {
+                "spaces": 0,
+                "objects_checked": 0,
+                "objects_indexed": 0,
+                "objects_removed": 0,
+                "chunks": 0,
+                "skipped": True,
+                "reason": "reindex_in_progress",
+            }
+        return _run_reindex(space_id)
+
+
+def _run_reindex(space_id: str | None = None) -> dict:
     """Run incremental reindex. Returns stats."""
     client = _qdrant()
     _ensure_collection(client)
