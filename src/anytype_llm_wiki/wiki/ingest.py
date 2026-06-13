@@ -330,6 +330,71 @@ def _resolve_wiki_action_tag(
         return None, True
 
 
+def _resolve_select_tag(
+    client: WikiClient, space_id: str, property_key: str, tag_name: str
+) -> tuple[str | None, bool]:
+    """Resolve a single select tag id by name under ``property_key``.
+
+    Returns ``(id, degraded)``. ``degraded=True`` when the registry is
+    unreachable. A missing tag returns ``(None, False)`` (no-op skip). Never
+    aborts. Home module for the resolver family (D1) — ``remember.py`` re-exports
+    it so ``lint.py``'s ``from .remember import _resolve_select_tag`` keeps
+    resolving, and ``_create_source`` here can call it without importing from
+    ``remember.py``.
+    """
+    try:
+        props = client.list_properties(space_id)
+        prop_id = None
+        for p in props:
+            if isinstance(p, dict) and p.get("key") == property_key:
+                prop_id = p.get("id")
+                break
+        # Even if the property id is not found, attempt a tags read so a raising
+        # tags-mock still exercises the degraded branch (SF12 symmetry).
+        tags = client.list_tags(space_id, prop_id or property_key)
+        for t in tags:
+            if isinstance(t, dict) and t.get("name") == tag_name:
+                return t.get("id"), False
+        return None, False
+    except httpx.HTTPError:
+        return None, True
+    except Exception:  # noqa: BLE001 — any tag-resolution failure degrades, never aborts
+        return None, True
+
+
+def _resolve_multi_select_tags(
+    client: WikiClient,
+    space_id: str,
+    property_key: str,
+    tag_names: list[str],
+) -> tuple[list[str], bool]:
+    """Resolve multi_select tag names to IDs. Returns (ids, degraded).
+
+    degraded=True when the registry is unreachable. Silently skips unknown
+    names (no-op, matching _resolve_select_tag / _resolve_wiki_action_tag
+    convention). Never aborts.
+    """
+    try:
+        props = client.list_properties(space_id)
+        prop_id = None
+        for p in props:
+            if isinstance(p, dict) and p.get("key") == property_key:
+                prop_id = p.get("id")
+                break
+        tags = client.list_tags(space_id, prop_id or property_key)
+        name_to_id = {
+            t.get("name"): t.get("id")
+            for t in tags
+            if isinstance(t, dict) and t.get("name")
+        }
+        ids = [name_to_id[n] for n in tag_names if n in name_to_id]
+        return ids, False
+    except httpx.HTTPError:
+        return [], True
+    except Exception:  # noqa: BLE001 — any tag-resolution failure degrades, never aborts
+        return [], True
+
+
 def _write_wikilog(
     client: WikiClient,
     space_id: str,
@@ -798,6 +863,21 @@ def _run_ingest(
         name_to_id: dict[str, str] = {}
         kind_by_id: dict[str, str] = {}
         contradiction_rollback_notes: list[str] = []
+
+        # #336 D2: resolve wiki_domain_tags ONCE per run (the tag registry is
+        # stable per run). The prop is appended to each candidate's per-iteration
+        # ``props`` list inside the loop (props is rebuilt every iteration).
+        # Source objects do NOT get wiki_domain_tags.
+        domain_tag_prop = None
+        if domain_hint:
+            tag_ids, dt_degraded = _resolve_multi_select_tags(
+                client, space_id, "wiki_domain_tags", [domain_hint]
+            )
+            if dt_degraded:
+                result["warnings"].append("domain_tags_resolution_degraded")
+            if tag_ids:
+                domain_tag_prop = {"key": "wiki_domain_tags", "multi_select": tag_ids}
+
         for cand in candidates:
             clean_name = sanitize_name(cand["name"])
             if clean_name is None:
@@ -813,6 +893,11 @@ def _run_ingest(
                 type_key = "wiki_entity"
                 type_label = "entity"
                 props = [{"key": "wiki_facts", "text": facts}]
+            # #336 D2: stamp wiki_domain_tags on this candidate (both create and
+            # update branches consume ``props`` below). Appended per-iteration
+            # because props is rebuilt each loop.
+            if domain_tag_prop is not None:
+                props.append(domain_tag_prop)
             try:
                 resolution = resolve_entity(
                     client, space_id, type_key, clean_name, candidate_facts=facts
@@ -940,6 +1025,18 @@ def _create_source(
         props.insert(0, {"key": "wiki_url", "url": source})
     else:
         props.insert(0, {"key": "wiki_file_path", "text": source})
+
+    # #336 D4: stamp wiki_source_type="document" on ingest-created sources so the
+    # source_type filter is live (degrade-not-abort). Appended to the SHARED props
+    # so BOTH the dedup-reuse update_object branch AND the create_object branch
+    # stamp it (SF4 / AC-S-REUSE).
+    st_tag_id, st_degraded = _resolve_select_tag(
+        client, space_id, "wiki_source_type", "document"
+    )
+    if st_degraded:
+        result["warnings"].append("source_type_resolution_degraded")
+    if st_tag_id:
+        props.append({"key": "wiki_source_type", "select": st_tag_id})
 
     # Source dedup (idempotent re-ingest): reuse an existing wiki_source for the
     # same url/file_path (matched on its source-derived name) rather than create
