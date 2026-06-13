@@ -13,12 +13,14 @@ MAX_CHUNK_CHARS = 1500  # ~375 tokens, well within bge-m3's 8192 token limit
 WIKI_TEXT_PROPERTY_KEYS = frozenset({
     "wiki_facts", "wiki_description", "wiki_definition", "wiki_open_questions",
     "wiki_dimensions", "wiki_verdict", "wiki_question", "wiki_answer",
+    "wiki_excerpt",  # NEW in #336: enables wiki_source objects to be chunked
 })
 WIKI_PROPERTY_HEADING = {
     "wiki_facts": "Facts", "wiki_description": "Description",
     "wiki_definition": "Definition", "wiki_open_questions": "Open Questions",
     "wiki_dimensions": "Dimensions", "wiki_verdict": "Verdict",
     "wiki_question": "Question", "wiki_answer": "Answer",
+    "wiki_excerpt": "Excerpt",  # NEW in #336
 }
 
 
@@ -45,6 +47,27 @@ def chunk_object(obj: dict) -> list[dict]:
             last_modified_date = prop.get("date")
             break
 
+    # Extract source_type (wiki_source_type select) and domain_tags
+    # (wiki_domain_tags multi_select). Both hydrate with `name` inline on the
+    # GET response — no id->name resolution at read time (prereq-verification).
+    source_type: str | None = None
+    domain_tags: list[str] = []
+    for prop in obj.get("properties", []):
+        if not isinstance(prop, dict):
+            continue
+        k = prop.get("key")
+        if k == "wiki_source_type":
+            sel = prop.get("select")
+            if isinstance(sel, dict):
+                source_type = sel.get("name")
+        elif k == "wiki_domain_tags":
+            multi = prop.get("multi_select")
+            if isinstance(multi, list):
+                domain_tags = [
+                    t["name"] for t in multi
+                    if isinstance(t, dict) and t.get("name")
+                ]
+
     markdown = obj.get("markdown", "") or ""
     chunks = (
         _chunk_body(markdown, object_id, space_id, object_name, type_key)
@@ -55,6 +78,12 @@ def chunk_object(obj: dict) -> list[dict]:
     if last_modified_date is not None:
         for chunk in chunks:
             chunk["last_modified_date"] = last_modified_date
+    if source_type is not None:
+        for chunk in chunks:
+            chunk["source_type"] = source_type
+    if domain_tags:
+        for chunk in chunks:
+            chunk["domain_tags"] = domain_tags
 
     return chunks
 

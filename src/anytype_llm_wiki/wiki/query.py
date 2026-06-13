@@ -33,6 +33,7 @@ import httpx
 from . import config
 from . import types_schema
 from . import bootstrap as _bootstrap
+from . import ingest as _ingest
 from .. import indexer
 from .extraction import _DETERMINISTIC_OPTS, _is_model_not_pulled, sanitize_name
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
@@ -300,6 +301,55 @@ def _passes_date_filter(
     return True
 
 
+def _passes_source_type_filter(obj: dict, source_types: list[str]) -> bool:
+    """True if the object's wiki_source_type name is in source_types.
+
+    Reads the hydrated select property (prereq-verification.md RESOLVED).
+    Objects lacking wiki_source_type do NOT pass when source_types is non-empty
+    (mirrors Qdrant: missing field != match).
+
+    NOTE (SG3): effectively MOOT on wiki_query Tier-1 — the candidate list is
+    already scoped to _WIKI_TYPE_KEYS, which excludes wiki_source, so no
+    wiki_source object ever reaches this predicate. Kept for cross-tier
+    consistency and API completeness.
+    """
+    if not source_types:
+        return True
+    for prop in obj.get("properties", []):
+        if not isinstance(prop, dict):
+            continue
+        if prop.get("key") == "wiki_source_type":
+            sel = prop.get("select")
+            if isinstance(sel, dict):
+                return sel.get("name") in source_types
+            return False
+    return False
+
+
+def _passes_domain_tags_filter(obj: dict, domain_tags: list[str]) -> bool:
+    """True if the object's wiki_domain_tags list has ANY overlap with domain_tags.
+
+    Reads the hydrated multi_select property (prereq-verification.md RESOLVED).
+    Objects lacking wiki_domain_tags do NOT pass when domain_tags is non-empty.
+    """
+    if not domain_tags:
+        return True
+    domain_tags_set = set(domain_tags)
+    for prop in obj.get("properties", []):
+        if not isinstance(prop, dict):
+            continue
+        if prop.get("key") == "wiki_domain_tags":
+            multi = prop.get("multi_select")
+            if isinstance(multi, list):
+                obj_tags = {
+                    t["name"] for t in multi
+                    if isinstance(t, dict) and t.get("name")
+                }
+                return bool(obj_tags & domain_tags_set)
+            return False
+    return False
+
+
 def _short_type(type_key: str) -> str:
     """Map a wiki type_key to the QueryResult short type label."""
     return {
@@ -394,6 +444,7 @@ def _empty_result(retrieval_mode="index_navigation", count=0):
         "wiki_log_id": None,
         "wiki_log_deeplink": None,
         "warnings": [],
+        "schema_warnings": [],
         "status": "ok",
         "error": None,
         "error_category": None,
@@ -412,6 +463,8 @@ def wiki_query(
     types: list[str] | None = None,
     ingested_after: str | None = None,
     ingested_before: str | None = None,
+    source_type: list[str] | None = None,
+    domain_tags: list[str] | None = None,
 ) -> dict:
     """Query the wiki and return a synthesized QueryResult dict.
 
@@ -419,6 +472,11 @@ def wiki_query(
     client construction) → pre-check (schema QA#25 — before any Qdrant call or
     Anytype write) → enumerate + count → tier select → 1-hop neighborhood
     (per-run cache) → bounded synthesis → file-back gate → WikiLog.
+
+    ``source_type`` is accepted for API symmetry with ``semantic_search`` but is a
+    NO-OP here: ``wiki_source`` objects are never in scope (excluded from both the
+    Tier-1 enumeration and the Tier-2 types filter). ``domain_tags`` IS effective —
+    entities/concepts carry ``wiki_domain_tags`` (ANY-overlap match).
     """
     safe_question = _sanitize_question(question)
     result = _empty_result()
@@ -443,6 +501,27 @@ def wiki_query(
                     ),
                     "error_category": "config_error",
                 }
+
+    # Structural validation of #336 filter params: a non-empty list of non-empty
+    # strings or None. Failures are config errors (never raised), before any
+    # client construction or WikiLog write.
+    for name, val in [("source_type", source_type), ("domain_tags", domain_tags)]:
+        if val is not None and (
+            not isinstance(val, list) or not all(isinstance(s, str) and s for s in val)
+        ):
+            return {
+                **_empty_result(),
+                "status": "error",
+                "error": (
+                    f"{_CONFIG_ERROR_PREFIX} invalid_filter: {name} must be a "
+                    f"non-empty list of non-empty strings; got {val!r}"
+                ),
+                "error_category": "config_error",
+            }
+
+    # Filter lists computed once for both tiers (matches #323 date conditional).
+    source_type_filter = list(source_type) if source_type else []
+    domain_tags_filter = list(domain_tags) if domain_tags else []
 
     # Type intersection: an empty intersection with the wiki type set is a config error.
     _WIKI_TYPE_KEYS_SET = set(_WIKI_TYPE_KEYS)
@@ -506,6 +585,37 @@ def wiki_query(
                 f"{code_version}; continuing"
             )
 
+        # --- AC-V-WARN (D11/SF9): out-of-taxonomy filter values ---
+        # Warning-only (never raises). Only runs when a filter is supplied, so it
+        # adds local Anytype calls solely on opt-in filtered queries. Compares
+        # domain_tags against the live taxonomy and source_type against the seeded
+        # source-type tag set; out-of-taxonomy values still produce zero matches
+        # (AC-V-ZERO) — this just turns silent-empty into actionable feedback.
+        taxonomy_warnings: list[str] = []
+        if domain_tags_filter:
+            try:
+                known_domain = _ingest._domain_taxonomy(write_client, space_id)
+            except Exception:  # noqa: BLE001 — warning is best-effort
+                known_domain = set()
+            if known_domain:
+                for tag in domain_tags_filter:
+                    if tag not in known_domain:
+                        taxonomy_warnings.append(
+                            f"domain_tags value {tag!r} not in space taxonomy; "
+                            f"will match nothing"
+                        )
+        if source_type_filter:
+            from .bootstrap import _WIKI_SOURCE_TYPE_TAGS
+            for st in source_type_filter:
+                if st not in _WIKI_SOURCE_TYPE_TAGS:
+                    taxonomy_warnings.append(
+                        f"source_type value {st!r} not in source-type taxonomy; "
+                        f"will match nothing"
+                    )
+        if taxonomy_warnings:
+            schema_warnings.extend(taxonomy_warnings)
+            result["schema_warnings"].extend(taxonomy_warnings)
+
         # --- Count + filter wiki objects ---
         pre_filter_count = len(all_objects)
         wiki_objects = [
@@ -548,6 +658,14 @@ def wiki_query(
                     _core_kwargs["ingested_after"] = ingested_after
                 if ingested_before is not None:
                     _core_kwargs["ingested_before"] = ingested_before
+                # #336: thread domain_tags only when set, matching the date
+                # conditional-threading pattern (keeps existing stubs' signatures).
+                # source_type is intentionally NOT threaded — it is a documented
+                # no-op on wiki_query (the Tier-2 types filter already excludes
+                # wiki_source, so a source_type clause would only ever zero-out
+                # the entity/concept results; AC-T1-ST-NOOP pins identical output).
+                if domain_tags_filter:
+                    _core_kwargs["domain_tags"] = domain_tags_filter
                 raw = indexer.semantic_search_core(**_core_kwargs)
                 # Dedupe candidate object_ids preserving best score / first seen.
                 seen: set[str] = set()
@@ -582,6 +700,18 @@ def wiki_query(
             wiki_objects = [
                 o for o in wiki_objects if _passes_type_filter(o, effective_types_set)
             ]
+            # #336: domain_tags (ANY-overlap) IS effective. source_type is a
+            # DOCUMENTED NO-OP on wiki_query (SG3/AC-T1-ST-NOOP): wiki_source is
+            # never in _WIKI_TYPE_KEYS scope, and applying _passes_source_type_filter
+            # to entities/concepts (which lack wiki_source_type) would drop ALL of
+            # them — exactly the surprising behavior the no-op contract forbids.
+            # The predicate is implemented for cross-tier API completeness but is
+            # deliberately NOT applied here.
+            if domain_tags_filter:
+                wiki_objects = [
+                    o for o in wiki_objects
+                    if _passes_domain_tags_filter(o, domain_tags_filter)
+                ]
             if ingested_after or ingested_before:
                 after_dt = _parse_iso(ingested_after) if ingested_after else None
                 before_dt = _parse_iso(ingested_before) if ingested_before else None
