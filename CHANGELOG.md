@@ -24,6 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   historical corpus.
 - **Note (scope):** tag/source filtering is **not** available in v1 — it is deferred in
   full and tracked in #336.
+- **Source-type + domain-tag filters, persisted end to end (#336).** `semantic_search` and
+  `wiki_query` gain `source_type` and `domain_tags` params (ANY-match / ANY-overlap KEYWORD
+  filters). `wiki_ingest`/`wiki_remember` now persist `wiki_domain_tags` on created/updated
+  entities and concepts, and `wiki_source` objects are indexed via their `wiki_excerpt`
+  (stamped `wiki_source_type`). Payload schema bumped 2→3 (adds `source_type` +
+  `domain_tags`); two new KEYWORD payload indexes are created on reindex. On
+  `semantic_search`, default results still EXCLUDE `wiki_source` excerpts (pass
+  `types=["wiki_source"]` or a `source_type` filter to retrieve them). On `wiki_query`,
+  `source_type` is accepted for API symmetry but is a documented **no-op** (`wiki_source`
+  is never in scope); `domain_tags` IS effective.
+- **Note (migration, #336):** payload v2→v3 auto-runs a one-time full re-embed on the first
+  reindex after upgrade (seconds on this corpus).
+- **Note (forward-only tagging, #336):** existing objects are NOT retroactively tagged —
+  the original `domain_hint` is recoverable nowhere. Only objects created/updated AFTER
+  this upgrade carry `domain_tags`; the pre-upgrade corpus returns nothing for a
+  `domain_tags` filter until re-touched (manual bulk re-tag / re-ingest is the available
+  follow-on).
+- **Note (SET semantics, #336):** re-ingesting/re-remembering with a different
+  `domain_hint`/`domain_tags` REPLACES the tags (not a union) — lossy for multi-domain
+  entities. Merge is a documented follow-on.
 
 ## [0.7.4] - 2026-06-10
 

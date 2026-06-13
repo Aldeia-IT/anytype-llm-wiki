@@ -160,12 +160,12 @@ wiki_query(space_id, "What do we know about Qdrant multi-tenancy?")
 
 | Tool | What it does |
 |------|--------------|
-| `semantic_search` | Search the vault by meaning. `query`, `space_id?`, `types?`, `ingested_after?`, `ingested_before?`, `limit?` |
+| `semantic_search` | Search the vault by meaning. `query`, `space_id?`, `types?`, `ingested_after?`, `ingested_before?`, `source_type?`, `domain_tags?`, `limit?` (default results exclude `wiki_source` excerpts unless `types=["wiki_source"]` or `source_type` is given) |
 | `reindex_anytype` | Trigger an incremental reindex. `space_id?` |
 | `wiki_bootstrap` | Provision the typed wiki schema in a space. `space_id`, `domain_tags?` |
 | `wiki_ingest` | Compile a source (URL or file) into curated, interlinked Objects with provenance; auto-reindex. `source`, `space_id`, `domain_hint?` |
 | `wiki_remember` | Consolidate an agent's natural-language narration into typed Objects (LLM merge/dedup/conflict-flag). Fleet-safe **queue-submit**: concurrent writers never block or lose writes (no read-after-write). `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?` |
-| `wiki_query` | Query the wiki for a synthesized, source-cited answer (tiered retrieval + local synthesis); optionally file the answer back. `question`, `space_id`, `file_back?`, `types?`, `ingested_after?`, `ingested_before?` |
+| `wiki_query` | Query the wiki for a synthesized, source-cited answer (tiered retrieval + local synthesis); optionally file the answer back. `question`, `space_id`, `file_back?`, `types?`, `ingested_after?`, `ingested_before?`, `source_type?` (no-op — accepted for API symmetry), `domain_tags?` |
 | `wiki_lint` | Read-only structural health check (contradictions, orphans, staleness, asymmetric relations, …), ranked by severity. `space_id`, `severity_threshold?`, `include_duplicates?` |
 
 Extraction and synthesis run on local Ollama by default (`WIKI_EXTRACT_MODEL`, default `qwen2.5:7b`); pointing `WIKI_EXTRACT_ENDPOINT` at a hosted API moves that processing off-machine behind a one-time consent gate — see [Security & data flow](docs/security-and-data-flow.md).
