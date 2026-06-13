@@ -30,3 +30,8 @@ INDEX_STATE_DIR = Path(os.environ.get(
     os.path.expanduser("~/.local/share/anytype-llm-wiki"),
 ))
 INDEX_STATE_FILE = INDEX_STATE_DIR / "state.json"
+
+# Qdrant chunk-payload schema version. Bumping this forces a one-time full
+# re-embed on the next reindex (see indexer.reindex migration logic). v1 = the
+# 6-field payload; v2 adds last_modified_date.
+PAYLOAD_SCHEMA_VERSION = 2

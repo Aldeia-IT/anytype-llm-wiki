@@ -23,6 +23,8 @@ def semantic_search(
     query: str,
     space_id: str | None = None,
     types: list[str] | None = None,
+    ingested_after: str | None = None,
+    ingested_before: str | None = None,
     limit: int = 10,
 ) -> list[dict]:
     """Search Anytype objects by semantic similarity.
@@ -31,12 +33,36 @@ def semantic_search(
         query: Natural language search query.
         space_id: Optional space ID to filter results.
         types: Optional list of type keys to filter (e.g. ["page", "note"]).
+        ingested_after: Optional ISO-8601 datetime lower bound on last_modified_date, inclusive.
+            Example: "2026-01-01T00:00:00Z".
+        ingested_before: Optional ISO-8601 datetime upper bound on last_modified_date, inclusive.
+            Example: "2026-06-30T23:59:59Z".
         limit: Max results to return (default 10).
 
     Returns:
         List of matching chunks with object name, type, heading, text snippet, and score.
     """
-    return semantic_search_core(query=query, space_id=space_id, types=types, limit=limit)
+    from pydantic import ValidationError as _PydanticValidationError
+    from qdrant_client.models import DatetimeRange as _DatetimeRange
+
+    for name, val in [("ingested_after", ingested_after), ("ingested_before", ingested_before)]:
+        if val is not None:
+            try:
+                _DatetimeRange(gte=val)  # probe only; not stored
+            except _PydanticValidationError:
+                raise ValueError(
+                    f"Invalid date format for {name}: {val!r}. "
+                    f"Expected ISO-8601, e.g. 2026-01-01T00:00:00Z"
+                )
+
+    return semantic_search_core(
+        query=query,
+        space_id=space_id,
+        types=types,
+        ingested_after=ingested_after,
+        ingested_before=ingested_before,
+        limit=limit,
+    )
 
 
 @mcp.tool()
@@ -147,6 +173,9 @@ def wiki_query(
     question: str,
     space_id: str,
     file_back: bool | None = None,
+    types: list[str] | None = None,
+    ingested_after: str | None = None,
+    ingested_before: str | None = None,
 ) -> dict:
     """Query the typed wiki and return a synthesized answer (tiered retrieval).
 
@@ -162,6 +191,12 @@ def wiki_query(
         space_id: Target Anytype space ID (must be bootstrapped at the current schema).
         file_back: True forces filing; False suppresses; None uses the default gate
             (>= 3 cited sources AND >= 100-word answer).
+        types: Optional subset of wiki type keys to scope retrieval. Intersected with
+            the wiki type set; an empty intersection is a config error.
+        ingested_after: Optional ISO-8601 datetime lower bound on last_modified_date, inclusive.
+            Example: "2026-01-01T00:00:00Z".
+        ingested_before: Optional ISO-8601 datetime upper bound on last_modified_date, inclusive.
+            Example: "2026-06-30T23:59:59Z".
 
     Returns:
         A QueryResult dict (answer, sources_consulted, filed_back, retrieval_mode,
@@ -170,7 +205,14 @@ def wiki_query(
     """
     from .wiki.query import wiki_query as _wiki_query
 
-    return _wiki_query(question=question, space_id=space_id, file_back=file_back)
+    return _wiki_query(
+        question=question,
+        space_id=space_id,
+        file_back=file_back,
+        types=types,
+        ingested_after=ingested_after,
+        ingested_before=ingested_before,
+    )
 
 
 @mcp.tool()

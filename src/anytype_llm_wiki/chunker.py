@@ -36,11 +36,27 @@ def chunk_object(obj: dict) -> list[dict]:
     object_name = obj.get("name", "")
     type_key = obj.get("type", {}).get("key", "unknown")
 
-    markdown = obj.get("markdown", "") or ""
-    if markdown.strip():
-        return _chunk_body(markdown, object_id, space_id, object_name, type_key)
+    # Extract the optional date payload field (same read shape as
+    # indexer._get_last_modified). Injected into every chunk below; omitted from
+    # the chunk dict entirely when the property is absent.
+    last_modified_date = None
+    for prop in obj.get("properties", []):
+        if isinstance(prop, dict) and prop.get("key") == "last_modified_date":
+            last_modified_date = prop.get("date")
+            break
 
-    return _chunk_properties(obj, object_id, space_id, object_name, type_key)
+    markdown = obj.get("markdown", "") or ""
+    chunks = (
+        _chunk_body(markdown, object_id, space_id, object_name, type_key)
+        if markdown.strip()
+        else _chunk_properties(obj, object_id, space_id, object_name, type_key)
+    )
+
+    if last_modified_date is not None:
+        for chunk in chunks:
+            chunk["last_modified_date"] = last_modified_date
+
+    return chunks
 
 
 def _chunk_body(

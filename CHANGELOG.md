@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Retrieval metadata filters: object type + date range (#323).** `semantic_search`
+  gains `ingested_after` / `ingested_before` ISO-8601 bounds (inclusive) that translate
+  to a Qdrant `DatetimeRange` condition on a new `last_modified_date` chunk-payload field.
+  `wiki_query` gains `types`, `ingested_after`, and `ingested_before` params; `types`
+  intersects the wiki type set (non-wiki keys are silently dropped; an empty intersection
+  is a config error). Filters are applied consistently across both Tier-1
+  (index-navigation) and Tier-2 (vector-augmented) retrieval. Payload indexes
+  (`type_key`, `space_id`, `last_modified_date`) are created on the reindex path.
+- **Note (migration):** v1 extends the Qdrant payload with `last_modified_date`. The
+  first `reindex` after upgrade auto-runs a one-time full re-embed (seconds on this
+  corpus) to backfill the field — no manual action needed; the launchd cron triggers it
+  on its next run. Until that reindex completes, the date filter under-returns against the
+  historical corpus.
+- **Note (scope):** tag/source filtering is **not** available in v1 — it is deferred in
+  full and tracked in #336.
+
 ## [0.7.4] - 2026-06-10
 
 ### Added
