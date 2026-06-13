@@ -1,6 +1,25 @@
-# Implementation Review — #323 (type + date metadata filters) — Round 1
+# Implementation Review — #323 (type + date metadata filters)
 
-**Verdict:** NEEDS CHANGES (1 CRITICAL data-integrity finding; rest clean)
+## Round 2 verdict (post-fix) — APPROVED
+
+**Date:** 2026-06-13 | **Fix commit:** `d058fc3`
+
+C1 resolved: `reindex` now gates the global `_payload_schema_version` stamp behind `if space_id is None`
+(`indexer.py`), with an explanatory comment. The `force_full` backfill is unchanged, so a scoped reindex
+still re-embeds its named space; only the global marker advance is restricted to full-corpus runs. A
+genuine CI-runnable regression test (`test_scoped_reindex_does_not_stamp_schema_marker`, tests/test_indexer.py)
+asserts both behaviors. Spec §3 D3 carries a one-line clarification.
+
+Lead-verified independently: full suite **641 passed, 0 failed, 37 skipped, 2 xfailed**; fixer added test
+lines only (no existing test modified); fix diff touches only `indexer.py`, `tests/test_indexer.py`, `spec.md`.
+
+No BLOCKING or SHOULD-FIX findings remain. The four MINOR items (M1, M2, Q1, Q2) are advisory and
+intentionally left per their rationale below (M1's probe is spec-pinned §9.1; Q2 centralization is a #336
+item per addendum CSO-6). **Cleared for PR.**
+
+---
+
+## Round 1 verdict — NEEDS CHANGES (1 CRITICAL data-integrity finding; rest clean)
 **Reviewers:** security/correctness reviewer, code-quality/DRY/spec-compliance reviewer, + lead inline checks
 **Diff under review:** `cb9ee05..bad3f33..c3ab88f` (src + docs)
 **Test state:** 640 passed, 0 failed, 37 skipped, 2 xfailed (independently verified by lead). No committed test modified.
