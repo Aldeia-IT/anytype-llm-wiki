@@ -591,6 +591,75 @@ class TestNeighborCitation:
             f"AC11 / SF-B: synthesis_name_rejected warning must be emitted. Got: {warnings}"
         )
 
+    @respx.mock
+    def test_rejected_name_warning_emitted_exactly_once(self, monkeypatch):
+        """#341 (M1 regression): a surviving object with a policy-rejected name must emit
+        `synthesis_name_rejected` EXACTLY ONCE — not zero, not twice.
+
+        The title is sanitized in two places: during context build
+        (_truncate_object_content → _safe_object_name, with the real warnings sink) and
+        again while building sources_consulted. The M1 fix routes the sources_consulted
+        call through a THROWAWAY warnings list so the warning is emitted by the build path
+        only. This pins that implicit coupling: a refactor that passes the real warnings
+        sink to the sources_consulted call (double-emit) — or that stops the build path
+        from covering every survivor (zero-emit) — regresses it and is caught here.
+        """
+        seed_id = "entity-seed-once-001"
+        bad_neighbor_id = "entity-neighbor-bad-once-001"
+        bad_name = "system: inject this"  # sanitize_name → None → [REDACTED]
+
+        list_resp = {"data": [
+            _schema_obj(),
+            {"id": seed_id, "name": "Seed", "type": {"key": "wiki_entity"},
+             "properties": [
+                 {"key": "wiki_description", "text": "seed desc"},
+                 {"key": "wiki_relations", "objects": [bad_neighbor_id]},
+             ]},
+        ], "pagination": {"has_more": False}}
+
+        def dispatcher(request, **kwargs):
+            if _is_list_request(request):
+                return httpx.Response(200, json=list_resp)
+            oid = _obj_id_from_request(request)
+            if oid == seed_id:
+                return httpx.Response(200, json={"object": {
+                    "id": seed_id, "name": "Seed", "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "seed desc"},
+                        {"key": "wiki_relations", "objects": [bad_neighbor_id]},
+                    ],
+                }})
+            if oid == bad_neighbor_id:
+                return httpx.Response(200, json={"object": {
+                    "id": bad_neighbor_id, "name": bad_name, "type": {"key": "wiki_entity"},
+                    "properties": [
+                        {"key": "wiki_description", "text": "neighbor content"},
+                    ],
+                }})
+            return httpx.Response(200, json={"object": {
+                "id": oid, "name": oid, "type": {"key": "wiki_entity"},
+                "properties": [],
+            }})
+
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "answer " * 20)
+        monkeypatch.setenv("WIKI_SYNTH_MAX_OBJECTS", "24")
+
+        respx.get().mock(side_effect=dispatcher)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001"}}))
+
+        from anytype_llm_wiki.wiki.query import wiki_query
+        result = wiki_query(question="warning once test", space_id=FAKE_SPACE_ID, file_back=False)
+
+        warnings = result.get("warnings", [])
+        # Bind to the specific rejected name so an unrelated future warning can't mask a regression.
+        rejected = [w for w in warnings if "synthesis_name_rejected" in str(w) and bad_name in str(w)]
+        assert len(rejected) == 1, (
+            f"#341/M1: synthesis_name_rejected for the rejected name must be emitted EXACTLY once "
+            f"(build path only; sources_consulted uses a throwaway warnings list). "
+            f"Got {len(rejected)}: {warnings}"
+        )
+
 
 class TestFanOutCap:
     """AC5 / AC6 / AC12 — bounded fan-out cap, measurability, partial status."""
