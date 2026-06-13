@@ -260,6 +260,46 @@ def _type_of(obj: dict) -> str:
     return t or ""
 
 
+def _parse_iso(s: str) -> datetime | None:
+    """Parse an ISO-8601 datetime, normalizing 'Z' and assuming UTC when naive.
+
+    Returns None on a malformed string.
+    """
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _passes_type_filter(obj: dict, effective_types: set[str]) -> bool:
+    """True if the object's type key is in the effective type set."""
+    return _type_of(obj) in effective_types
+
+
+def _passes_date_filter(
+    obj: dict, after_dt: datetime | None, before_dt: datetime | None
+) -> bool:
+    """True if the object's last_modified_date falls within [after, before].
+
+    No date property → does NOT pass when any bound is set (mirrors Qdrant: a
+    missing field never matches a range condition). When both bounds are None
+    this is never called.
+    """
+    obj_dt = None
+    for prop in obj.get("properties", []):
+        if isinstance(prop, dict) and prop.get("key") == "last_modified_date":
+            obj_dt = _parse_iso(prop.get("date") or "")
+            break
+    if obj_dt is None:
+        return False
+    if after_dt and obj_dt < after_dt:
+        return False
+    if before_dt and obj_dt > before_dt:
+        return False
+    return True
+
+
 def _short_type(type_key: str) -> str:
     """Map a wiki type_key to the QueryResult short type label."""
     return {
@@ -365,16 +405,61 @@ def _empty_result(retrieval_mode="index_navigation", count=0):
 # ---------------------------------------------------------------------------
 
 
-def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> dict:
+def wiki_query(
+    question: str,
+    space_id: str,
+    file_back: bool | None = None,
+    types: list[str] | None = None,
+    ingested_after: str | None = None,
+    ingested_before: str | None = None,
+) -> dict:
     """Query the wiki and return a synthesized QueryResult dict.
 
-    Pipeline: pre-check (schema QA#25 — before any
-    Qdrant call or Anytype write) → enumerate + count → tier select → 1-hop
-    neighborhood (per-run cache) → bounded synthesis → file-back gate → WikiLog.
+    Pipeline: validate filter params (config errors short-circuit before any
+    client construction) → pre-check (schema QA#25 — before any Qdrant call or
+    Anytype write) → enumerate + count → tier select → 1-hop neighborhood
+    (per-run cache) → bounded synthesis → file-back gate → WikiLog.
     """
     safe_question = _sanitize_question(question)
     result = _empty_result()
 
+    # --- Validate filter params BEFORE any client construction (CTO-ADV1) ---
+    # Date-format probe: malformed bounds are config errors, never raised.
+    from pydantic import ValidationError as _PydanticValidationError
+    from qdrant_client.models import DatetimeRange as _DatetimeRange
+
+    for name, val in [("ingested_after", ingested_after), ("ingested_before", ingested_before)]:
+        if val is not None:
+            try:
+                _DatetimeRange(gte=val)  # probe only; not stored
+            except _PydanticValidationError:
+                return {
+                    **_empty_result(),
+                    "status": "error",
+                    "error": (
+                        f"{_CONFIG_ERROR_PREFIX} invalid_date_format: invalid date "
+                        f"for {name}: {val!r}. Expected ISO-8601, e.g. "
+                        f"2026-01-01T00:00:00Z"
+                    ),
+                    "error_category": "config_error",
+                }
+
+    # Type intersection: an empty intersection with the wiki type set is a config error.
+    _WIKI_TYPE_KEYS_SET = set(_WIKI_TYPE_KEYS)
+    effective_types_set = _WIKI_TYPE_KEYS_SET
+    if types:
+        intersection = [t for t in types if t in _WIKI_TYPE_KEYS_SET]
+        if not intersection:
+            return {
+                **_empty_result(),
+                "status": "error",
+                "error": (
+                    f"{_CONFIG_ERROR_PREFIX} type_filter_empty: none of {types!r} are "
+                    f"valid wiki type keys {list(_WIKI_TYPE_KEYS)}"
+                ),
+                "error_category": "config_error",
+            }
+        effective_types_set = set(intersection)
 
     read_client = AnytypeReadClient()
     write_client = WikiClient()
@@ -451,12 +536,19 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
         if tier2:
             result["retrieval_mode"] = "vector_augmented"
             try:
-                raw = indexer.semantic_search_core(
-                    query=safe_question,
-                    space_id=space_id,
-                    types=list(_WIKI_TYPE_KEYS),
-                    limit=10,
-                )
+                _core_kwargs = {
+                    "query": safe_question,
+                    "space_id": space_id,
+                    "types": sorted(effective_types_set),
+                    "limit": 10,
+                }
+                # Only thread date bounds when set, so call sites/stubs that do
+                # not opt into date filtering keep their existing signature.
+                if ingested_after is not None:
+                    _core_kwargs["ingested_after"] = ingested_after
+                if ingested_before is not None:
+                    _core_kwargs["ingested_before"] = ingested_before
+                raw = indexer.semantic_search_core(**_core_kwargs)
                 # Dedupe candidate object_ids preserving best score / first seen.
                 seen: set[str] = set()
                 for r in raw:
@@ -485,6 +577,18 @@ def wiki_query(question: str, space_id: str, file_back: bool | None = None) -> d
 
         if not tier2:
             result["retrieval_mode"] = "index_navigation"
+            # Apply Tier-1 filters cheapest-first: (1) type, (2) date — mirroring
+            # the Tier-2 Qdrant filters for cross-tier consistency.
+            wiki_objects = [
+                o for o in wiki_objects if _passes_type_filter(o, effective_types_set)
+            ]
+            if ingested_after or ingested_before:
+                after_dt = _parse_iso(ingested_after) if ingested_after else None
+                before_dt = _parse_iso(ingested_before) if ingested_before else None
+                wiki_objects = [
+                    o for o in wiki_objects
+                    if _passes_date_filter(o, after_dt, before_dt)
+                ]
             for o in wiki_objects:
                 candidate_entries.append({
                     "object_id": o.get("id"),

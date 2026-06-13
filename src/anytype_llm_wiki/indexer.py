@@ -17,10 +17,53 @@ def _qdrant() -> QdrantClient:
     return QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY or None)
 
 
+def _chunk_to_payload(chunk: dict) -> dict:
+    """Build the Qdrant point payload from a chunk dict.
+
+    Shared by ``reindex`` and ``reembed_object`` so the payload shape never
+    drifts. The optional ``last_modified_date`` is written only when present in
+    the chunk (a missing key is cleaner than an explicit null for Qdrant
+    range filtering).
+    """
+    payload = {
+        "object_id": chunk["object_id"],
+        "space_id": chunk["space_id"],
+        "object_name": chunk["object_name"],
+        "type_key": chunk["type_key"],
+        "heading": chunk["heading"],
+        "text": chunk["text"],
+    }
+    if "last_modified_date" in chunk:
+        payload["last_modified_date"] = chunk["last_modified_date"]
+    return payload
+
+
+def _ensure_payload_indexes(client: QdrantClient) -> None:
+    """Create payload indexes used by the metadata filters.
+
+    Idempotent; called once per full ``reindex``, never on the per-object
+    ``reembed_object`` hot path. ``last_modified_date`` is a DATETIME index so
+    ``DatetimeRange`` filters resolve efficiently.
+    """
+    from qdrant_client.models import PayloadSchemaType
+
+    create_index = getattr(client, "create_payload_index", None)
+    if create_index is None:
+        return
+    for field, schema in [
+        ("type_key", PayloadSchemaType.KEYWORD),
+        ("space_id", PayloadSchemaType.KEYWORD),
+        ("last_modified_date", PayloadSchemaType.DATETIME),
+    ]:
+        create_index(config.QDRANT_COLLECTION, field, field_schema=schema)
+
+
 def semantic_search_core(
     query: str,
     space_id: str | None = None,
     types: list[str] | None = None,
+    ingested_after: str | None = None,
+    ingested_before: str | None = None,
     limit: int = 10,
 ) -> list[dict]:
     """Search Anytype object chunks by semantic similarity (shared core).
@@ -42,7 +85,7 @@ def semantic_search_core(
     and the collection name is read from ``config.QDRANT_COLLECTION`` so tests can
     monkeypatch both.
     """
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
+    from qdrant_client.models import DatetimeRange, FieldCondition, Filter, MatchValue
 
     vector = embed_query(query)
     client = _qdrant()
@@ -57,6 +100,16 @@ def semantic_search_core(
                     FieldCondition(key="type_key", match=MatchValue(value=t))
                     for t in types
                 ]
+            )
+        )
+    if ingested_after or ingested_before:
+        must.append(
+            FieldCondition(
+                key="last_modified_date",
+                range=DatetimeRange(
+                    gte=ingested_after or None,
+                    lte=ingested_before or None,
+                ),
             )
         )
     search_filter = Filter(must=must) if must else None
@@ -114,7 +167,14 @@ def reindex(space_id: str | None = None) -> dict:
     """Run incremental reindex. Returns stats."""
     client = _qdrant()
     _ensure_collection(client)
+    _ensure_payload_indexes(client)
     state = _load_state()
+
+    # Forced-backfill migration: when the code payload-schema version exceeds the
+    # version stored in the state file, re-embed every object once to backfill the
+    # new payload field(s). The marker is stamped only after a successful run.
+    stored_schema = state.get("_payload_schema_version", 1)
+    force_full = config.PAYLOAD_SCHEMA_VERSION > stored_schema
 
     spaces = list_spaces() if not space_id else [{"id": space_id}]
     stats = {"spaces": 0, "objects_checked": 0, "objects_indexed": 0, "objects_removed": 0, "chunks": 0}
@@ -132,7 +192,7 @@ def reindex(space_id: str | None = None) -> dict:
             stats["objects_checked"] += 1
 
             last_mod = _get_last_modified(obj_summary) or "unknown"
-            if space_state.get(oid) == last_mod:
+            if not force_full and space_state.get(oid) == last_mod:
                 continue  # unchanged
 
             # Fetch full object with markdown
@@ -158,14 +218,7 @@ def reindex(space_id: str | None = None) -> dict:
                         )
                     ),
                     vector=vec,
-                    payload={
-                        "object_id": chunk["object_id"],
-                        "space_id": chunk["space_id"],
-                        "object_name": chunk["object_name"],
-                        "type_key": chunk["type_key"],
-                        "heading": chunk["heading"],
-                        "text": chunk["text"],
-                    },
+                    payload=_chunk_to_payload(chunk),
                 )
                 for i, (chunk, vec) in enumerate(zip(chunks, vectors))
             ]
@@ -184,6 +237,7 @@ def reindex(space_id: str | None = None) -> dict:
 
         state[sid] = space_state
 
+    state["_payload_schema_version"] = config.PAYLOAD_SCHEMA_VERSION
     _save_state(state)
     return stats
 
@@ -215,14 +269,7 @@ def reembed_object(space_id: str, object_id: str, obj: dict) -> dict:
                 )
             ),
             vector=vec,
-            payload={
-                "object_id": chunk["object_id"],
-                "space_id": chunk["space_id"],
-                "object_name": chunk["object_name"],
-                "type_key": chunk["type_key"],
-                "heading": chunk["heading"],
-                "text": chunk["text"],
-            },
+            payload=_chunk_to_payload(chunk),
         )
         for i, (chunk, vec) in enumerate(zip(chunks, vectors))
     ]
