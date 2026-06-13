@@ -12,7 +12,7 @@ An MCP server that gives AI assistants semantic search over Anytype vaults — f
 | **Incremental indexing** | Track object timestamps, only re-embed changed/new content |
 | **Auto-reindex** | Scheduled background reindexing via launchd/cron |
 | **Manual reindex** | MCP tool to trigger reindex on demand |
-| **Metadata filtering** | Filter by space, object type, tags |
+| **Metadata filtering** | Filter by space and object type, with date-range filtering; tag/source filtering planned (see #336) |
 
 ## Product Principles
 

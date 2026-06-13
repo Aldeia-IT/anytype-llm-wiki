@@ -180,9 +180,10 @@ space, so the `"_payload_schema_version"` key is never mistaken for a space.
 surface, filter build, chunker, payload writes, payload indexes, and tests.
 
 **Root cause (Lead-verified):** `wiki_source` objects are created **body-less** — `_create_source`
-(`ingest.py:924-971`) and `remember.py:172-195` write properties only (`wiki_excerpt`,
-`wiki_ingested_at`, `wiki_url`/`wiki_file_path`), never a markdown body (AC-L1: "NEVER a
-body/markdown key"). The chunker emits property chunks only for keys in `WIKI_TEXT_PROPERTY_KEYS`
+(`src/anytype_llm_wiki/wiki/ingest.py:924-971`) and `remember.py:172-195` write properties only
+(`wiki_excerpt`, `wiki_ingested_at`, `wiki_url`/`wiki_file_path`), never a markdown body (AC-L1:
+"NEVER a body/markdown key"). The chunker emits property chunks only for keys in
+`WIKI_TEXT_PROPERTY_KEYS`
 (`chunker.py:13-16`), which does **not** include `wiki_excerpt`. Therefore `chunk_object` returns
 **zero chunks** for every `wiki_source` object → sources never reach Qdrant → no payload ever
 carries `source_type`. A `source_type` filter returns zero for ALL inputs on both tools. (On
@@ -205,11 +206,11 @@ the `domain_hint`/`domain_tags` input against the taxonomy, but neither pipeline
 `wiki_domain_tags` as a `multi_select` property on the created objects (tag IDs are never resolved
 or stored). A `domain_tags` filter cannot match anything against the current corpus.
 
-### D6 — Single Follow-Up Ticket (source_type + domain_tags)
+### D6 — Single Follow-Up Ticket (#336: source_type + domain_tags)
 
 D4 and D5 are blocked by the same class of upstream gap (metadata not persisted/indexed onto
-chunks) and fold into **one** follow-up ticket: **"Persist `wiki_domain_tags` onto objects AND
-index source excerpts, then expose both filters."** Scope:
+chunks) and fold into **one** follow-up ticket — **#336**: **"Persist `wiki_domain_tags` onto
+objects AND index source excerpts, then expose both filters."** Scope:
 
 1. Extend ingest/remember to persist `wiki_domain_tags` as a `multi_select` property (resolve tag
    names → IDs via the space tag registry).
@@ -1071,9 +1072,9 @@ Mapped to ticket ACs, adjusted for the type+date scope (source_type and domain_t
 - [ ] **AC-F12** `reembed_object` writes `last_modified_date`. Test:
   `test_reembed_writes_last_modified_date`.
 - [ ] **DEFERRED — source_type:** not implemented (D4). `wiki_source` objects are body-less and
-  not chunked → inert. Single follow-up ticket (D6).
+  not chunked → inert. Single follow-up ticket (D6 → #336).
 - [ ] **DEFERRED — domain_tags:** not implemented (D5). `wiki_domain_tags` never persisted onto
-  objects → inert. Same follow-up ticket (D6).
+  objects → inert. Same follow-up ticket (D6 → #336).
 
 ---
 
@@ -1108,6 +1109,10 @@ vector; unknown values return zero results (correct, not a security issue).
 **Trust model unchanged:** local stdio MCP server; callers are the local AI assistant. No new
 authentication surface.
 
+**Migration data integrity (CSO-6):** the D3 forced re-embed is the only state-mutating
+operation introduced here — see the §3 D3 / §15 migration analysis for the version-marker
+behavior, idempotency on interruption, and the no-concurrent-run sequencing requirement.
+
 ---
 
 ## 15. Operational Considerations
@@ -1124,6 +1129,20 @@ are simply ignored. (The `_payload_schema_version` state key is likewise ignored
    `reindex` **auto-forces a full re-embed** that backfills `last_modified_date` on every chunk,
    creates the payload indexes, and stamps the new marker. No manual flag or extra step.
 3. Subsequent reindexes return to incremental behavior automatically.
+
+**Deployment sequencing (Infra-7 / Infra-9):** do NOT run a manual `reindex` and the launchd
+cron reindex concurrently for the migration. The state file has no atomic write / lock and the
+cron plist has no overlap guard, so an overlapping run can race the version-marker stamp / state
+write. Either (a) unload the launchd cron, run the manual `reindex`, then reload the cron, OR
+(b) simply let the cron perform the migration on its next run and do not run a manual reindex in
+the same window.
+
+**Post-deploy verification (Infra-7 / Infra-9):** after the first reindex completes, confirm the
+migration landed:
+1. The index state file (`config.INDEX_STATE_FILE`) contains `"_payload_schema_version": 2` at
+   the top level.
+2. Spot-check that a dated chunk's Qdrant payload carries `last_modified_date` (e.g. retrieve a
+   point for an object known to have the property and confirm the field is present).
 
 **Release note required:** "v1 extends the Qdrant payload with `last_modified_date`. The first
 `reindex` after upgrade auto-runs a one-time full re-embed (seconds on this corpus) to backfill

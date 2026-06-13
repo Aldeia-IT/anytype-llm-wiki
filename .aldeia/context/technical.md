@@ -46,6 +46,19 @@ anytype-llm-wiki/
 └── README.md
 ```
 
+## Qdrant chunk payload schema
+
+Each Qdrant point carries a payload built by the shared `indexer._chunk_to_payload`
+helper (used by both `reindex` and `reembed_object`). As of `PAYLOAD_SCHEMA_VERSION = 2`
+the payload is **7 fields**: the 6 base fields (`object_id`, `space_id`, `object_name`,
+`type_key`, `heading`, `text`) plus `last_modified_date` (ISO-8601 string), written only
+when the source object carries that date property. The chunker extracts
+`last_modified_date` from object properties and injects it into every chunk; the date
+filter (`ingested_after` / `ingested_before`) translates to a Qdrant `DatetimeRange`
+condition on this field. A `_payload_schema_version` marker in the index state file drives
+a one-time forced full re-embed when the code version exceeds the stored version, so the
+new field is backfilled across the historical corpus on the first post-upgrade reindex.
+
 ## Configuration (environment variables)
 
 ```
