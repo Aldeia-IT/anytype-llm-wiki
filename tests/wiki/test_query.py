@@ -14,6 +14,7 @@ import time
 import pytest
 import respx
 import httpx
+from anytype_llm_wiki import config
 
 
 # ---------------------------------------------------------------------------
