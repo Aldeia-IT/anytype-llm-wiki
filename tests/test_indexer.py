@@ -1170,6 +1170,39 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
     )
 
 
+def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypatch):
+    """#336 OD-B sub-decision: a source_type filter (no types) must NOT trigger the
+    non-source default-exclude — else the default types list would drop the very
+    wiki_source chunks the source_type filter targets (an inert filter footgun).
+
+    Pins the `if types is None and not source_type` guard in server.py:semantic_search.
+    With source_type supplied and no types, the core must receive types=None (no
+    non-source default forced), leaving wiki_source chunks searchable so the
+    source_type filter can match them.
+    """
+    import anytype_llm_wiki.server as _server_mod
+
+    captured_calls: list[dict] = []
+
+    def fake_core(query, space_id=None, types=None, ingested_after=None,
+                  ingested_before=None, source_type=None, domain_tags=None,
+                  limit=10, **kwargs):
+        captured_calls.append({"types": types, "source_type": source_type})
+        return []
+
+    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    from anytype_llm_wiki.server import semantic_search
+
+    semantic_search(query="test", source_type=["document"])
+    assert captured_calls, "semantic_search must call semantic_search_core"
+    passed = captured_calls[-1]
+    assert passed["types"] is None, (
+        f"#336 OD-B FAIL: a source_type filter must suppress the non-source default-exclude "
+        f"(types must stay None so wiki_source chunks remain searchable). Got types={passed['types']!r}."
+    )
+    assert passed["source_type"] == ["document"]
+
+
 # ---------------------------------------------------------------------------
 # #336 — B2: PAYLOAD_SCHEMA_VERSION constant guard
 # ---------------------------------------------------------------------------

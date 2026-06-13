@@ -194,8 +194,8 @@ class TestWikiTextPropertyKeysConstant:
         from anytype_llm_wiki.chunker import WIKI_PROPERTY_HEADING
         assert WIKI_PROPERTY_HEADING is not None
 
-    def test_wiki_property_heading_maps_all_eight_keys(self):
-        """WIKI_PROPERTY_HEADING must map all 8 allowlist keys to display names (§4.1)."""
+    def test_wiki_property_heading_maps_all_nine_keys(self):
+        """WIKI_PROPERTY_HEADING must map all 9 allowlist keys to display names (§4.1; #336 added wiki_excerpt)."""
         from anytype_llm_wiki.chunker import WIKI_PROPERTY_HEADING, WIKI_TEXT_PROPERTY_KEYS
         for key in WIKI_TEXT_PROPERTY_KEYS:
             assert key in WIKI_PROPERTY_HEADING, f"WIKI_PROPERTY_HEADING missing key: {key!r}"
