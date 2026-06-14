@@ -1016,7 +1016,10 @@ def _create_source(
     failure (non-fatal).
     """
     is_url = source.startswith("http://") or source.startswith("https://")
-    excerpt = sanitize_property_value((markdown or "")[:1000])
+    # Scrub secrets before persisting the document excerpt to Qdrant, for symmetry
+    # with the remember path (#346/CSO). sanitize_property_value strips control
+    # chars; scrub_credentials removes secret-shaped tokens from the prose.
+    excerpt = sanitize_property_value(scrub_credentials((markdown or "")[:1000]))
     props = [
         {"key": "wiki_excerpt", "text": excerpt},
         {"key": "wiki_ingested_at", "date": datetime.now(timezone.utc).isoformat()},
