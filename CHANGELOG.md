@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-14
+
 ### Added
 
+- **Relationship-aware retrieval: cite 1-hop neighbours (#324).** `wiki_query` now cites
+  the surviving 1-hop linked neighbours that actually fed synthesis in `sources_consulted`
+  (not only the top-k seeds), with fan-out bounded by a new `WIKI_QUERY_MAX_NEIGHBORS` knob
+  (default 16) and a deterministic `(seed_rank, relation_priority, object_id)` order.
+  File-back stays seed-only (`wiki_drew_from` unchanged). Treat citation titles/deeplinks
+  as untrusted data — surface them, don't auto-follow.
 - **Retrieval metadata filters: object type + date range (#323).** `semantic_search`
   gains `ingested_after` / `ingested_before` ISO-8601 bounds (inclusive) that translate
   to a Qdrant `DatetimeRange` condition on a new `last_modified_date` chunk-payload field.
@@ -34,8 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `types=["wiki_source"]` or a `source_type` filter to retrieve them). On `wiki_query`,
   `source_type` is accepted for API symmetry but is a documented **no-op** (`wiki_source`
   is never in scope); `domain_tags` IS effective.
-- **Note (migration, #336):** payload v2→v3 auto-runs a one-time full re-embed on the first
-  reindex after upgrade (seconds on this corpus).
+- **Note (migration, #336):** the payload schema bumps to v3; the first `reindex` after
+  upgrade auto-runs a one-time full re-embed (seconds on this corpus) to backfill the new
+  fields. **Operator steps for a reliable migration:** (1) quiesce auto-reindex first —
+  unload the launchd reindex job and set `WIKI_AUTO_REINDEX=false` — then run a single full
+  unscoped `reindex`, then re-enable both; otherwise a scoped auto-reindex can take the lock
+  and the manual full pass skips, leaving the migration half-done. (2) Verify: confirm
+  `state.json` shows `_payload_schema_version == 3`, then run `reindex` once more and confirm
+  **0** re-embeds (only skips) — a non-zero second pass means the first did not complete.
 - **Note (forward-only tagging, #336):** existing objects are NOT retroactively tagged —
   the original `domain_hint` is recoverable nowhere. Only objects created/updated AFTER
   this upgrade carry `domain_tags`; the pre-upgrade corpus returns nothing for a
@@ -44,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Note (SET semantics, #336):** re-ingesting/re-remembering with a different
   `domain_hint`/`domain_tags` REPLACES the tags (not a union) — lossy for multi-domain
   entities. Merge is a documented follow-on.
+
+### Fixed
+
+- **Index state-file durability (#342).** `reindex` now writes `state.json` atomically
+  (temp file + `os.replace`), so a crash mid-write can no longer leave a corrupt state that
+  blocks all future reindexing; and it takes a non-blocking host-local lock so a scoped
+  auto-reindex and the full cron reindex can't race the same write (a run that can't acquire
+  the lock skips cleanly).
 
 ## [0.7.4] - 2026-06-10
 
@@ -513,7 +535,8 @@ This release builds on the existing semantic-search foundation:
   re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
   `semantic_search` also prompts a reindex when the collection is empty).
 
-[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.7.4...v0.8.0
 [0.6.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.4.1...v0.5.0
