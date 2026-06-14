@@ -3556,16 +3556,9 @@ class TestWikiQueryUnknownFilterNoRaise:
 class TestWikiQueryOutOfTaxonomyWarn:
     """#336 AC-V-WARN: out-of-taxonomy domain_tags value → schema_warnings entry (not error)."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "#336 D11/SF9: the out-of-taxonomy warning calls _domain_taxonomy() from wiki_query "
-            "which requires a live WikiClient. This may be deferred by the implementer if the "
-            "taxonomy fetch adds meaningful latency on the hot query path. "
-            "AC-V-ZERO (structural guarantee) is mandatory; AC-V-WARN is conditional on D11 "
-            "not being deferred. xfail allows the suite to report XPASS when implemented."
-        ),
-        strict=False,
-    )
+    # #346: D11/SF9 was implemented (the impl phase reported AC-V-WARN as XPASS), so
+    # this is pinned as a normal passing assertion — the out-of-taxonomy warning can no
+    # longer silently regress.
     @respx.mock
     def test_wiki_query_out_of_taxonomy_filter_warns(self, monkeypatch):
         """#336 AC-V-WARN: wiki_query with out-of-taxonomy domain_tag → schema_warnings entry.

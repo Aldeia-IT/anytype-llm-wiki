@@ -247,6 +247,11 @@ def wiki_query(
         domain_tags: Optional list of domain tag names to filter by (e.g. ["ai", "ml"]).
             ANY-overlap: an entity/concept matches if its domain_tags list shares at
             least one name with this filter. Unknown values produce zero matches.
+            Scopes SEED selection only — the #324 1-hop neighbour expansion is not
+            re-filtered, so a linked neighbour can still enter context without the tag
+            (consistent with inherited #323/#324 behaviour). Note: only objects
+            created/updated after the v0.8.0 upgrade carry domain_tags; the pre-upgrade
+            corpus returns nothing for a domain_tags filter until re-touched (#345).
 
     Returns:
         A QueryResult dict (answer, sources_consulted, filed_back, retrieval_mode,
