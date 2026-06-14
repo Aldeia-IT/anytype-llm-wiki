@@ -573,8 +573,11 @@ def test_invalid_date_raises_value_error():
 
 
 def test_reindex_creates_payload_indexes(monkeypatch, tmp_path):
-    """AC-F7a: reindex() calls _ensure_payload_indexes → type_key, space_id,
-    last_modified_date in created_indexes; source_type must NOT be there.
+    """#336 AC-IDX (updated from AC-F7a): reindex() calls _ensure_payload_indexes →
+    type_key, space_id, last_modified_date, source_type, domain_tags all in created_indexes.
+
+    The old assertion 'source_type not in created_indexes' is REMOVED (it was the
+    deferral guard for #336 which this test now pins as REQUIRED).
     """
     import anytype_llm_wiki.indexer as _indexer
 
@@ -585,12 +588,12 @@ def test_reindex_creates_payload_indexes(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
     _indexer.reindex()
-    assert set(fake.created_indexes) >= {"type_key", "space_id", "last_modified_date"}, (
-        f"Expected payload indexes for type_key/space_id/last_modified_date; "
+    assert set(fake.created_indexes) >= {
+        "type_key", "space_id", "last_modified_date",
+        "source_type", "domain_tags",   # NEW in #336: both must be KEYWORD-indexed
+    }, (
+        f"Missing indexes; expected {{type_key, space_id, last_modified_date, source_type, domain_tags}}; "
         f"got: {fake.created_indexes}"
-    )
-    assert "source_type" not in fake.created_indexes, (
-        "source_type must NOT be indexed (deferred to #336)"
     )
 
 
@@ -864,3 +867,359 @@ class TestReindexLock:
         stats = _indexer.reindex()
         assert not stats.get("skipped"), f"reindex should run with a free lock; got {stats}"
         assert stats["spaces"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-PAYLOAD: _chunk_to_payload propagates source_type/domain_tags
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_to_payload_propagates_and_omits():
+    """#336 AC-PAYLOAD: _chunk_to_payload copies source_type/domain_tags when present
+    and OMITS them (key absent, not null) when absent.
+
+    This closes the SF8 gap: AC-S2/S3 cover chunk_object output and AC-F-* cover
+    filter build, but this independently exercises the payload-builder copy/omit seam.
+    """
+    import anytype_llm_wiki.indexer as _indexer
+
+    # present → copied through
+    p = _indexer._chunk_to_payload({
+        "object_id": "o", "space_id": "s", "object_name": "n",
+        "type_key": "wiki_source", "heading": "Excerpt", "text": "t",
+        "source_type": "document", "domain_tags": ["ai", "ml"],
+    })
+    assert p["source_type"] == "document", (
+        f"source_type must be copied to payload; got {p.get('source_type')!r}"
+    )
+    assert p["domain_tags"] == ["ai", "ml"], (
+        f"domain_tags must be copied to payload; got {p.get('domain_tags')!r}"
+    )
+
+    # absent → KEY ABSENT from payload dict (not null), matching Qdrant filter-miss-on-absent
+    p2 = _indexer._chunk_to_payload({
+        "object_id": "o", "space_id": "s", "object_name": "n",
+        "type_key": "wiki_entity", "heading": "Facts", "text": "t",
+    })
+    assert "source_type" not in p2, (
+        "source_type must be ABSENT (not None) from payload when not in chunk"
+    )
+    assert "domain_tags" not in p2, (
+        "domain_tags must be ABSENT (not None) from payload when not in chunk"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-F-ST: source_type filter applied (MatchAny)
+# ---------------------------------------------------------------------------
+
+
+def test_source_type_filter_applied(monkeypatch):
+    """#336 AC-F-ST: source_type=[...] → FieldCondition(key='source_type', MatchAny) in must list."""
+    from qdrant_client.models import FieldCondition
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(query="test", source_type=["document"])
+    assert fake.query_filter is not None, "Expected a non-None query_filter with source_type filter"
+    must = fake.query_filter.must
+    st_cond = next(
+        (c for c in must if isinstance(c, FieldCondition) and c.key == "source_type"), None
+    )
+    assert st_cond is not None, (
+        f"Expected FieldCondition(key='source_type') in must list; got must={must}"
+    )
+    assert st_cond.match.any == ["document"], (
+        f"source_type FieldCondition must use MatchAny(any=['document']); got {st_cond.match}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-F-DT: domain_tags filter applied (MatchAny, ANY-overlap)
+# ---------------------------------------------------------------------------
+
+
+def test_domain_tags_filter_applied(monkeypatch):
+    """#336 AC-F-DT: domain_tags=[...] → FieldCondition(key='domain_tags', MatchAny) in must list."""
+    from qdrant_client.models import FieldCondition
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(query="test", domain_tags=["ai", "ml"])
+    assert fake.query_filter is not None, "Expected a non-None query_filter with domain_tags filter"
+    must = fake.query_filter.must
+    dt_cond = next(
+        (c for c in must if isinstance(c, FieldCondition) and c.key == "domain_tags"), None
+    )
+    assert dt_cond is not None, (
+        f"Expected FieldCondition(key='domain_tags') in must list; got must={must}"
+    )
+    assert set(dt_cond.match.any) == {"ai", "ml"}, (
+        f"domain_tags FieldCondition must use MatchAny(any=['ai','ml']); got {dt_cond.match}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-F-COMB: Combined AND filter (source_type + domain_tags + existing)
+# ---------------------------------------------------------------------------
+
+
+def test_combined_filter_source_type_and_domain_tags(monkeypatch):
+    """#336 AC-F-COMB: types + source_type + domain_tags → all clauses in must (AND composition)."""
+    from qdrant_client.models import FieldCondition
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    _indexer.semantic_search_core(
+        query="test",
+        types=["wiki_entity"],
+        source_type=["document"],
+        domain_tags=["ai"],
+    )
+    assert fake.query_filter is not None, "Expected a non-None query_filter"
+    must = fake.query_filter.must
+    assert any(isinstance(c, FieldCondition) and c.key == "source_type" for c in must), (
+        f"source_type FieldCondition missing from must; got must={must}"
+    )
+    assert any(isinstance(c, FieldCondition) and c.key == "domain_tags" for c in must), (
+        f"domain_tags FieldCondition missing from must; got must={must}"
+    )
+    # The types group is a nested Filter(should=[...]) inside must (from #323)
+    assert any(hasattr(c, "should") and c.should for c in must), (
+        f"types Filter(should=[...]) missing from must; got must={must}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-IDX (version): PAYLOAD_SCHEMA_VERSION=3 forces full re-embed
+# ---------------------------------------------------------------------------
+
+
+def test_schema_version_3_bump_forces_full_reembed(monkeypatch, tmp_path):
+    """#336 AC-IDX (version bump): stored version=2, PAYLOAD_SCHEMA_VERSION=3 →
+    unchanged object STILL re-embedded; state stamped with version 3.
+    """
+    import anytype_llm_wiki.indexer as _indexer
+
+    state = {"_payload_schema_version": 2, "sp-1": {"obj-1": "2026-01-01T00:00:00Z"}}
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr(config, "INDEX_STATE_FILE", state_file)
+    monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", 3)
+
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [{"id": "sp-1"}])
+    monkeypatch.setattr(
+        _indexer,
+        "list_objects",
+        lambda sid: [
+            {
+                "id": "obj-1",
+                "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _indexer,
+        "get_object",
+        lambda sid, oid: {
+            "id": "obj-1",
+            "space_id": "sp-1",
+            "name": "X",
+            "type": {"key": "wiki_entity"},
+            "markdown": "# H\nbody",
+            "properties": [{"key": "last_modified_date", "date": "2026-01-01T00:00:00Z"}],
+        },
+    )
+    monkeypatch.setattr(
+        _indexer, "embed", lambda texts: [[0.1] * config.EMBED_DIMS for _ in texts]
+    )
+
+    stats = _indexer.reindex()
+    assert stats["objects_indexed"] == 1, (
+        f"With schema v2→v3 bump, unchanged object MUST be re-indexed; stats={stats}"
+    )
+    assert fake.upserted_points, "Expected Qdrant upsert after forced v3 re-embed"
+    new_state = json.loads(state_file.read_text())
+    assert new_state["_payload_schema_version"] == 3, (
+        f"State file must be stamped with PAYLOAD_SCHEMA_VERSION=3; got {new_state}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-V-SS: Invalid source_type raises ValueError from semantic_search
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_source_type_raises_value_error():
+    """#336 AC-V-SS: source_type with an empty string raises ValueError from semantic_search."""
+    import pytest as _pytest
+    from anytype_llm_wiki.server import semantic_search
+
+    with _pytest.raises(ValueError, match="source_type"):
+        semantic_search(query="test", source_type=[""])  # empty string in list
+
+
+def test_invalid_domain_tags_raises_value_error():
+    """#336 AC-V-SS (domain_tags variant): domain_tags with an empty string raises ValueError."""
+    import pytest as _pytest
+    from anytype_llm_wiki.server import semantic_search
+
+    with _pytest.raises(ValueError, match="domain_tags"):
+        semantic_search(query="test", domain_tags=[""])  # empty string in list
+
+
+# ---------------------------------------------------------------------------
+# #336 — AC-V-ZERO: Unknown filter value → zero matches, no raise
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_filter_value_yields_zero_no_raise(monkeypatch):
+    """#336 AC-V-ZERO: structurally-valid but unknown filter value → empty result, no raise.
+
+    The filter IS built (MatchAny with the unknown value) and Qdrant returns no
+    matches — no exception. Pins the documented unknown-value→zero-match/no-raise
+    behavior (D11/§14 — the typo footgun's only structural guarantee).
+    """
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch(mock_results=[])
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+
+    # structurally valid but semantically unknown domain tag
+    result = _indexer.semantic_search_core(query="test", domain_tags=["nonexistent-domain-xyz"])
+    assert result == [], (
+        f"Unknown domain tag must return empty result, not raise; got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #336 — OD-B Option 2 default-semantics regression
+# ---------------------------------------------------------------------------
+
+
+def test_semantic_search_default_excludes_wiki_source(monkeypatch):
+    """#336 OD-B Option 2: server.py:semantic_search with no 'types' param must default-exclude wiki_source.
+
+    Per spec §11 Step 6, the OD-B guard lives in server.py:semantic_search — NOT in
+    semantic_search_core. semantic_search_core must remain filter-free when called with no
+    types (test_no_filter_regression guards that). This test targets the server.py seam by
+    monkeypatching semantic_search_core in the server module's namespace and inspecting the
+    `types` argument that server.semantic_search passes down.
+
+    Pre-impl (current): semantic_search passes types=None straight to semantic_search_core.
+    Post-impl (correct): semantic_search builds a default types list that omits wiki_source
+    when no types= argument is provided, then passes that list to semantic_search_core.
+
+    Two assertions:
+    (a) DEFAULT call: captured types is not None AND "wiki_source" NOT in captured types.
+    (b) EXPLICIT override: semantic_search(query="test", types=["wiki_source"]) passes
+        ["wiki_source"] through unchanged (the caller's explicit intent overrides the default).
+
+    RED now: captured types is None (server.py passes None as-is). GREEN after impl.
+    test_no_filter_regression stays GREEN because that test calls semantic_search_core
+    directly — the OD-B guard is in server.py, not in semantic_search_core.
+    """
+    import anytype_llm_wiki.server as _server_mod
+
+    captured_calls: list[dict] = []
+
+    def fake_core(query, space_id=None, types=None, ingested_after=None,
+                  ingested_before=None, limit=10, **kwargs):
+        captured_calls.append({"types": types, "query": query})
+        return []
+
+    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+
+    from anytype_llm_wiki.server import semantic_search
+
+    # (a) DEFAULT call — no types= supplied
+    captured_calls.clear()
+    semantic_search(query="test")
+    assert captured_calls, "semantic_search must call semantic_search_core"
+    default_types = captured_calls[-1]["types"]
+
+    assert default_types is not None, (
+        "#336 OD-B FAIL: server.py:semantic_search must pass a non-None types list to "
+        "semantic_search_core when no types= argument is given — the default must exclude "
+        "wiki_source. Pre-impl: types=None is passed straight through (expected red)."
+    )
+    assert "wiki_source" not in default_types, (
+        f"#336 OD-B FAIL: 'wiki_source' must NOT appear in the default types list. "
+        f"Got default_types={default_types!r}. The default call must scope to the non-source "
+        f"type set (wiki_entity, wiki_concept, etc.) and exclude wiki_source."
+    )
+
+    # (b) EXPLICIT override — caller passes types=["wiki_source"] → must be honoured as-is
+    captured_calls.clear()
+    semantic_search(query="test", types=["wiki_source"])
+    assert captured_calls, "semantic_search must call semantic_search_core for explicit types too"
+    explicit_types = captured_calls[-1]["types"]
+    assert explicit_types is not None and "wiki_source" in explicit_types, (
+        f"#336 OD-B FAIL: explicit types=['wiki_source'] must be passed through unchanged. "
+        f"Got explicit_types={explicit_types!r}."
+    )
+
+
+def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypatch):
+    """#336 OD-B sub-decision: a source_type filter (no types) must NOT trigger the
+    non-source default-exclude — else the default types list would drop the very
+    wiki_source chunks the source_type filter targets (an inert filter footgun).
+
+    Pins the `if types is None and not source_type` guard in server.py:semantic_search.
+    With source_type supplied and no types, the core must receive types=None (no
+    non-source default forced), leaving wiki_source chunks searchable so the
+    source_type filter can match them.
+    """
+    import anytype_llm_wiki.server as _server_mod
+
+    captured_calls: list[dict] = []
+
+    def fake_core(query, space_id=None, types=None, ingested_after=None,
+                  ingested_before=None, source_type=None, domain_tags=None,
+                  limit=10, **kwargs):
+        captured_calls.append({"types": types, "source_type": source_type})
+        return []
+
+    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    from anytype_llm_wiki.server import semantic_search
+
+    semantic_search(query="test", source_type=["document"])
+    assert captured_calls, "semantic_search must call semantic_search_core"
+    passed = captured_calls[-1]
+    assert passed["types"] is None, (
+        f"#336 OD-B FAIL: a source_type filter must suppress the non-source default-exclude "
+        f"(types must stay None so wiki_source chunks remain searchable). Got types={passed['types']!r}."
+    )
+    assert passed["source_type"] == ["document"]
+
+
+# ---------------------------------------------------------------------------
+# #336 — B2: PAYLOAD_SCHEMA_VERSION constant guard
+# ---------------------------------------------------------------------------
+
+
+def test_payload_schema_version_is_3():
+    """#336 §12: PAYLOAD_SCHEMA_VERSION must be exactly 3 in config.py.
+
+    test_schema_version_3_bump_forces_full_reembed monkeypatches the constant to 3
+    to exercise the mechanic — but that does NOT gate the actual constant in config.py.
+    An implementer who leaves PAYLOAD_SCHEMA_VERSION = 2 would pass the mechanic test
+    but break the payload index compat. This guard fails until the constant is bumped.
+
+    RED now (config has 2). GREEN after impl sets PAYLOAD_SCHEMA_VERSION = 3.
+    """
+    from anytype_llm_wiki import config as _config
+    assert _config.PAYLOAD_SCHEMA_VERSION == 3, (
+        f"PAYLOAD_SCHEMA_VERSION must be 3 after #336 (was 2 pre-impl); "
+        f"got {_config.PAYLOAD_SCHEMA_VERSION}"
+    )

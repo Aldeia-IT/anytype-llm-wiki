@@ -18,6 +18,17 @@ except PackageNotFoundError:  # running from a source tree without install metad
 mcp = FastMCP("anytype-llm-wiki", version=_VERSION)
 
 
+# Default type set for semantic_search when no `types`/`source_type` is given:
+# every wiki type EXCEPT wiki_source (OD-B Option 2 — index sources but keep
+# them out of default results, symmetric with how wiki_query excludes them).
+_SEMANTIC_SEARCH_DEFAULT_TYPES = (
+    "wiki_entity",
+    "wiki_concept",
+    "wiki_comparison",
+    "wiki_query",
+)
+
+
 @mcp.tool()
 def semantic_search(
     query: str,
@@ -25,6 +36,8 @@ def semantic_search(
     types: list[str] | None = None,
     ingested_after: str | None = None,
     ingested_before: str | None = None,
+    source_type: list[str] | None = None,
+    domain_tags: list[str] | None = None,
     limit: int = 10,
 ) -> list[dict]:
     """Search Anytype objects by semantic similarity.
@@ -33,10 +46,19 @@ def semantic_search(
         query: Natural language search query.
         space_id: Optional space ID to filter results.
         types: Optional list of type keys to filter (e.g. ["page", "note"]).
+            When omitted (and no source_type filter is given), results default to
+            the non-source wiki types — wiki_source excerpts are excluded from
+            default results. Pass types=["wiki_source"] to retrieve them.
         ingested_after: Optional ISO-8601 datetime lower bound on last_modified_date, inclusive.
             Example: "2026-01-01T00:00:00Z".
         ingested_before: Optional ISO-8601 datetime upper bound on last_modified_date, inclusive.
             Example: "2026-06-30T23:59:59Z".
+        source_type: Optional list of source type tag names to filter by (e.g.
+            ["document", "conversation"]). ANY match. Applies only to wiki_source
+            chunks. Unknown values produce zero matches (no error).
+        domain_tags: Optional list of domain tag names to filter by (e.g. ["ai",
+            "ml"]). ANY-overlap: a chunk matches if its domain_tags list shares at
+            least one name with this filter. Unknown values produce zero matches.
         limit: Max results to return (default 10).
 
     Returns:
@@ -55,12 +77,31 @@ def semantic_search(
                     f"Expected ISO-8601, e.g. 2026-01-01T00:00:00Z"
                 )
 
+    for name, val in [("source_type", source_type), ("domain_tags", domain_tags)]:
+        if val is not None and (
+            not isinstance(val, list) or not all(isinstance(s, str) and s for s in val)
+        ):
+            raise ValueError(
+                f"{name} must be a non-empty list of non-empty strings; got {val!r}"
+            )
+
+    # OD-B Option 2 default-exclude: when the caller gives neither an explicit
+    # `types` list nor a `source_type` filter, scope to the non-source wiki types
+    # so wiki_source excerpts stay out of default results. A `source_type` filter
+    # explicitly targets wiki_source chunks, so do NOT force the default-exclude
+    # in that case (it would drop the very chunks the filter targets).
+    effective_types = types
+    if types is None and not source_type:
+        effective_types = list(_SEMANTIC_SEARCH_DEFAULT_TYPES)
+
     return semantic_search_core(
         query=query,
         space_id=space_id,
-        types=types,
+        types=effective_types,
         ingested_after=ingested_after,
         ingested_before=ingested_before,
+        source_type=source_type,
+        domain_tags=domain_tags,
         limit=limit,
     )
 
@@ -176,6 +217,8 @@ def wiki_query(
     types: list[str] | None = None,
     ingested_after: str | None = None,
     ingested_before: str | None = None,
+    source_type: list[str] | None = None,
+    domain_tags: list[str] | None = None,
 ) -> dict:
     """Query the typed wiki and return a synthesized answer (tiered retrieval).
 
@@ -197,6 +240,13 @@ def wiki_query(
             Example: "2026-01-01T00:00:00Z".
         ingested_before: Optional ISO-8601 datetime upper bound on last_modified_date, inclusive.
             Example: "2026-06-30T23:59:59Z".
+        source_type: Accepted for API symmetry; NO EFFECT on wiki_query — wiki_source
+            objects are never in scope here (the wiki type set excludes them in both
+            Tier-1 enumeration and the Tier-2 types filter). Use semantic_search to
+            filter by source_type.
+        domain_tags: Optional list of domain tag names to filter by (e.g. ["ai", "ml"]).
+            ANY-overlap: an entity/concept matches if its domain_tags list shares at
+            least one name with this filter. Unknown values produce zero matches.
 
     Returns:
         A QueryResult dict (answer, sources_consulted, filed_back, retrieval_mode,
@@ -212,6 +262,8 @@ def wiki_query(
         types=types,
         ingested_after=ingested_after,
         ingested_before=ingested_before,
+        source_type=source_type,
+        domain_tags=domain_tags,
     )
 
 

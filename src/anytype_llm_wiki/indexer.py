@@ -39,6 +39,10 @@ def _chunk_to_payload(chunk: dict) -> dict:
     }
     if "last_modified_date" in chunk:
         payload["last_modified_date"] = chunk["last_modified_date"]
+    if "source_type" in chunk:
+        payload["source_type"] = chunk["source_type"]
+    if "domain_tags" in chunk:
+        payload["domain_tags"] = chunk["domain_tags"]
     return payload
 
 
@@ -58,6 +62,8 @@ def _ensure_payload_indexes(client: QdrantClient) -> None:
         ("type_key", PayloadSchemaType.KEYWORD),
         ("space_id", PayloadSchemaType.KEYWORD),
         ("last_modified_date", PayloadSchemaType.DATETIME),
+        ("source_type", PayloadSchemaType.KEYWORD),  # NEW in #336
+        ("domain_tags", PayloadSchemaType.KEYWORD),  # NEW in #336
     ]:
         create_index(config.QDRANT_COLLECTION, field, field_schema=schema)
 
@@ -68,6 +74,8 @@ def semantic_search_core(
     types: list[str] | None = None,
     ingested_after: str | None = None,
     ingested_before: str | None = None,
+    source_type: list[str] | None = None,
+    domain_tags: list[str] | None = None,
     limit: int = 10,
 ) -> list[dict]:
     """Search Anytype object chunks by semantic similarity (shared core).
@@ -89,7 +97,13 @@ def semantic_search_core(
     and the collection name is read from ``config.QDRANT_COLLECTION`` so tests can
     monkeypatch both.
     """
-    from qdrant_client.models import DatetimeRange, FieldCondition, Filter, MatchValue
+    from qdrant_client.models import (
+        DatetimeRange,
+        FieldCondition,
+        Filter,
+        MatchAny,
+        MatchValue,
+    )
 
     vector = embed_query(query)
     client = _qdrant()
@@ -115,6 +129,14 @@ def semantic_search_core(
                     lte=ingested_before or None,
                 ),
             )
+        )
+    if source_type:
+        must.append(
+            FieldCondition(key="source_type", match=MatchAny(any=source_type))
+        )
+    if domain_tags:
+        must.append(
+            FieldCondition(key="domain_tags", match=MatchAny(any=domain_tags))
         )
     search_filter = Filter(must=must) if must else None
 

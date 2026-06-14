@@ -33,5 +33,6 @@ INDEX_STATE_FILE = INDEX_STATE_DIR / "state.json"
 
 # Qdrant chunk-payload schema version. Bumping this forces a one-time full
 # re-embed on the next reindex (see indexer.reindex migration logic). v1 = the
-# 6-field payload; v2 adds last_modified_date.
-PAYLOAD_SCHEMA_VERSION = 2
+# 6-field payload; v2 adds last_modified_date; v3 adds source_type and
+# domain_tags.
+PAYLOAD_SCHEMA_VERSION = 3

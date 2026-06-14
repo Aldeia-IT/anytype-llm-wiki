@@ -39,6 +39,8 @@ from .extraction import (
 from .ingest import (
     _cmp_versions,
     _domain_taxonomy,
+    _resolve_multi_select_tags,
+    _resolve_select_tag,
     _resolve_wiki_action_tag,
     _write_bidirectional_relations,
     _write_wikilog,
@@ -121,28 +123,9 @@ def _normalize_for_compare(text) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_select_tag(
-    client: WikiClient, space_id: str, property_key: str, tag_name: str
-) -> tuple[str | None, bool]:
-    """Resolve a select tag id by name under ``property_key``. Returns (id, degraded)."""
-    try:
-        props = client.list_properties(space_id)
-        prop_id = None
-        for p in props:
-            if isinstance(p, dict) and p.get("key") == property_key:
-                prop_id = p.get("id")
-                break
-        # Even if the property id is not found, attempt a tags read so the test's
-        # tags-path mock (which may raise) exercises the degraded branch (SF12).
-        tags = client.list_tags(space_id, prop_id or property_key)
-        for t in tags:
-            if isinstance(t, dict) and t.get("name") == tag_name:
-                return t.get("id"), False
-        return None, False
-    except httpx.HTTPError:
-        return None, True
-    except Exception:  # noqa: BLE001 — any tag-resolution failure degrades, never aborts
-        return None, True
+# _resolve_select_tag is the resolver-family home in ingest.py (D1/CTO-A2). It is
+# imported above and re-exported here so lint.py's
+# ``from .remember import _resolve_select_tag`` keeps resolving post-refactor.
 
 
 def _resolve_wiki_status_tag(
@@ -175,15 +158,18 @@ def _create_remember_source(
     chars before being written to wiki_excerpt. ``wiki_source_type`` is written
     only when ``source_type_tag_id`` is resolvable.
     """
-    if source_note:
-        excerpt = sanitize_property_value(scrub_credentials(source_note))[:500]
-    else:
-        excerpt = ""
     name = (
         scrub_credentials(source_note)[:200]
         if source_note
         else f"agent {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
     )
+    if source_note:
+        excerpt = sanitize_property_value(scrub_credentials(source_note))[:500]
+    else:
+        # #336 D4b: a non-empty stub (the source name) so an agent source with no
+        # note still produces >=1 chunk and is reachable by source_type=["agent"]
+        # (an empty excerpt yields zero chunks -> inert filter).
+        excerpt = name
     props = [
         {"key": "wiki_excerpt", "text": excerpt},
         {"key": "wiki_ingested_at", "date": datetime.now(timezone.utc).isoformat()},
@@ -333,7 +319,12 @@ def wiki_remember(
             ]
 
         base_warnings = list(schema_warnings)
-        meta = {"relations": relations or [], "source": source, "subject": knowledge[:50]}
+        meta = {
+            "relations": relations or [],
+            "source": source,
+            "subject": knowledge[:50],
+            "domain_tags": domain_tags or [],  # #336 D3: thread into meta (bug fix)
+        }
 
         # g. SUBMIT — durably append this batch to the per-space work-log,
         #    LOCK-FREE. Once this returns the subjects are durable; whoever holds
@@ -518,6 +509,18 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
     relations = list(meta.get("relations") or [])
     subject = meta.get("subject") or ""
 
+    # #336 D3: resolve wiki_domain_tags ONCE per batch (one network call). SET
+    # semantics on update (replace, not merge) — just append the prop, no
+    # GET-then-merge. Source objects do NOT receive wiki_domain_tags.
+    domain_tag_ids: list[str] = []
+    domain_tags_names = list(meta.get("domain_tags") or [])
+    if domain_tags_names:
+        domain_tag_ids, dt_degraded = _resolve_multi_select_tags(
+            client, space_id, "wiki_domain_tags", domain_tags_names
+        )
+        if dt_degraded:
+            result["warnings"].append("domain_tags_resolution_degraded")
+
     name_to_id: dict[str, str] = {}
     kind_by_id: dict[str, str] = {}
     wikilog_notes: list[str] = []
@@ -646,6 +649,11 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                         )
                     if src_id:
                         patch_props.append({"key": "wiki_sources", "objects": [src_id]})
+                    if domain_tag_ids:
+                        # SET (replace) — no merge with the existing value (OD-C).
+                        patch_props.append(
+                            {"key": "wiki_domain_tags", "multi_select": domain_tag_ids}
+                        )
                     client.update_object(space_id, target_id, {"properties": patch_props})
                     obj_entry["action"] = "updated"
 
@@ -658,6 +666,10 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 create_props = [{"key": prop_key, "text": subj_facts}]
                 if src_id:
                     create_props.append({"key": "wiki_sources", "objects": [src_id]})
+                if domain_tag_ids:
+                    create_props.append(
+                        {"key": "wiki_domain_tags", "multi_select": domain_tag_ids}
+                    )
                 created = client.create_object(
                     space_id, type_key=type_key, name=clean_name, properties=create_props,
                 )
