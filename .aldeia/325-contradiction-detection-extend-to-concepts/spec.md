@@ -200,11 +200,14 @@ The body is unchanged: it reads `wiki_contradictions` and resolves via `wiki_las
 # Before
 result["warnings"].append("contradiction_detection_degraded")
 
-# After
-result["warnings"].append(f"contradiction_detection_degraded:{kind}")
+# After — discriminator appended ONLY for the new (non-entity) path; entity stays byte-for-byte
+warning = "contradiction_detection_degraded"
+if kind != "entity":
+    warning += f":{kind}"
+result["warnings"].append(warning)
 ```
 
-So an operator can tell which path degraded (`contradiction_detection_degraded:entity` vs `:concept`) now that the degrade surface roughly doubles with concepts in scope. Note: the existing entity regression test asserts the warning string; its assertion must be updated to expect `contradiction_detection_degraded:entity` (see Test Plan), and the README/known-limitations wording referencing the warning, if any, updated.
+So an operator can tell when the **concept** path degraded (`contradiction_detection_degraded:concept`) now that the degrade surface roughly doubles with concepts in scope. **Entity behaviour is preserved exactly:** the entity path still emits the bare `contradiction_detection_degraded` string, so the existing entity regression test (`test_detection_degraded`) needs **no assertion change** and AC-2 stays clean (bare string ⇒ entity, `:concept` ⇒ concept is still fully diagnosable). Detection fires only for entity/concept today, so the asymmetry has no other-kind case to cover. Any README/known-limitations wording referencing the warning, if present, stays valid for entities and gains the concept variant.
 
 ---
 
@@ -233,7 +236,7 @@ Test mock to mirror: `_make_peer_get_object_response` in `test_ingest.py` (~1204
 | `_existing_text` (`util.py`) | Generic; calling with `"wiki_definition"` already works |
 | `_relation_ids` (`util.py`) | Generic; already used with `"wiki_contradictions"` |
 | `_rel_key` / `_REL_KEY_BY_KIND` (`ingest.py`) | Already maps `"concept"` → `"wiki_related"` |
-| Non-blocking exception handler (`ingest.py`, ~925) | Detection must never block ingest (#287 hard constraint); only the warning *string* changes (CS-9), not the control flow |
+| Non-blocking exception handler (`ingest.py`, ~925) | Detection must never block ingest (#287 hard constraint); control flow unchanged. CS-9 only *appends* a `:concept` suffix on the concept path; the entity warning string is untouched |
 | `contradiction_unresolved` check body (`lint.py`, ~491–503) | Only the `tk` gate changes (CS-8); the `wiki_contradictions` read and `wiki_last_reviewed` resolution logic are reused as-is |
 
 ---
@@ -318,13 +321,13 @@ Existing call sites pass no `kind` → default `"entity"` → unchanged.
 
 ### Regression guard tests (entity path)
 
-All `TestContradictionDetection` tests (`test_ingest.py:1224+`) are entity-path tests. Because `detect_contradictions` gains `kind` keyword-only with default `"entity"`, the *real-call* unit tests are truly unchanged; the *monkeypatched* integration tests need the one-line stub touch-up above (and `test_detection_degraded` must update its expected warning string to `contradiction_detection_degraded:entity` per CS-9).
+All `TestContradictionDetection` tests (`test_ingest.py:1224+`) are entity-path tests. Because `detect_contradictions` gains `kind` keyword-only with default `"entity"`, the *real-call* unit tests are truly unchanged; the *monkeypatched* integration tests need only the one-line stub touch-up above. CS-9 leaves the entity warning string bare, so `test_detection_degraded`'s assertion is unchanged.
 
 | Test | Guards | R1 touch-up |
 |------|--------|-------------|
 | `test_contradiction_bidirectional_write` | Bidirectional PATCH; no target GET | stub `**kwargs` |
 | `test_no_detection_on_create` | Create branch → no detection call | none (no detection call) |
-| `test_detection_degraded` | LLM failure → ingest continues; warning present | stub `**kwargs`; assert `:entity` (CS-9) |
+| `test_detection_degraded` | LLM failure → ingest continues; warning present | stub `**kwargs` (warning string unchanged — entity stays bare) |
 | `test_detection_degraded_warning_absent_on_clean_path` | No-contradiction → warning absent | stub `**kwargs` |
 | `test_anti_injection_preamble_present` | Prompt carries anti-injection preamble | none if real-call; else stub `**kwargs` |
 | `test_hallucinated_id_filtered` | Ghost id filtered (real call) | **none — truly unchanged** |
@@ -340,7 +343,7 @@ Concept tests carry a distinct docstring tag `#325 AC-Cn` (SG-5) to avoid collis
 `test_concept_contradiction_bidirectional_write`: Concept update (`kind="concept"`) with a contradicting `wiki_related` peer → `detect_contradictions` called with `kind="concept"` → candidates from `wiki_related` → `wiki_contradictions` PATCHed bidirectionally → `contradictions_detected >= 1`, `status != "error"`, no target GET. Uses both fixtures with `kind="concept"`.
 
 **AC-C2 — Entity regression (ticket checkbox 2)**
-All `TestContradictionDetection` entity tests pass after the **stub signature touch-up** (SF-1/SF-2): the real-call unit tests (`test_hallucinated_id_filtered`, `test_self_reference_skipped`) are unchanged; the monkeypatched integration tests get a one-line `**kwargs` stub edit and `test_detection_degraded` updates its expected warning to `:entity`. This remains the primary regression guard — corrected mechanism, not "unchanged across the board".
+All `TestContradictionDetection` entity tests pass after the **stub signature touch-up** (SF-1/SF-2): the real-call unit tests (`test_hallucinated_id_filtered`, `test_self_reference_skipped`) are unchanged; the monkeypatched integration tests get a one-line `**kwargs` stub edit. The entity degraded-warning string is unchanged (CS-9 appends `:concept` only on the concept path), so no entity assertion changes. This remains the primary regression guard — corrected mechanism, not "unchanged across the board".
 
 **AC-C3 — Concept create branch no-op (ticket checkbox 3)**
 `test_concept_no_detection_on_create`: Concept ingest where `resolve_entity` returns `action == "create"` → `detect_contradictions` never called → `contradictions_detected == 0`.
@@ -398,7 +401,7 @@ Ordered schema → ingest → lint → tests → docs.
    - `contradiction_unresolved` gate → `tk in ("wiki_entity", "wiki_concept")`; fix the "wiki_entity only (SF9)" comment to "entity+concept (#325)".
 
 4. **Tests** — `tests/wiki/test_ingest.py` and `tests/wiki/test_lint.py`:
-   - Touch up all `fake_detect_*` stub signatures (`**kwargs`); update `test_detection_degraded` expected warning to `:entity`.
+   - Touch up all `fake_detect_*` stub signatures (`**kwargs`). `test_detection_degraded`'s expected warning is unchanged (entity stays bare per CS-9).
    - Extend fixtures: `_make_objects_shaped_search_response(kind=)`, `_make_peer_get_object_response(kind=)`, `_make_concept(wiki_contradictions=, wiki_last_reviewed=)`.
    - Add AC-C1, AC-C3..C11 tests; run full `TestContradictionDetection` + lint contradiction suite green.
 
@@ -415,7 +418,7 @@ Ordered schema → ingest → lint → tests → docs.
 Mapping to the three ticket checkboxes (aldeia-box#325). The **surfacing/lint + schema** additions (BL-1) are noted explicitly as in-scope coherence work beyond the literal checkbox text.
 
 - [ ] **Ticket AC-1:** A newly-ingested Concept claim conflicting with an already-linked Concept is detected and cross-linked via `wiki_contradictions`. Covered by spec AC-C1; real-function dispatch by AC-C7. **Plus (BL-1):** the cross-link surfaces in `wiki_lint` as `contradiction_unresolved` — AC-C11.
-- [ ] **Ticket AC-2:** Existing Entity behaviour unchanged (regression-guarded). Covered by spec AC-C2 — real-call unit tests unchanged; monkeypatched tests get a one-line stub touch-up (SF-1/SF-2) and the degraded-warning string gains a `:entity` discriminator (CS-9).
+- [ ] **Ticket AC-2:** Existing Entity behaviour unchanged (regression-guarded). Covered by spec AC-C2 — real-call unit tests unchanged; monkeypatched tests get a one-line stub touch-up (SF-1/SF-2). The entity degraded-warning string is left bare (CS-9 appends `:concept` only on the concept path), so no entity behaviour changes.
 - [ ] **Ticket AC-3:** Tests cover the Concept conflict path mirroring the Entity tests. Covered by AC-C3..C11 (concept create/degraded/self-ref/dedup/mixed-kind/multiple-peers/empty-definition/lint).
 - [ ] **In-scope coherence (BL-1, flagged for Decide):** `wiki_concept` gains `wiki_last_reviewed` (CS-7) so concept contradictions are resolvable; `lint.py` surfacing gate extends to concepts (CS-8). Additive idempotent bootstrap + schema-version bump; documented in MIGRATIONS.md.
 
