@@ -2,8 +2,8 @@
 
 **Status:** SPEC
 **Date:** 2026-06-18
-**Author:** spec-writer worker (claude-sonnet-4-6); fix worker (claude-opus-4-8), R1
-**Review rounds:** 1 (review-r1.md addressed)
+**Author:** spec-writer worker (claude-sonnet-4-6); fix worker (claude-opus-4-8), R1 + R2 re-scope
+**Review rounds:** 2 (review-r1.md + review-r2.md addressed)
 **Ticket:** aldeia-box#325
 **Branch:** `aldeia/325-contradiction-detection-extend-to-concepts`
 
@@ -23,18 +23,13 @@ From `README.md:175`:
 
 This is a correctness gap: the typed knowledge graph includes first-class Concept Objects, and a wiki that silently ignores contradictions between linked Concepts is unreliable.
 
-### Scope: detection AND surfacing (R1 / BL-1)
+### Scope: confined detection extension (#325 core) + a documented surfacing follow-up
 
-The feature is not "write a `wiki_contradictions` link" — `README.md:175` defines it as objects being "cross-linked via `wiki_contradictions` **and left for review** (`wiki_lint` flags them)." A contradiction that is written but can never surface in `wiki_lint`, and can never be marked resolved, is a half-built feature.
+The three literal ticket acceptance criteria are: (1) a newly-ingested Concept claim conflicting with an already-linked Concept is detected and cross-linked via `wiki_contradictions`; (2) existing Entity behaviour is unchanged; (3) tests cover the Concept path mirroring the Entity tests. **All three are fully satisfied by the confined detection change set CS-1..CS-6 + CS-9 alone** — seven change sites in `ingest.py`, with no schema change, no lint change, and no bootstrap change. Concept contradictions are recorded in `wiki_contradictions` and browsable in Anytype.
 
-The `contradiction_unresolved` (Critical) surfacing in `lint.py` is gated to `wiki_entity` only, and `wiki_concept` does **not** carry the `wiki_last_reviewed` property that lint uses to mark a contradiction resolved (verified: `types_schema.py` entity block has `wiki_last_reviewed`; concept block does not). So coherent delivery of #325 requires pulling the *surfacing* affordance into scope:
+R1 raised an additional *surfacing* affordance (concept contradictions flagged by `wiki_lint` and markable-resolved) on coherence grounds, under the assumption it was a small additive bootstrap change. **R2 (BL-R2-1) disproved that assumption:** re-running `wiki-bootstrap` does NOT attach a new property to the already-existing `wiki_concept` type — `bootstrap.py:281-285` `continue`s past existing types and never calls `create_type` (the only inline-property-link path), and the property loop at `bootstrap.py:330-353` only reports created/skipped properties, never links one onto a live type. Delivering surfacing correctly requires a **new, idempotent bootstrap capability** ("ensure declared properties are linked onto existing wiki types") of materially larger scope and review surface than this confined ticket. It is therefore moved into a clearly-labelled **recommended follow-up** (see "Recommended Follow-Up" below), not the #325 core.
 
-1. Extend the lint surfacing gate to concepts.
-2. Add `wiki_last_reviewed` to the `wiki_concept` type so concept contradictions are *resolvable*, not just flaggable.
-
-This is an additive, idempotent bootstrap change — **not** a data migration (existing concept objects simply have no `wiki_last_reviewed` value, which reads as "unreviewed = flagged", the desired default). It does revise the earlier "no schema change at all" claim; the spec now reflects the additive schema honestly (see Resource Impact / Deployment).
-
-**For Decide:** the literal ticket ACs name only detection + cross-linking; the surfacing/schema additions are an in-scope coherence requirement surfaced explicitly here so Jan can veto or split at Decide. The detection-only subset (CS-1..CS-6) is fully separable from the surfacing subset (CS-7..CS-9) if a split is preferred.
+**For Decide:** the lead recommendation is to ship the confined #325 core (which meets its own ACs in full) and open a dedicated surfacing follow-up ticket. Jan may instead pull surfacing back into #325 at Decide, with the larger bootstrap scope (the new ensure-properties-on-existing-types capability) understood. Both options are one step away: the core is shippable as-is, and the follow-up section is fully specified so it can be folded back in or split out without further analysis.
 
 ---
 
@@ -46,8 +41,8 @@ Research (`.aldeia/325-contradiction-detection-extend-to-concepts/research.md`, 
 - `_write_contradiction_links` is fully kind-agnostic (operates only on `wiki_contradictions`); the A/B rollback pattern, dedup-as-no-op, and `wiki_last_reviewed`-never-touched (write-side) guarantees are reused unchanged.
 - `_rel_key` / `_REL_KEY_BY_KIND` already map `"concept"` → `"wiki_related"` (~`ingest.py:437`); reused unchanged.
 - `peer_obj.get("type", {}).get("key")` is the verified way to read peer type from a `get_object` result (`anytype_client.py:44–52`).
-- **R1 lead discovery:** `lint.py` gates `contradiction_unresolved` to `tk == "wiki_entity"` (comment "active; wiki_entity only (SF9)"), while the adjacent orphan and stale checks already use `tk in ("wiki_entity", "wiki_concept")`. And `wiki_concept` lacks `wiki_last_reviewed` (BL-1).
 - **R1 lead discovery:** the monkeypatch `fake_detect_contradictions` stubs in `test_ingest.py` have signature `(new_facts, obj_id, target, space_id, client, read_client)` with no `kind` — they will raise `TypeError` once CS-6 passes `kind=kind` (SF-1/SF-2).
+- **R2 lead discovery (BL-R2-1):** `bootstrap.py:281-285` skips `create_type` for already-existing types and the property loop at `bootstrap.py:330-353` never links a property onto a live type, so re-bootstrap cannot provision `wiki_concept.wiki_last_reviewed` on an existing space. This is why lint surfacing is a follow-up, not core (see "Recommended Follow-Up").
 - `remember.py:_type_for_kind` (~226) already encodes the concept→`wiki_definition` mapping, keyed by `kind` (SF-5).
 
 ### Alternatives Considered
@@ -58,7 +53,7 @@ Research (`.aldeia/325-contradiction-detection-extend-to-concepts/research.md`, 
 
 ## Proposed Solution
 
-Nine change sites across three source files. Detection extension (CS-1..CS-6, `ingest.py`), and surfacing/resolution affordance (CS-7 `types_schema.py`, CS-8 `lint.py`, CS-9 `ingest.py` degraded-warning discriminator). Tests, README, CHANGELOG, and MIGRATIONS.md are touched at the implementation step.
+**Seven change sites, all in `ingest.py`:** the detection extension (CS-1..CS-6) plus the kind-discriminated degraded warning (CS-9). No other source file changes in the core scope — no schema change, no lint change, no bootstrap change. Tests, README, and CHANGELOG are touched at the implementation step. (The lint surfacing additions originally numbered CS-7/CS-8 are relocated to "Recommended Follow-Up" below.)
 
 ### CS-1 — Detection gate (`ingest.py`, comment "entity-only (LD1)", ~920)
 
@@ -160,40 +155,6 @@ peers = detect_contradictions(
 > `TypeError` (their signatures omit `kind`), which is swallowed by the `except Exception`
 > at ~`ingest.py:925`. See Test Plan → "Monkeypatch stub signature touch-up".
 
-### CS-7 — Add `wiki_last_reviewed` to the `wiki_concept` type (`types_schema.py`, concept properties block, ~101–113) — BL-1
-
-The entity type carries `wiki_last_reviewed` as the resolution affordance for `contradiction_unresolved`; the concept type does not. Mirror the entity entry's exact dict shape into the concept `properties` list:
-
-```python
-# Entity block already has (verified, ~types_schema.py:97):
-{"property_key": "wiki_last_reviewed", "name": "Wiki Last Reviewed", "format": "date"},
-
-# Add the identical entry to the wiki_concept properties list (after wiki_status, ~line 112):
-{"property_key": "wiki_last_reviewed", "name": "Wiki Last Reviewed", "format": "date"},
-```
-
-This is additive and idempotent (bootstrap "idempotently creates types, properties"). It is **not** a data migration: existing concepts have no value → reads as unreviewed → flagged, the desired default.
-
-**Schema version bump (verified gate behaviour).** `WIKI_SCHEMA_VERSION` is currently `"0.4.1"` (`types_schema.py:27`). Adding a property to a provisioned type is a schema change; per the established v0.3.0 precedent, bootstrap stamps the new version on the root Collection and `wiki_ingest` against an older-stamped space returns `wiki_schema_outdated` directing the operator to re-run bootstrap. Bump `WIKI_SCHEMA_VERSION` to the next patch (e.g. `"0.4.2"`) as part of this change site so the additive property is honestly versioned and the bootstrap-re-run prompt fires automatically. The implementer confirms the next-version value against the release at impl time.
-
-**Write-side guarantee preserved (BL-1 requirement 5):** detection still writes only `wiki_contradictions`. `_write_contradiction_links` must continue to never touch `wiki_last_reviewed`. Adding the property to the schema does not change any write path — it only gives lint a key to read and the operator a field to set manually.
-
-### CS-8 — Lint surfacing gate for concepts (`lint.py`, `contradiction_unresolved` check, comment "active; wiki_entity only (SF9)", ~490) — BL-1
-
-```python
-# Before
-# (d) contradiction_unresolved (Critical) — active; wiki_entity only (SF9).
-...
-if tk == "wiki_entity":
-
-# After
-# (d) contradiction_unresolved (Critical) — active; entity+concept (#325).
-...
-if tk in ("wiki_entity", "wiki_concept"):
-```
-
-The body is unchanged: it reads `wiki_contradictions` and resolves via `wiki_last_reviewed` (`if contradictions and not last_reviewed`). With CS-7 providing `wiki_last_reviewed` on concepts, this body works identically for both types. Fix the stale "wiki_entity only (SF9)" comment.
-
 ### CS-9 — Kind-discriminated degraded warning (`ingest.py`, `result["warnings"].append("contradiction_detection_degraded")`, ~926) — SF-6
 
 ```python
@@ -237,7 +198,8 @@ Test mock to mirror: `_make_peer_get_object_response` in `test_ingest.py` (~1204
 | `_relation_ids` (`util.py`) | Generic; already used with `"wiki_contradictions"` |
 | `_rel_key` / `_REL_KEY_BY_KIND` (`ingest.py`) | Already maps `"concept"` → `"wiki_related"` |
 | Non-blocking exception handler (`ingest.py`, ~925) | Detection must never block ingest (#287 hard constraint); control flow unchanged. CS-9 only *appends* a `:concept` suffix on the concept path; the entity warning string is untouched |
-| `contradiction_unresolved` check body (`lint.py`, ~491–503) | Only the `tk` gate changes (CS-8); the `wiki_contradictions` read and `wiki_last_reviewed` resolution logic are reused as-is |
+| `lint.py` (entire file) | **Core scope touches no lint code.** Concept lint surfacing is a follow-up (see "Recommended Follow-Up") |
+| `types_schema.py` (entire file) | **Core scope adds no type or property.** The concept `wiki_last_reviewed` property is a follow-up |
 
 ---
 
@@ -245,7 +207,7 @@ Test mock to mirror: `_make_peer_get_object_response` in `test_ingest.py` (~1204
 
 Each Concept update that passes the gate adds O(linked-peers) `get_object` calls + one LLM call — identical shape to the existing entity path, inherited not enlarged (modulo SG-1 below).
 
-**Schema change (revised from R0):** CS-7 adds one property (`wiki_last_reviewed`) to the `wiki_concept` type and bumps `WIKI_SCHEMA_VERSION`. This is an **additive, idempotent bootstrap change**, not a data migration — no backfill, existing objects keep working with an empty value. No new Anytype types or relations. No new dependency. Negligible additional load on the 32 GB Mac Mini.
+**No schema change, no new types or properties, no schema-version bump, no deployment steps.** The core change set is entirely in `ingest.py`. No new Anytype types or relations, no new dependency, no data migration. Negligible additional load on the 32 GB Mac Mini. **Rollback is a trivial `git revert`** — there is no provisioned state to unwind. (Schema/bootstrap/migration impact applies only to the surfacing follow-up — see "Recommended Follow-Up".)
 
 ### SG-1 — Unbounded peer fan-out (deferred, pre-existing)
 
@@ -270,7 +232,7 @@ Failure mode is identical to the entity path: any exception in detection → deg
 
 **Deferral rationale (concrete):** both are pre-existing for entities and equally silent there; adding per-peer debug logging touches the shared loop and is a broader observability change than #325's confined extension warrants. Captured as a follow-up: emit a debug-level log on per-peer skip and on type-key fallback in `detect_contradictions`. The kind discriminator (CS-9) is the one cheap, in-scope visibility win and is included.
 
-**Deployment:** re-run `wiki-bootstrap` on existing spaces to provision the new `wiki_concept.wiki_last_reviewed` property and stamp the new schema version (idempotent, non-destructive, no backfill). `wiki_ingest` against an un-bootstrapped space returns `wiki_schema_outdated` directing the operator to re-run bootstrap — the same guard rail as prior schema bumps. Recorded in MIGRATIONS.md (see Implementation Plan step 5). No other deployment steps. Rollback is a git revert plus an optional (harmless) leftover property on the type.
+**Deployment:** none. The core change is code-only in `ingest.py` — no bootstrap re-run, no schema-version stamp, no migration note. Rollback is a trivial `git revert`.
 
 ---
 
@@ -301,7 +263,7 @@ Every `fake_detect_*` stub in `test_ingest.py` that monkeypatches `detect_contra
 
 ### Fixture helper changes
 
-**`_make_objects_shaped_search_response` (~1168):** add `kind: str = "entity"`:
+**`_make_objects_shaped_search_response` (~1168):** add `kind: str = "entity"`. The new branch must set the relation key, the comparable-text property key, and the type key together, and write the comparable text into the kind-appropriate body property (a concept's text lives under `wiki_definition`, an entity's under `wiki_facts`) so the real `_facts_key_for_peer` dispatch is exercised end-to-end:
 
 ```python
 def _make_objects_shaped_search_response(
@@ -310,14 +272,15 @@ def _make_objects_shaped_search_response(
     rel_key   = "wiki_related"    if kind == "concept" else "wiki_relations"
     facts_key = "wiki_definition" if kind == "concept" else "wiki_facts"
     type_key  = "wiki_concept"    if kind == "concept" else "wiki_entity"
+    # ... build the object with "type": {"key": type_key},
+    #     relations under rel_key, and the comparable text under facts_key:
+    #     properties/body[facts_key] = <the object's definition-or-facts text>
     ...
 ```
 
 Existing call sites pass no `kind` → default `"entity"` → unchanged.
 
-**`_make_peer_get_object_response` (~1204):** add `kind: str = "entity"` that sets `"type": {"key": "wiki_concept"}` and uses the `"wiki_definition"` property key when `kind == "concept"`. Existing call sites unaffected.
-
-**`_make_concept` in `test_lint.py` (~157):** for CS-8 lint coverage, extend with `wiki_contradictions: list | None = None` and `wiki_last_reviewed: str | None = None` params, mirroring `_make_entity` — the current `_make_concept` builds neither property. (Verified: `_make_concept` has no contradictions/last-reviewed params today.)
+**`_make_peer_get_object_response` (~1204):** add `kind: str = "entity"` that sets `"type": {"key": "wiki_concept"}` and writes the peer's comparable text under the `"wiki_definition"` property key when `kind == "concept"` (else `"type": {"key": "wiki_entity"}` and `"wiki_facts"`). Existing call sites unaffected.
 
 ### Regression guard tests (entity path)
 
@@ -370,63 +333,80 @@ All `TestContradictionDetection` entity tests pass after the **stub signature to
 **AC-C10 — Empty/absent concept definition peer (SG-3, ticket checkbox 3)**
 `test_concept_empty_definition_peer`: a concept peer whose `wiki_definition` is empty/absent does not crash and is not spuriously flagged (no `wiki_contradictions` PATCH for that peer).
 
-**AC-C11 — Concept contradiction surfaces in lint (BL-1, ticket checkbox 1)**
-`test_concept_contradiction_unresolved` in `test_lint.py`, mirroring the entity `test_contradiction_check_active`: a `wiki_concept` with `wiki_contradictions` set and null `wiki_last_reviewed` → `contradiction_unresolved` finding fires with severity `critical`; a normal concept (no contradictions) does not fire; and a concept with `wiki_last_reviewed` set does **not** fire (mirror the entity resolution assertion). Uses the extended `_make_concept`.
-
 ### B-side rollback coverage (SG-4 — known gap, not a #325 requirement)
 `_write_contradiction_links` is kind-agnostic and locked; the entity suite has no B-side rollback test either (pre-existing debt). Not added here. Noted as a known coverage gap to fold into the SG-1 follow-up ticket.
 
 ### Tests must be able to fail before implementation
 
-New concept-path tests (AC-C1, AC-C3..C10) must fail against the current codebase (gate is `kind == "entity"`, no `kind` parameter). AC-C11 must fail against current `lint.py` (gate `tk == "wiki_entity"`) and depends on CS-7 (the concept type must carry `wiki_last_reviewed` for the resolution assertion). This validates each test exercises the new path.
+New concept-path tests (AC-C1, AC-C3..C10) must fail against the current codebase (gate is `kind == "entity"`, no `kind` parameter). This validates each test exercises the new path.
 
 ---
 
 ## Implementation Plan
 
-Ordered schema → ingest → lint → tests → docs.
+Core scope only (CS-1..CS-6, CS-9). Ordered ingest → tests → docs. No schema, lint, bootstrap, or migration step (those live in "Recommended Follow-Up").
 
-1. **Schema (CS-7)** — `src/anytype_llm_wiki/wiki/types_schema.py`:
-   - Add `{"property_key": "wiki_last_reviewed", "name": "Wiki Last Reviewed", "format": "date"}` to the `wiki_concept` properties list (mirror the entity entry exactly).
-   - Bump `WIKI_SCHEMA_VERSION` (`"0.4.1"` → next patch, confirm value at impl time).
-
-2. **Ingest (CS-1..CS-6, CS-9)** — `src/anytype_llm_wiki/wiki/ingest.py`:
+1. **Ingest (CS-1..CS-6, CS-9)** — `src/anytype_llm_wiki/wiki/ingest.py`:
    - Add `_TEXT_KEY_BY_TYPE_KEY` constant + `_facts_key_for_peer` helper (cross-reference `remember.py:_type_for_kind`).
    - Add `kind: str = "entity"` keyword-only param to `detect_contradictions`.
    - Candidate line → `_rel_key(kind)`; peer-facts line → `_facts_key_for_peer(peer_obj)`.
    - Gate → `in ("entity", "concept")`; pass `kind=kind` at the call site; update the "entity-only (LD1)" comment.
-   - Degraded warning → `f"contradiction_detection_degraded:{kind}"`.
+   - Degraded warning → discriminator appended only on the non-entity path (CS-9).
 
-3. **Lint (CS-8)** — `src/anytype_llm_wiki/wiki/lint.py`:
-   - `contradiction_unresolved` gate → `tk in ("wiki_entity", "wiki_concept")`; fix the "wiki_entity only (SF9)" comment to "entity+concept (#325)".
-
-4. **Tests** — `tests/wiki/test_ingest.py` and `tests/wiki/test_lint.py`:
+2. **Tests** — `tests/wiki/test_ingest.py`:
    - Touch up all `fake_detect_*` stub signatures (`**kwargs`). `test_detection_degraded`'s expected warning is unchanged (entity stays bare per CS-9).
-   - Extend fixtures: `_make_objects_shaped_search_response(kind=)`, `_make_peer_get_object_response(kind=)`, `_make_concept(wiki_contradictions=, wiki_last_reviewed=)`.
-   - Add AC-C1, AC-C3..C11 tests; run full `TestContradictionDetection` + lint contradiction suite green.
+   - Extend fixtures: `_make_objects_shaped_search_response(kind=)`, `_make_peer_get_object_response(kind=)`.
+   - Add AC-C1, AC-C3..C10 tests; run full `TestContradictionDetection` suite green.
 
-5. **Docs** — after tests pass:
-   - `README.md:175` — replace "entity-only … (`wiki_concept` scope deferred)" with detection firing for both entity and concept updates, surfaced for both in `wiki_lint`.
-   - `README.md:237` — remove "and across Concepts" from the roadmap bullet (shipped).
-   - `CHANGELOG.md` — entry: "Contradiction detection + `wiki_lint` surfacing extended to `wiki_concept`; concept type gains `wiki_last_reviewed` (#325)."
-   - `MIGRATIONS.md` — under the "Unreleased" section, add an additive-property note: re-run `wiki-bootstrap` to provision `wiki_concept.wiki_last_reviewed` and stamp the new schema version (idempotent, non-destructive, no backfill); `wiki_ingest` on an un-bootstrapped space returns `wiki_schema_outdated`. Match the existing MIGRATIONS.md prose format (see the v0.3.0 entry as the template).
+3. **Docs** — after tests pass:
+   - `README.md:175` — rewrite so detection fires for **both entity and concept** updates (cross-linked via `wiki_contradictions`), and **fix the severity to `critical`, not `High`** (SF-R2-1; actual severity `lint.py:500` / `test_lint.py:1197`). Note that `wiki_lint` surfacing for concepts is a planned **follow-up** (entity contradictions are flagged by `wiki_lint` today; concept contradictions are recorded and browsable in Anytype but not yet flagged by lint).
+   - `README.md:237` — remove "and across Concepts" from the roadmap bullet (detection shipped).
+   - `CHANGELOG.md` — entry: "Contradiction detection extended to `wiki_concept` updates; concept contradictions are detected and cross-linked via `wiki_contradictions` (#325). `wiki_lint` surfacing for concepts is a follow-up."
+
+---
+
+## Recommended Follow-Up (out of confined scope): lint surfacing of concept contradictions
+
+This section is **NOT part of the #325 core.** It captures the surfacing affordance R1 raised (concept contradictions flagged by `wiki_lint` and markable-resolved) together with the R2 finding (BL-R2-1) that makes it a materially larger, separate unit of work. The lead recommends a **dedicated follow-up ticket**. Until it ships, concept contradictions are still recorded in `wiki_contradictions` and browsable in Anytype — they are simply not surfaced by `wiki_lint`.
+
+### Why this is not a small additive change (BL-R2-1, verified)
+
+The naïve plan — "add `wiki_last_reviewed` to the `wiki_concept` type and re-run bootstrap" — **does not work on any already-bootstrapped space** (i.e. the real aldeia-box wiki):
+
+- `bootstrap.py:281-285`: for any `type_key` already present, the loop appends to `types_skipped` and `continue`s, **skipping `create_type` entirely**. `create_type` (286-302) is the **only** code path that links inline properties onto a type.
+- `bootstrap.py:330-353`: the property loop only *reports* created/skipped properties and builds `prop_map`; it **never links a property onto an already-existing type**.
+- `wiki_last_reviewed` already exists globally (declared on `wiki_entity`), so on re-bootstrap it lands in `pre_existing_prop_keys` → reported `properties_skipped: already_exists`. Nothing attaches it to `wiki_concept`.
+
+So a CS-8-style lint gate would flag concept contradictions as `critical` while the concept type still lacks the `wiki_last_reviewed` field needed to mark them resolved — the exact broken UX this surfacing was meant to prevent.
+
+### What the follow-up must deliver
+
+1. **New bootstrap capability — ensure declared properties are linked onto existing wiki types.** An idempotent step that, per provisioned type, diffs declared-vs-live properties and links any missing ones via the Anytype type/property API. **The implementer must verify the Anytype `API-update-type` / property-link endpoint exists and behaves idempotently** — no current repo code path adds a property to an existing type (the v0.3.0 precedent added *tag options to an existing select property* via dedicated `_ensure_*` tag paths, which is not the same operation). This touches the bootstrap path for all types and carries its own review surface.
+2. **Schema property (former CS-7).** Add `{"property_key": "wiki_last_reviewed", "name": "Wiki Last Reviewed", "format": "date"}` to the `wiki_concept` properties list in `types_schema.py` (mirror the entity entry exactly). Additive, not a data migration — existing concepts have no value → reads as unreviewed → flagged, the desired default. Detection's write-side guarantee is unaffected: `_write_contradiction_links` still never touches `wiki_last_reviewed`.
+3. **Lint gate (former CS-8).** In `lint.py`, change the `contradiction_unresolved` gate from `tk == "wiki_entity"` to `tk in ("wiki_entity", "wiki_concept")` and fix the stale "wiki_entity only (SF9)" comment. The check body is otherwise unchanged: it reads `wiki_contradictions` and resolves via `wiki_last_reviewed` (`if contradictions and not last_reviewed`), with severity `critical`.
+4. **Schema-version bump.** Bump `WIKI_SCHEMA_VERSION` (`"0.4.1"` at `types_schema.py:27` → next patch) so the additive property is versioned and the `wiki_schema_outdated` re-run prompt fires.
+5. **MIGRATIONS.md note.** Under "Unreleased", document the re-bootstrap step and the new ensure-properties capability (match the existing v0.3.0 entry's prose format).
+6. **AC-C11 — concept contradiction surfaces in lint.** `test_concept_contradiction_unresolved` in `test_lint.py`, mirroring the entity `test_contradiction_check_active`: a `wiki_concept` with `wiki_contradictions` set and null `wiki_last_reviewed` → `contradiction_unresolved` fires with severity `critical`; a concept with no contradictions does not fire; a concept with `wiki_last_reviewed` set does **not** fire. Requires extending `_make_concept` in `test_lint.py` (~157) with `wiki_contradictions` and `wiki_last_reviewed` params (mirroring `_make_entity` — the current `_make_concept` builds neither). This test must fail against current `lint.py` and depends on the schema property and bootstrap capability above.
+
+This is a separate, larger unit of work than #325's confined detection extension. **Recommend a dedicated ticket.**
 
 ---
 
 ## Acceptance Criteria Checklist
 
-Mapping to the three ticket checkboxes (aldeia-box#325). The **surfacing/lint + schema** additions (BL-1) are noted explicitly as in-scope coherence work beyond the literal checkbox text.
+Mapping to the three ticket checkboxes (aldeia-box#325). The confined core (CS-1..CS-6, CS-9) covers all three in full; lint surfacing is a separate follow-up beyond the literal checkbox text.
 
-- [ ] **Ticket AC-1:** A newly-ingested Concept claim conflicting with an already-linked Concept is detected and cross-linked via `wiki_contradictions`. Covered by spec AC-C1; real-function dispatch by AC-C7. **Plus (BL-1):** the cross-link surfaces in `wiki_lint` as `contradiction_unresolved` — AC-C11.
+- [ ] **Ticket AC-1:** A newly-ingested Concept claim conflicting with an already-linked Concept is detected and cross-linked via `wiki_contradictions`. Covered by spec AC-C1; real-function concept-peer dispatch by AC-C7.
 - [ ] **Ticket AC-2:** Existing Entity behaviour unchanged (regression-guarded). Covered by spec AC-C2 — real-call unit tests unchanged; monkeypatched tests get a one-line stub touch-up (SF-1/SF-2). The entity degraded-warning string is left bare (CS-9 appends `:concept` only on the concept path), so no entity behaviour changes.
-- [ ] **Ticket AC-3:** Tests cover the Concept conflict path mirroring the Entity tests. Covered by AC-C3..C11 (concept create/degraded/self-ref/dedup/mixed-kind/multiple-peers/empty-definition/lint).
-- [ ] **In-scope coherence (BL-1, flagged for Decide):** `wiki_concept` gains `wiki_last_reviewed` (CS-7) so concept contradictions are resolvable; `lint.py` surfacing gate extends to concepts (CS-8). Additive idempotent bootstrap + schema-version bump; documented in MIGRATIONS.md.
+- [ ] **Ticket AC-3:** Tests cover the Concept conflict path mirroring the Entity tests. Covered by AC-C3..C10 (concept create/degraded/self-ref/dedup/concept-peer-dispatch/mixed-kind/multiple-peers/empty-definition).
+
+**For Decide:** lead recommendation is to ship this confined core and open a surfacing follow-up (next section). Jan may instead fold the follow-up back into #325 with the larger bootstrap scope understood.
 
 ---
 
 ## Open Questions
 
-None blocking. The BL-1 surfacing/schema additions are in-scope but flagged for Jan at Decide (he may veto/split into detection-only CS-1..CS-6 vs surfacing CS-7..CS-9). The exact next `WIKI_SCHEMA_VERSION` value is confirmed at impl time against the release.
+None blocking. The one open decision is the scope choice flagged for Jan at Decide: ship the confined core (#325) plus a dedicated surfacing follow-up (lead recommendation), or fold the surfacing follow-up back into #325 with the larger bootstrap-capability scope understood (see "Recommended Follow-Up"). If the follow-up is pursued, its open question is verifying the Anytype type/property-link API needed to attach a property to an existing type.
 
 ---
 
