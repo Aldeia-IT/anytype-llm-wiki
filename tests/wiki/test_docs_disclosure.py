@@ -42,18 +42,15 @@ def _readme_text() -> str:
 
 
 class TestReadmeDetectionScopeDisclosure:
-    """Addendum item 5a: README must disclose the v0.6.0 detection scope limitations.
+    """README must disclose the contradiction-detection scope limitations.
 
-    Addendum item 3 (CPO-A-1 / Client-ADV-1) requires:
-    - Linked-peers-only limitation: contradiction detection covers only entities
-      already linked via wiki_relations (DI-3: unlinked-entity contradictions not caught).
-    - Entity-only scope: v0.6.0 detects contradictions for wiki_entity only
-      (DI-1: concept scope deferred).
-
-    Both must be present in README.md AFTER the "passive until v0.6.0" section is
-    replaced by the active-but-scoped disclosure copy (impl §8 step 11).
-
-    FAILS until §8 step 11 (impl docs sweep) updates README.md.
+    Originally (v0.6.0 / #287) this required an "entity-only" scope disclosure.
+    #325 extends detection to wiki_concept updates, so that requirement is
+    superseded:
+    - Linked-peers-only limitation: detection covers only peers already linked
+      via the relation property (DI-3: unlinked contradictions not caught).
+    - Surfacing gap (#325): concept contradictions are detected and cross-linked
+      via wiki_contradictions but are NOT yet flagged by wiki_lint (follow-up).
     """
 
     def test_readme_discloses_linked_entities_only_scope(self):
@@ -92,39 +89,42 @@ class TestReadmeDetectionScopeDisclosure:
             "yet caught'. This is a gated impl-phase deliverable (§8 step 11)."
         )
 
-    def test_readme_discloses_entity_only_scope(self):
-        """Addendum item 5a / CPO-A-1: README must state that contradiction detection
-        is entity-only in v0.6.0 (concept scope deferred, DI-1).
+    def test_readme_discloses_concept_lint_surfacing_gap(self):
+        """#325 (supersedes the v0.6.0 entity-only disclosure): detection now fires
+        for BOTH entity and concept updates, so the README must NO LONGER claim
+        detection is entity-only. Instead it must disclose the remaining surfacing
+        gap — concept contradictions are detected and cross-linked but not yet
+        flagged by wiki_lint (follow-up).
 
-        The addendum-mandated operator language (item 3):
-        "Entity-only; concept scope deferred."
-
-        ONE cohesive assertion: README contains "entity-only" (or equivalent) in
-        the context of contradiction detection.
-
-        FAILS now: the current README "passive until v0.6.0" section does NOT
-        contain "entity-only" or equivalent entity/concept scope distinction
-        in the contradiction detection context.
+        This test replaces the former test_readme_discloses_entity_only_scope: #325
+        ships the concept detection extension, making the "entity-only" scope claim
+        false. The operator-facing disclosure required now is the lint-surfacing
+        follow-up, not an entity-only scope.
         """
         readme = _readme_text().lower()
 
-        # ONE cohesive gate: "entity-only" is the exact operator language required.
-        # Alternatives: "entity only" (no hyphen) or "concept scope deferred".
-        entity_only_disclosed = (
-            "entity-only" in readme
-            or "entity only" in readme
-            or ("concept scope deferred" in readme)
-            or ("concept" in readme and "deferred" in readme
-                and "contradiction" in readme
-                and readme.find("deferred") > readme.find("contradiction"))
+        # The stale entity-only scope claim must be gone (detection now covers concepts).
+        assert "entity-only" not in readme, (
+            "README.md must NOT claim contradiction detection is 'entity-only' — #325 "
+            "extends detection to wiki_concept updates. Replace the stale scope claim "
+            "with the lint-surfacing follow-up disclosure."
         )
-        assert entity_only_disclosed, (
-            "README.md must disclose the entity-only contradiction detection scope "
-            "(addendum item 3 / CPO-A-1): v0.6.0 detection is scoped to wiki_entity "
-            "only (wiki_last_reviewed absent from wiki_concept, DI-1). "
-            "Expected phrases like 'entity-only' or 'concept scope deferred' in the "
-            "README contradiction/lint section. "
-            "This is a gated impl-phase deliverable (§8 step 11)."
+
+        # The surfacing gap (concept contradictions detected but not yet lint-flagged)
+        # must be disclosed so no reader infers a closed integrity loop.
+        surfacing_gap_disclosed = (
+            "concept" in readme
+            and "wiki_lint" in readme
+            and "follow-up" in readme
+            and "contradiction" in readme
+        )
+        assert surfacing_gap_disclosed, (
+            "README.md must disclose the #325 surfacing gap (addendum item 3 / "
+            "CA-CPO-ADV-3): concept contradictions are detected and cross-linked via "
+            "wiki_contradictions but are NOT yet flagged by wiki_lint (a planned "
+            "follow-up), so no reader infers a closed integrity loop. Expected the "
+            "contradiction-detection section to mention 'concept', 'wiki_lint', and "
+            "'follow-up'."
         )
 
     def test_readme_passive_section_replaced(self):
