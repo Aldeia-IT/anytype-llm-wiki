@@ -436,6 +436,15 @@ def _write_wikilog(
 # bidirectional property links set on BOTH objects (master spec §ingest step 6).
 _REL_KEY_BY_KIND = {"entity": "wiki_relations", "concept": "wiki_related"}
 
+# Comparable-text property key keyed by a peer's OWN type key (used by
+# ``_facts_key_for_peer`` for contradiction detection, which reads each peer's
+# type off ``get_object`` rather than a caller-supplied kind). This encodes the
+# same concept→wiki_definition / else→wiki_facts rule as
+# ``remember.py:_type_for_kind`` (~226) but keyed by type-key instead of kind
+# (SF-5). A future editor changing the concept→wiki_definition mapping MUST
+# update BOTH this constant and ``remember.py:_type_for_kind``.
+_TEXT_KEY_BY_TYPE_KEY = {"wiki_concept": "wiki_definition", "wiki_entity": "wiki_facts"}
+
 
 def _rel_key(kind: str) -> str:
     return _REL_KEY_BY_KIND.get(kind, "wiki_relations")
@@ -530,6 +539,18 @@ def _load_contradiction_prompt() -> str:
         )
 
 
+def _facts_key_for_peer(peer_obj: dict) -> str:
+    """Return the comparable-text property key for a peer, by the peer's own type.
+
+    wiki_concept peers store comparable text in wiki_definition; all others
+    (wiki_entity and unknown/missing type) use wiki_facts. Mirrors the
+    kind→text-key rule in remember.py:_type_for_kind, keyed by type-key here
+    because detection reads the peer's type off get_object, not a caller kind.
+    """
+    type_key = peer_obj.get("type", {}).get("key", "")
+    return _TEXT_KEY_BY_TYPE_KEY.get(type_key, "wiki_facts")
+
+
 def detect_contradictions(
     new_facts: str,
     obj_id: str,
@@ -537,11 +558,15 @@ def detect_contradictions(
     space_id: str,
     client: WikiClient,
     read_client: AnytypeReadClient,
+    *,
+    kind: str = "entity",  # NEW — keyword-only; default preserves entity behaviour
 ) -> list[dict]:
     """Return [{object_id, reason}] for peer objects whose facts contradict new_facts.
 
-    Candidates are peer objects already linked via wiki_relations on the in-memory
-    ``target`` dict (O(relations); no target GET). Returns [] when no contradiction
+    Candidates are peer objects already linked via the kind-selected relation key
+    (``wiki_relations`` for entities, ``wiki_related`` for concepts) on the
+    in-memory ``target`` dict (O(relations); no target GET). Returns [] when no
+    contradiction
     is found (incl. a well-formed empty result and malformed LLM output). Raises on
     hard I/O failure (LLM/Anytype error) — the caller converts it to the degraded
     warning.
@@ -551,8 +576,9 @@ def detect_contradictions(
     """
     ollama_base = (os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()).rstrip("/")
 
-    # Candidate set: peers linked via wiki_relations, minus self-reference (AC-12).
-    candidates = [pid for pid in _relation_ids(target, "wiki_relations") if pid != obj_id]
+    # Candidate set: peers linked via the kind-selected relation key, minus
+    # self-reference (AC-12).
+    candidates = [pid for pid in _relation_ids(target, _rel_key(kind)) if pid != obj_id]
     if not candidates:
         return []
     candidate_set = set(candidates)
@@ -567,7 +593,7 @@ def detect_contradictions(
         candidates_json.append({
             "object_id": peer_id,
             "name": peer_obj.get("name", ""),
-            "facts": _existing_text(peer_obj, "wiki_facts"),
+            "facts": _existing_text(peer_obj, _facts_key_for_peer(peer_obj)),
         })
 
     if not candidates_json:
@@ -915,15 +941,22 @@ def _run_ingest(
                     name_to_id[normalize_title(clean_name)] = obj_id
                     kind_by_id[obj_id] = kind
 
-                    # Cross-object contradiction detection (#287) — entity-only
-                    # (LD1), update branch only (LD3), MUST NOT block ingest.
-                    if kind == "entity":
+                    # Cross-object contradiction detection (#287, #325) — entity
+                    # + concept (LD1), update branch only (LD3), MUST NOT block
+                    # ingest.
+                    if kind in ("entity", "concept"):
                         try:
                             peers = detect_contradictions(
-                                facts, obj_id, target, space_id, client, read_client
+                                facts, obj_id, target, space_id, client, read_client,
+                                kind=kind,
                             )
                         except Exception:  # noqa: BLE001 — detection MUST NOT block ingest
-                            result["warnings"].append("contradiction_detection_degraded")
+                            # CS-9: discriminate the concept path so an operator
+                            # can tell which kind degraded; entity stays bare.
+                            warning = "contradiction_detection_degraded"
+                            if kind != "entity":
+                                warning += f":{kind}"
+                            result["warnings"].append(warning)
                             peers = []
                         if peers:
                             peer_ids = [p["object_id"] for p in peers]
