@@ -1165,12 +1165,20 @@ class TestReingestIdempotencyWikilog:
 # while still failing loudly (no try/except soft-pass guards).
 
 
+def _kind_attrs(kind: str) -> tuple[str, str, str]:
+    """Return (rel_key, facts_key, type_key) for a kind — single source for the fixtures."""
+    if kind == "concept":
+        return "wiki_related", "wiki_definition", "wiki_concept"
+    return "wiki_relations", "wiki_facts", "wiki_entity"
+
+
 def _make_objects_shaped_search_response(
     obj_id: str,
     name: str,
     peer_id: str,
     existing_contradictions: list | None = None,
     kind: str = "entity",
+    peer_ids: list[str] | None = None,
 ) -> dict:
     """Build a POST /search response whose target carries objects-format properties.
 
@@ -1189,14 +1197,13 @@ def _make_objects_shaped_search_response(
     text under wiki_definition — so the kind-selected candidate dispatch and the
     type-driven _facts_key_for_peer dispatch are exercised end-to-end.
     """
-    rel_key = "wiki_related" if kind == "concept" else "wiki_relations"
-    facts_key = "wiki_definition" if kind == "concept" else "wiki_facts"
-    type_key = "wiki_concept" if kind == "concept" else "wiki_entity"
+    rel_key, facts_key, type_key = _kind_attrs(kind)
     text = "Some concept definition here." if kind == "concept" else "Some entity facts here."
+    rel_objects = peer_ids if peer_ids is not None else [peer_id]
     props = [
         {"key": facts_key, "text": text},
         # objects-format relation — the no-GET design reads peer ids from here
-        {"key": rel_key, "objects": [peer_id]},
+        {"key": rel_key, "objects": rel_objects},
     ]
     if existing_contradictions is not None:
         props.append({"key": "wiki_contradictions", "objects": existing_contradictions})
@@ -1220,8 +1227,7 @@ def _make_peer_get_object_response(
     text under wiki_definition; the default ``kind="entity"`` keeps the existing
     wiki_entity/wiki_facts shape so current callers are unaffected.
     """
-    facts_key = "wiki_definition" if kind == "concept" else "wiki_facts"
-    type_key = "wiki_concept" if kind == "concept" else "wiki_entity"
+    _, facts_key, type_key = _kind_attrs(kind)
     return {
         "object": {
             "id": peer_id,
@@ -2439,20 +2445,14 @@ class TestContradictionDetection:
                 from anytype_llm_wiki.wiki.util import normalize_title
                 query = payload.get("query", "")
                 if normalize_title(query) == normalize_title(source_url):
-                    props = [
-                        {"key": "wiki_definition", "text": "Target definition."},
-                        {"key": "wiki_related", "objects": [peer_id]},
-                        {"key": "wiki_contradictions", "objects": [peer_id]},  # already there
-                    ]
-                    return httpx.Response(200, json={
-                        "data": [{
-                            "id": target_obj_id,
-                            "name": source_url,
-                            "type": {"key": "wiki_concept"},
-                            "properties": props,
-                        }],
-                        "pagination": {"has_more": False},
-                    })
+                    # peer already in wiki_contradictions → dedup path (AC-C6)
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        target_obj_id,
+                        source_url,
+                        peer_id,
+                        existing_contradictions=[peer_id],
+                        kind="concept",
+                    ))
                 return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
             return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
 
@@ -2674,20 +2674,15 @@ class TestContradictionDetection:
                 from anytype_llm_wiki.wiki.util import normalize_title
                 query = payload.get("query", "")
                 if normalize_title(query) == normalize_title(source_url):
-                    props = [
-                        {"key": "wiki_definition", "text": "Target definition."},
-                        {"key": "wiki_related", "objects": [peer_id_a, peer_id_b]},
-                        {"key": "wiki_contradictions", "objects": []},
-                    ]
-                    return httpx.Response(200, json={
-                        "data": [{
-                            "id": target_obj_id,
-                            "name": source_url,
-                            "type": {"key": "wiki_concept"},
-                            "properties": props,
-                        }],
-                        "pagination": {"has_more": False},
-                    })
+                    # two contradicting wiki_related peers (AC-C9)
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        target_obj_id,
+                        source_url,
+                        peer_id_a,
+                        existing_contradictions=[],
+                        kind="concept",
+                        peer_ids=[peer_id_a, peer_id_b],
+                    ))
                 return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
             return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
 
