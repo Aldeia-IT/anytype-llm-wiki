@@ -2552,8 +2552,8 @@ class TestContradictionDetection:
 
         prompt = captured.get("prompt", "")
         assert definition_text in prompt, (
-            f"AC-C7: candidate 'facts' must be drawn from wiki_definition; "
-            f"definition text not found in prompt"
+            "AC-C7: candidate 'facts' must be drawn from wiki_definition; "
+            "definition text not found in prompt"
         )
         assert facts_sentinel not in prompt, (
             f"AC-C7: wiki_facts text must NOT be read for a wiki_concept peer; "
@@ -2619,8 +2619,8 @@ class TestContradictionDetection:
 
         prompt = captured.get("prompt", "")
         assert entity_facts in prompt, (
-            f"AC-C8: candidate 'facts' for a wiki_entity peer must be drawn from wiki_facts "
-            f"(peer's own type, Option A); entity facts not found in prompt"
+            "AC-C8: candidate 'facts' for a wiki_entity peer must be drawn from wiki_facts "
+            "(peer's own type, Option A); entity facts not found in prompt"
         )
 
     @respx.mock
