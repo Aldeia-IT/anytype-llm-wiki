@@ -1170,6 +1170,7 @@ def _make_objects_shaped_search_response(
     name: str,
     peer_id: str,
     existing_contradictions: list | None = None,
+    kind: str = "entity",
 ) -> dict:
     """Build a POST /search response whose target carries objects-format properties.
 
@@ -1182,11 +1183,20 @@ def _make_objects_shaped_search_response(
     response (addendum item 1 / CTO-ADV-1); if real search does NOT hydrate
     objects-format arrays, impl must add a target get_object call and update §4.
     Do NOT treat this fixture passing as evidence the no-target-GET assumption holds.
+
+    #325: ``kind="concept"`` builds the target with the concept type
+    (wiki_concept), the concept relation key (wiki_related), and the comparable
+    text under wiki_definition — so the kind-selected candidate dispatch and the
+    type-driven _facts_key_for_peer dispatch are exercised end-to-end.
     """
+    rel_key = "wiki_related" if kind == "concept" else "wiki_relations"
+    facts_key = "wiki_definition" if kind == "concept" else "wiki_facts"
+    type_key = "wiki_concept" if kind == "concept" else "wiki_entity"
+    text = "Some concept definition here." if kind == "concept" else "Some entity facts here."
     props = [
-        {"key": "wiki_facts", "text": "Some entity facts here."},
+        {"key": facts_key, "text": text},
         # objects-format relation — the no-GET design reads peer ids from here
-        {"key": "wiki_relations", "objects": [peer_id]},
+        {"key": rel_key, "objects": [peer_id]},
     ]
     if existing_contradictions is not None:
         props.append({"key": "wiki_contradictions", "objects": existing_contradictions})
@@ -1194,22 +1204,31 @@ def _make_objects_shaped_search_response(
         "data": [{
             "id": obj_id,
             "name": name,
-            "type": {"key": "wiki_entity"},
+            "type": {"key": type_key},
             "properties": props,
         }],
         "pagination": {"has_more": False},
     }
 
 
-def _make_peer_get_object_response(peer_id: str, peer_facts: str = "Peer facts here.") -> dict:
-    """Build an AnytypeReadClient.get_object response (GET /objects/{id}?format=md)."""
+def _make_peer_get_object_response(
+    peer_id: str, peer_facts: str = "Peer facts here.", kind: str = "entity"
+) -> dict:
+    """Build an AnytypeReadClient.get_object response (GET /objects/{id}?format=md).
+
+    #325: ``kind="concept"`` builds a wiki_concept peer carrying its comparable
+    text under wiki_definition; the default ``kind="entity"`` keeps the existing
+    wiki_entity/wiki_facts shape so current callers are unaffected.
+    """
+    facts_key = "wiki_definition" if kind == "concept" else "wiki_facts"
+    type_key = "wiki_concept" if kind == "concept" else "wiki_entity"
     return {
         "object": {
             "id": peer_id,
             "name": f"Peer {peer_id}",
-            "type": {"key": "wiki_entity"},
+            "type": {"key": type_key},
             "properties": [
-                {"key": "wiki_facts", "text": peer_facts},
+                {"key": facts_key, "text": peer_facts},
                 {"key": "wiki_contradictions", "objects": []},
             ],
         }
@@ -1316,7 +1335,7 @@ class TestContradictionDetection:
 
         # Monkeypatch detect_contradictions to return one peer contradiction.
         # This exercises the _write_contradiction_links hook, not the LLM path.
-        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client):
+        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
             return [{"object_id": peer_id, "reason": "Contradictory facts detected"}]
 
         monkeypatch.setattr(
@@ -1385,7 +1404,7 @@ class TestContradictionDetection:
         source_url = "https://example.com/new-entity-paper"
         detect_called = []
 
-        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client):
+        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
             detect_called.append({"obj_id": obj_id})
             return []
 
@@ -1449,7 +1468,7 @@ class TestContradictionDetection:
 
         source_url = "https://example.com/degraded-detection-paper"
 
-        def fake_detect_raises(new_facts, obj_id, target, space_id, client, read_client):
+        def fake_detect_raises(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
             import httpx as _httpx
             raise _httpx.ConnectError("Connection refused — LLM unavailable")
 
@@ -1521,7 +1540,7 @@ class TestContradictionDetection:
 
         source_url = "https://example.com/clean-detection-paper"
 
-        def fake_detect_no_contradictions(new_facts, obj_id, target, space_id, client, read_client):
+        def fake_detect_no_contradictions(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
             return []  # No contradictions found — clean path
 
         monkeypatch.setattr(
@@ -1762,7 +1781,7 @@ class TestContradictionDetection:
 
         patch_calls: list[dict] = []
 
-        def fake_detect_two_peers(new_facts, obj_id, target, space_id, client, read_client):
+        def fake_detect_two_peers(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
             return [
                 {"object_id": peer_id_a, "reason": "Peer alpha contradicts"},
                 {"object_id": peer_id_b, "reason": "Peer beta contradicts"},
@@ -1896,7 +1915,7 @@ class TestContradictionDetection:
 
         patch_calls: list[dict] = []
 
-        def fake_detect_one_peer(new_facts, obj_id, target, space_id, client, read_client):
+        def fake_detect_one_peer(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
             return [{"object_id": peer_id, "reason": "Already linked contradiction"}]
 
         monkeypatch.setattr(
@@ -1993,6 +2012,775 @@ class TestContradictionDetection:
         assert not a_side_contradiction_patches, (
             f"AC-14: A-side wiki_contradictions PATCH must be SKIPPED when peer already present "
             f"(dedup no-op, §3.4); PATCHes found: {a_side_contradiction_patches}"
+        )
+
+    # ------------------------------------------------------------------
+    # #325 — concept-path contradiction detection (AC-Cn)
+    #
+    # The integration-style concept tests below monkeypatch
+    # ``_derive_candidates`` so the single ingest candidate carries
+    # ``kind="concept"`` (the markdown→candidate splitter only ever emits
+    # entities). This drives the update branch with ``kind == "concept"``,
+    # exercising the new gate (CS-1), the kind-passed call site (CS-6), the
+    # candidate relation key (CS-4), and the kind-discriminated degraded
+    # warning (CS-9). The real-function tests (AC-C7/AC-C8) call
+    # ``detect_contradictions`` directly to exercise the type-driven peer
+    # dispatch (CS-2/CS-5).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _force_concept_candidate(monkeypatch, source_url):
+        """Make _derive_candidates yield a single concept candidate named
+        after the source, so the update branch runs with kind='concept'."""
+        def fake_derive(markdown, *, fallback_name=None):
+            return [{"name": source_url, "facts": "Some concept definition.", "kind": "concept"}]
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest._derive_candidates", fake_derive
+        )
+
+    @respx.mock
+    def test_concept_contradiction_bidirectional_write(self, monkeypatch):
+        """#325 AC-C1: concept update (kind='concept') whose new definition
+        contradicts a linked wiki_related peer → wiki_contradictions set
+        bidirectionally; candidates drawn from wiki_related; contradictions_detected
+        >= 1; status != 'error'; NO GET fired against the target id (BL-3)."""
+        import json as _json
+
+        target_obj_id = "concept-target-001"
+        peer_id = "concept-peer-001"
+        source_url = "https://example.com/concept-contradiction"
+
+        self._force_concept_candidate(monkeypatch, source_url)
+
+        get_calls: list[str] = []
+        patch_calls: list[dict] = []
+
+        captured_kind = {}
+
+        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
+            captured_kind["kind"] = kwargs.get("kind")
+            return [{"object_id": peer_id, "reason": "Contradictory definition"}]
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_contradictions,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            get_calls.append(str(request.url))
+            path = request.url.path
+            url_str = str(request.url)
+            if "/objects" in path and "?" in url_str and "/objects/" not in path:
+                return httpx.Response(200, json=_make_schema_ok_response())
+            if f"/objects/{peer_id}" in path and "?" in url_str:
+                return httpx.Response(
+                    200, json=_make_peer_get_object_response(peer_id, kind="concept")
+                )
+            if f"/objects/{target_obj_id}" in path and "?" in url_str:
+                return httpx.Response(
+                    200, json=_make_peer_get_object_response(target_obj_id, kind="concept")
+                )
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(query) == normalize_title(source_url):
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        target_obj_id, source_url, peer_id, kind="concept"
+                    ))
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
+
+        def on_patch(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            patch_calls.append({"url": str(request.url), "payload": payload})
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+        assert result.get("status") != "error", f"AC-C1: status must not be error; got {result}"
+        assert captured_kind.get("kind") == "concept", (
+            f"AC-C1: detect_contradictions must be called with kind='concept'; "
+            f"got {captured_kind.get('kind')!r}"
+        )
+        assert result.get("contradictions_detected", 0) >= 1, (
+            f"AC-C1: contradictions_detected must be >= 1; got {result.get('contradictions_detected')}"
+        )
+
+        # BL-3: NO GET against the target object id.
+        target_gets = [u for u in get_calls if f"/objects/{target_obj_id}" in u and "?" in u]
+        assert not target_gets, (
+            f"AC-C1 / BL-3: NO GET must be issued for the target id {target_obj_id!r}; got {target_gets}"
+        )
+
+        # Bidirectional wiki_contradictions PATCHes (A-side + B-side).
+        contradiction_patches = [
+            pc for pc in patch_calls
+            if any(p.get("key") == "wiki_contradictions" for p in pc["payload"].get("properties", []) or [])
+        ]
+        assert len(contradiction_patches) >= 2, (
+            f"AC-C1: expect bidirectional wiki_contradictions PATCHes; got {contradiction_patches}"
+        )
+
+    @respx.mock
+    def test_concept_no_detection_on_create(self, monkeypatch):
+        """#325 AC-C3: concept ingest where resolve returns action='create' →
+        detect_contradictions never called → contradictions_detected == 0."""
+        import json as _json
+
+        source_url = "https://example.com/new-concept"
+        self._force_concept_candidate(monkeypatch, source_url)
+
+        detect_called = []
+
+        def fake_detect_contradictions(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
+            detect_called.append({"obj_id": obj_id})
+            return []
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_contradictions,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                # No existing object → create path.
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "new-concept-001", "name": payload.get("name", "obj")}})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+        assert result.get("contradictions_detected", 0) == 0, (
+            f"AC-C3: contradictions_detected must be 0 on create path; "
+            f"got {result.get('contradictions_detected')}"
+        )
+        assert not detect_called, (
+            f"AC-C3: detect_contradictions must NOT be called on create path; calls: {detect_called}"
+        )
+
+    @respx.mock
+    def test_concept_detection_degraded(self, monkeypatch):
+        """#325 AC-C4: concept update, detection raises →
+        'contradiction_detection_degraded:concept' in warnings (CS-9); ingest
+        returns non-error; no wiki_contradictions PATCH fired."""
+        import json as _json
+
+        source_url = "https://example.com/degraded-concept"
+        self._force_concept_candidate(monkeypatch, source_url)
+
+        def fake_detect_raises(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
+            import httpx as _httpx
+            raise _httpx.ConnectError("Connection refused — LLM unavailable")
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_raises,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        patch_calls: list[dict] = []
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(query) == normalize_title(source_url):
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        "concept-target-001", source_url, "concept-peer-001", kind="concept"
+                    ))
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-001", "name": payload.get("name", "obj")}})
+
+        def on_patch(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            patch_calls.append({"url": str(request.url), "payload": payload})
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+        assert result.get("status") != "error", (
+            f"AC-C4: ingest must continue on detection failure; got status={result.get('status')!r}"
+        )
+        assert "contradiction_detection_degraded:concept" in result.get("warnings", []), (
+            f"AC-C4 / CS-9: 'contradiction_detection_degraded:concept' must be in warnings; "
+            f"got warnings={result.get('warnings')}"
+        )
+        # Bare entity warning must NOT appear on the concept path.
+        assert "contradiction_detection_degraded" not in result.get("warnings", []), (
+            f"AC-C4 / CS-9: bare 'contradiction_detection_degraded' must NOT appear on the "
+            f"concept path; got warnings={result.get('warnings')}"
+        )
+        # No wiki_contradictions PATCH on the degraded path.
+        contradiction_patches = [
+            pc for pc in patch_calls
+            if any(p.get("key") == "wiki_contradictions" for p in (pc["payload"].get("properties") or []))
+        ]
+        assert not contradiction_patches, (
+            f"AC-C4: no wiki_contradictions PATCH must fire on the degraded path; got {contradiction_patches}"
+        )
+
+    @respx.mock
+    def test_concept_detection_degraded_warning_absent_on_clean_path(self, monkeypatch):
+        """#325 AC-Cn / QA-ADV-1: clean concept path (no contradiction, no error)
+        → 'contradiction_detection_degraded:concept' is ABSENT from warnings.
+
+        Closes the CS-9 single-direction gap (AC-C4 checks presence on error)."""
+        import json as _json
+
+        source_url = "https://example.com/clean-concept"
+        self._force_concept_candidate(monkeypatch, source_url)
+
+        def fake_detect_no_contradictions(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
+            return []
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_no_contradictions,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(query) == normalize_title(source_url):
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        "concept-target-001", source_url, "concept-peer-001", kind="concept"
+                    ))
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-001", "name": payload.get("name", "obj")}})
+
+        def on_patch(request, **kwargs):
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+        assert "contradiction_detection_degraded:concept" not in result.get("warnings", []), (
+            f"AC-Cn / QA-ADV-1: ':concept' degraded warning must be ABSENT on the clean path; "
+            f"warnings={result.get('warnings')}"
+        )
+        assert "contradiction_detection_degraded" not in result.get("warnings", []), (
+            f"AC-Cn / QA-ADV-1: bare degraded warning must be ABSENT on the clean path; "
+            f"warnings={result.get('warnings')}"
+        )
+
+    @respx.mock
+    def test_concept_self_reference_skipped(self, monkeypatch):
+        """#325 AC-C5: a concept whose wiki_related includes its own obj_id →
+        excluded from candidates → no get_object for self, no result entry.
+
+        Real detect_contradictions(kind='concept') call."""
+        from unittest.mock import MagicMock
+
+        obj_id = "concept-self-001"
+        target_obj = {
+            "id": obj_id,
+            "name": "Self-Referencing Concept",
+            "type": {"key": "wiki_concept"},
+            "properties": [
+                {"key": "wiki_definition", "text": "Definition referencing self."},
+                {"key": "wiki_related", "objects": [obj_id]},  # self-reference
+            ],
+        }
+
+        mock_read_client = MagicMock()
+
+        def fake_call_ollama_prompt(base, prompt):
+            return ({"contradictions": [{"object_id": obj_id, "reason": "self conflict"}]}, None)
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest._call_ollama_prompt",
+            fake_call_ollama_prompt,
+        )
+
+        from anytype_llm_wiki.wiki.ingest import detect_contradictions
+        result = detect_contradictions(
+            new_facts="Some new definition.",
+            obj_id=obj_id,
+            target=target_obj,
+            space_id=FAKE_SPACE_ID,
+            client=MagicMock(),
+            read_client=mock_read_client,
+            kind="concept",
+        )
+
+        assert not mock_read_client.get_object.called or all(
+            obj_id not in str(c) for c in mock_read_client.get_object.call_args_list
+        ), (
+            f"AC-C5: get_object must NOT be called for the concept's own id {obj_id!r}; "
+            f"calls: {mock_read_client.get_object.call_args_list}"
+        )
+        result_ids = [r["object_id"] for r in result]
+        assert obj_id not in result_ids, (
+            f"AC-C5: self-reference {obj_id!r} must not appear in output; got {result}"
+        )
+
+    @respx.mock
+    def test_concept_dedup_no_op(self, monkeypatch):
+        """#325 AC-C6: concept peer already in wiki_contradictions → no A-side PATCH;
+        contradictions_detected == 0."""
+        import json as _json
+
+        source_url = "https://example.com/concept-dedup"
+        peer_id = "concept-peer-001"
+        target_obj_id = "concept-target-001"
+        self._force_concept_candidate(monkeypatch, source_url)
+
+        patch_calls: list[dict] = []
+
+        def fake_detect_one_peer(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
+            return [{"object_id": peer_id, "reason": "Already linked contradiction"}]
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_one_peer,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            path = request.url.path
+            url_str = str(request.url)
+            if "/objects" in path and "?" in url_str and "/objects/" not in path:
+                return httpx.Response(200, json=_make_schema_ok_response())
+            if f"/objects/{peer_id}" in path and "?" in url_str:
+                return httpx.Response(200, json={
+                    "object": {
+                        "id": peer_id,
+                        "name": "Peer Already Linked",
+                        "type": {"key": "wiki_concept"},
+                        "properties": [
+                            {"key": "wiki_definition", "text": "Peer definition."},
+                            {"key": "wiki_contradictions", "objects": [target_obj_id]},
+                        ],
+                    }
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(query) == normalize_title(source_url):
+                    props = [
+                        {"key": "wiki_definition", "text": "Target definition."},
+                        {"key": "wiki_related", "objects": [peer_id]},
+                        {"key": "wiki_contradictions", "objects": [peer_id]},  # already there
+                    ]
+                    return httpx.Response(200, json={
+                        "data": [{
+                            "id": target_obj_id,
+                            "name": source_url,
+                            "type": {"key": "wiki_concept"},
+                            "properties": props,
+                        }],
+                        "pagination": {"has_more": False},
+                    })
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
+
+        def on_patch(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            patch_calls.append({"url": str(request.url), "payload": payload})
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+        assert result.get("contradictions_detected", 0) == 0, (
+            f"AC-C6: contradictions_detected must be 0 when peer already linked; "
+            f"got {result.get('contradictions_detected')}"
+        )
+        a_side_contradiction_patches = [
+            pc for pc in patch_calls
+            if target_obj_id in pc["url"]
+            and any(p.get("key") == "wiki_contradictions" for p in (pc["payload"].get("properties") or []))
+        ]
+        assert not a_side_contradiction_patches, (
+            f"AC-C6: A-side wiki_contradictions PATCH must be SKIPPED on dedup; got {a_side_contradiction_patches}"
+        )
+
+    @respx.mock
+    def test_concept_peer_uses_wiki_definition(self, monkeypatch):
+        """#325 AC-C7 (SF-3): real detect_contradictions(kind='concept') with a
+        wiki_concept peer carrying wiki_definition → candidate JSON 'facts' is drawn
+        from wiki_definition (present); wiki_facts text is absent.
+
+        Only test exercising the _facts_key_for_peer concept branch via the real
+        function. get_object is mocked at the client-method level → returns the
+        UNWRAPPED object dict (SG-7)."""
+        from unittest.mock import MagicMock
+
+        obj_id = "concept-target-001"
+        peer_id = "concept-peer-001"
+        definition_text = "A monad is a monoid in the category of endofunctors."
+        facts_sentinel = "ENTITY_FACTS_SHOULD_NOT_BE_READ"
+
+        target_obj = {
+            "id": obj_id,
+            "name": "Monad",
+            "type": {"key": "wiki_concept"},
+            "properties": [
+                {"key": "wiki_definition", "text": "New contradicting definition."},
+                {"key": "wiki_related", "objects": [peer_id]},
+            ],
+        }
+
+        # Unwrapped peer dict (SG-7) — wiki_concept type with BOTH keys populated;
+        # only wiki_definition must be read.
+        peer_unwrapped = {
+            "id": peer_id,
+            "name": "Monad Peer",
+            "type": {"key": "wiki_concept"},
+            "properties": [
+                {"key": "wiki_definition", "text": definition_text},
+                {"key": "wiki_facts", "text": facts_sentinel},
+                {"key": "wiki_contradictions", "objects": []},
+            ],
+        }
+
+        mock_read_client = MagicMock()
+        mock_read_client.get_object.return_value = peer_unwrapped
+
+        captured = {}
+
+        def fake_call_ollama_prompt(base, prompt):
+            captured["prompt"] = prompt
+            return ({"contradictions": []}, None)
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest._call_ollama_prompt",
+            fake_call_ollama_prompt,
+        )
+
+        from anytype_llm_wiki.wiki.ingest import detect_contradictions
+        detect_contradictions(
+            new_facts="New contradicting definition.",
+            obj_id=obj_id,
+            target=target_obj,
+            space_id=FAKE_SPACE_ID,
+            client=MagicMock(),
+            read_client=mock_read_client,
+            kind="concept",
+        )
+
+        prompt = captured.get("prompt", "")
+        assert definition_text in prompt, (
+            f"AC-C7: candidate 'facts' must be drawn from wiki_definition; "
+            f"definition text not found in prompt"
+        )
+        assert facts_sentinel not in prompt, (
+            f"AC-C7: wiki_facts text must NOT be read for a wiki_concept peer; "
+            f"sentinel {facts_sentinel!r} unexpectedly present in prompt"
+        )
+
+    @respx.mock
+    def test_concept_mixed_kind_peer_uses_peer_facts_key(self, monkeypatch):
+        """#325 AC-C8 (Option A): real detect_contradictions(kind='concept') with a
+        wiki_entity peer → candidate 'facts' drawn from wiki_facts (peer's own type),
+        NOT wiki_definition. Peer dispatch is type-driven, not kind-driven."""
+        from unittest.mock import MagicMock
+
+        obj_id = "concept-target-001"
+        peer_id = "entity-peer-001"
+        entity_facts = "Berlin is the capital of Germany."
+
+        target_obj = {
+            "id": obj_id,
+            "name": "Capital City",
+            "type": {"key": "wiki_concept"},
+            "properties": [
+                {"key": "wiki_definition", "text": "New contradicting definition."},
+                {"key": "wiki_related", "objects": [peer_id]},
+            ],
+        }
+
+        # Unwrapped wiki_entity peer (SG-7) — facts under wiki_facts only.
+        peer_unwrapped = {
+            "id": peer_id,
+            "name": "Berlin",
+            "type": {"key": "wiki_entity"},
+            "properties": [
+                {"key": "wiki_facts", "text": entity_facts},
+                {"key": "wiki_contradictions", "objects": []},
+            ],
+        }
+
+        mock_read_client = MagicMock()
+        mock_read_client.get_object.return_value = peer_unwrapped
+
+        captured = {}
+
+        def fake_call_ollama_prompt(base, prompt):
+            captured["prompt"] = prompt
+            return ({"contradictions": []}, None)
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest._call_ollama_prompt",
+            fake_call_ollama_prompt,
+        )
+
+        from anytype_llm_wiki.wiki.ingest import detect_contradictions
+        detect_contradictions(
+            new_facts="New contradicting definition.",
+            obj_id=obj_id,
+            target=target_obj,
+            space_id=FAKE_SPACE_ID,
+            client=MagicMock(),
+            read_client=mock_read_client,
+            kind="concept",
+        )
+
+        prompt = captured.get("prompt", "")
+        assert entity_facts in prompt, (
+            f"AC-C8: candidate 'facts' for a wiki_entity peer must be drawn from wiki_facts "
+            f"(peer's own type, Option A); entity facts not found in prompt"
+        )
+
+    @respx.mock
+    def test_concept_multiple_peers_contradict(self, monkeypatch):
+        """#325 AC-C9 (SF-4): concept target with two contradicting wiki_related
+        peers → contradictions_detected == 2; 4 wiki_contradictions PATCHes.
+
+        Guards against reading candidates from the wrong relation key
+        (wiki_relations vs wiki_related) while writes still land."""
+        import json as _json
+
+        source_url = "https://example.com/multi-concept"
+        peer_id_a = "concept-alpha-001"
+        peer_id_b = "concept-beta-001"
+        target_obj_id = "concept-target-001"
+        self._force_concept_candidate(monkeypatch, source_url)
+
+        patch_calls: list[dict] = []
+
+        def fake_detect_two_peers(new_facts, obj_id, target, space_id, client, read_client, **kwargs):
+            return [
+                {"object_id": peer_id_a, "reason": "Concept alpha contradicts"},
+                {"object_id": peer_id_b, "reason": "Concept beta contradicts"},
+            ]
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest.detect_contradictions",
+            fake_detect_two_peers,
+        )
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        def on_get(request, **kwargs):
+            path = request.url.path
+            url_str = str(request.url)
+            if "/objects" in path and "?" in url_str and "/objects/" not in path:
+                return httpx.Response(200, json=_make_schema_ok_response())
+            if f"/objects/{peer_id_a}" in path and "?" in url_str:
+                return httpx.Response(200, json=_make_peer_get_object_response(peer_id_a, kind="concept"))
+            if f"/objects/{peer_id_b}" in path and "?" in url_str:
+                return httpx.Response(200, json=_make_peer_get_object_response(peer_id_b, kind="concept"))
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def on_post(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            url = str(request.url)
+            if "/search" in url:
+                from anytype_llm_wiki.wiki.util import normalize_title
+                query = payload.get("query", "")
+                if normalize_title(query) == normalize_title(source_url):
+                    props = [
+                        {"key": "wiki_definition", "text": "Target definition."},
+                        {"key": "wiki_related", "objects": [peer_id_a, peer_id_b]},
+                        {"key": "wiki_contradictions", "objects": []},
+                    ]
+                    return httpx.Response(200, json={
+                        "data": [{
+                            "id": target_obj_id,
+                            "name": source_url,
+                            "type": {"key": "wiki_concept"},
+                            "properties": props,
+                        }],
+                        "pagination": {"has_more": False},
+                    })
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-misc-001", "name": "misc"}})
+
+        def on_patch(request, **kwargs):
+            payload = {}
+            try:
+                payload = _json.loads(request.content)
+            except Exception:
+                pass
+            patch_calls.append({"url": str(request.url), "payload": payload})
+            return httpx.Response(200, json={"object": {"id": "patched-001"}})
+
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+        result = wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert isinstance(result, dict)
+        assert result.get("contradictions_detected", 0) == 2, (
+            f"AC-C9: contradictions_detected must be 2 for two concept peers; "
+            f"got {result.get('contradictions_detected')}"
+        )
+        contradiction_patches = [
+            pc for pc in patch_calls
+            if any(p.get("key") == "wiki_contradictions" for p in (pc["payload"].get("properties") or []))
+        ]
+        assert len(contradiction_patches) >= 4, (
+            f"AC-C9: expect at least 4 wiki_contradictions PATCHes (2 A-side + 2 B-side); "
+            f"got {len(contradiction_patches)}"
+        )
+
+    @respx.mock
+    def test_concept_empty_definition_peer(self, monkeypatch):
+        """#325 AC-C10 (SG-3): a concept peer whose wiki_definition is empty/absent
+        does not crash and is not spuriously flagged (no wiki_contradictions PATCH
+        for that peer).
+
+        Real detect_contradictions(kind='concept'); the LLM returns no contradiction
+        for the empty-definition peer."""
+        from unittest.mock import MagicMock
+
+        obj_id = "concept-target-001"
+        peer_id = "concept-empty-peer-001"
+
+        target_obj = {
+            "id": obj_id,
+            "name": "Concept With Empty Peer",
+            "type": {"key": "wiki_concept"},
+            "properties": [
+                {"key": "wiki_definition", "text": "New definition."},
+                {"key": "wiki_related", "objects": [peer_id]},
+            ],
+        }
+
+        # Peer with absent wiki_definition (empty text).
+        peer_unwrapped = {
+            "id": peer_id,
+            "name": "Empty Peer",
+            "type": {"key": "wiki_concept"},
+            "properties": [
+                {"key": "wiki_definition", "text": ""},
+                {"key": "wiki_contradictions", "objects": []},
+            ],
+        }
+
+        mock_read_client = MagicMock()
+        mock_read_client.get_object.return_value = peer_unwrapped
+
+        def fake_call_ollama_prompt(base, prompt):
+            # No contradiction reported for an empty-definition peer.
+            return ({"contradictions": []}, None)
+
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.ingest._call_ollama_prompt",
+            fake_call_ollama_prompt,
+        )
+
+        from anytype_llm_wiki.wiki.ingest import detect_contradictions
+        result = detect_contradictions(
+            new_facts="New definition.",
+            obj_id=obj_id,
+            target=target_obj,
+            space_id=FAKE_SPACE_ID,
+            client=MagicMock(),
+            read_client=mock_read_client,
+            kind="concept",
+        )
+
+        # No crash, and the empty-definition peer is not flagged.
+        assert result == [], (
+            f"AC-C10: empty-definition peer must not be spuriously flagged; got {result}"
         )
 
 
