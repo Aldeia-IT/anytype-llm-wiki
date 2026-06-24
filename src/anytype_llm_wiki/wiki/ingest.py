@@ -437,12 +437,9 @@ def _write_wikilog(
 _REL_KEY_BY_KIND = {"entity": "wiki_relations", "concept": "wiki_related"}
 
 # Comparable-text property key keyed by a peer's OWN type key (used by
-# ``_facts_key_for_peer`` for contradiction detection, which reads each peer's
-# type off ``get_object`` rather than a caller-supplied kind). This encodes the
-# same concept→wiki_definition / else→wiki_facts rule as
-# ``remember.py:_type_for_kind`` (~226) but keyed by type-key instead of kind
-# (SF-5). A future editor changing the concept→wiki_definition mapping MUST
-# update BOTH this constant and ``remember.py:_type_for_kind``.
+# ``_facts_key_for_peer``, which reads each peer's type off ``get_object``). Same
+# concept→wiki_definition / else→wiki_facts rule as ``remember.py:_type_for_kind``
+# but keyed by type-key (SF-5) — MUST stay in sync with remember.py:_type_for_kind.
 _TEXT_KEY_BY_TYPE_KEY = {"wiki_concept": "wiki_definition", "wiki_entity": "wiki_facts"}
 
 
@@ -566,8 +563,8 @@ def detect_contradictions(
     Candidates are peer objects already linked via the kind-selected relation key
     (``wiki_relations`` for entities, ``wiki_related`` for concepts) on the
     in-memory ``target`` dict (O(relations); no target GET). Returns [] when no
-    contradiction
-    is found (incl. a well-formed empty result and malformed LLM output). Raises on
+    contradiction is found (incl. a well-formed empty result and malformed LLM
+    output). Raises on
     hard I/O failure (LLM/Anytype error) — the caller converts it to the degraded
     warning.
 
