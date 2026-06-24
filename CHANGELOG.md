@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Contradiction detection extended to Concepts (#325).** Contradiction detection now fires
+  for `wiki_concept` updates as well as `wiki_entity` updates; concept contradictions are
+  detected and cross-linked via `wiki_contradictions` (candidates drawn from `wiki_related`,
+  comparable text from `wiki_definition`; mixed-kind peers read their own type's text key).
+  `wiki_lint` surfacing for concept contradictions is a follow-up (#426) — concept
+  contradictions are recorded and browsable in Anytype but not yet flagged by lint.
+
 ## [0.8.0] - 2026-06-14
 
 ### Added

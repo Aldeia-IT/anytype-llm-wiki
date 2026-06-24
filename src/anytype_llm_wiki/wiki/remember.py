@@ -224,7 +224,13 @@ def _build_subjects(extracted: dict) -> list[dict]:
 
 
 def _type_for_kind(kind: str) -> tuple[str, str, str]:
-    """Return (type_key, type_label, property_key) for a subject kind."""
+    """Return (type_key, type_label, property_key) for a subject kind.
+
+    The concept→wiki_definition / else→wiki_facts rule here is mirrored by
+    ``ingest.py:_TEXT_KEY_BY_TYPE_KEY`` (keyed by type-key instead of kind, for
+    contradiction-detection peer dispatch). A future editor changing the
+    concept→wiki_definition mapping MUST update both (SF-5).
+    """
     if kind == "concept":
         return "wiki_concept", "concept", "wiki_definition"
     return "wiki_entity", "entity", "wiki_facts"
