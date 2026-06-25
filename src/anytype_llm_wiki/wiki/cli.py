@@ -11,11 +11,33 @@ functional for the maintainer's pre-release demo (no CLI test in v0.2.0).
 
 import argparse
 import json
+import logging
 import sys
 
-from . import types_schema
+from . import config, types_schema
 from .bootstrap import wiki_bootstrap
 from .doctor import run_doctor
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def _configure_logging() -> None:
+    """Install a stderr logging handler at the ``WIKI_LOG_LEVEL`` level.
+
+    Without this the CLI runs with the root logger's WARNING default, so
+    INFO-level diagnostics are silently dropped — including the SG-e reconcile
+    audit line (``wiki_reconcile ...``) emitted immediately before each
+    destructive ``update_type`` PATCH (#426). That line is the forensic record
+    of the exact property union sent per type; under Anytype's replace-not-merge
+    semantics it must be durably captured so a corruption event is
+    reconstructable. Logs go to stderr so stdout stays reserved for command
+    output / ``--json``.
+    """
+    level = getattr(logging, config.log_level().upper(), logging.INFO)
+    logging.basicConfig(level=level, stream=sys.stderr, format=_LOG_FORMAT)
+    # basicConfig is a no-op once handlers exist; enforce the resolved level so
+    # WIKI_LOG_LEVEL is honored even if logging was configured upstream.
+    logging.getLogger().setLevel(level)
 
 # Subcommands that server.main() routes here instead of starting the MCP server.
 SUBCOMMANDS = (
@@ -416,6 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

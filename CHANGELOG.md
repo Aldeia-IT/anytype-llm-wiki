@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Anytype's replace-not-merge semantics), recording reconciled types in a new
   `types_reconciled` result section. Re-running `wiki_bootstrap` is **REQUIRED** for every
   existing space to gain `wiki_last_reviewed` on `wiki_concept` before running the new
-  `wiki_lint` (see MIGRATIONS.md / docs/deploy-runbook.md).
+  `wiki_lint` (see MIGRATIONS.md / docs/deploy-runbook.md). The CLI now configures stderr
+  logging at `WIKI_LOG_LEVEL` (default `info`) so the reconcile SG-e audit line
+  (`wiki_reconcile …`, emitted before each destructive `update_type` PATCH) is actually
+  captured instead of being dropped under the root WARNING default.
 - **Contradiction detection extended to Concepts (#325).** Contradiction detection now fires
   for `wiki_concept` updates as well as `wiki_entity` updates; concept contradictions are
   detected and cross-linked via `wiki_contradictions` (candidates drawn from `wiki_related`,

@@ -52,3 +52,11 @@ The deployment **MUST capture this `wiki_reconcile ...` log line durably** (ship
 to the central log store / retain it with the bootstrap run output) so that, if a
 corruption event ever occurs, the exact union sent for each type is reconstructable
 post-hoc. Do not rely solely on ephemeral console output of the bootstrap command.
+
+The CLI emits this line to **stderr** at the `WIKI_LOG_LEVEL` level (default
+`info`); stdout is reserved for command output / `--json`. Capture it by
+redirecting stderr to a retained file (or via the service's captured stderr), e.g.:
+
+```bash
+uv run anytype-llm-wiki wiki-bootstrap --space-id <id> 2>> /var/log/anytype-llm-wiki/bootstrap.log
+```
