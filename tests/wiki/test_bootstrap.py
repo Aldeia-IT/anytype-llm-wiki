@@ -2229,12 +2229,17 @@ class TestReconcileAddsMissingProperty:
 
         type_id = "type-id-wiki_concept"
 
-        # wiki_concept live state: has wiki_definition, wiki_contradictions, wiki_status
-        # but is MISSING wiki_last_reviewed (0.4.1 schema state)
+        # wiki_concept live state: has all 0.4.1 declared props but is MISSING
+        # wiki_last_reviewed (the single property the 0.4.2 schema adds), so the
+        # reconcile's missing-set is exactly ["wiki_last_reviewed"].
         live_type_resp = _make_live_type_response(
             type_key="wiki_concept",
             type_id=type_id,
-            user_prop_keys=["wiki_definition", "wiki_contradictions", "wiki_status"],
+            user_prop_keys=[
+                "wiki_definition", "wiki_open_questions", "wiki_related",
+                "wiki_sources", "wiki_domain_tags", "wiki_contradictions",
+                "wiki_status",
+            ],
         )
 
         patch_payloads: list[dict] = []
@@ -2341,23 +2346,29 @@ class TestReconcileNoOpWhenComplete:
 
         type_id = "type-id-wiki_concept"
 
-        # wiki_concept live state: has ALL declared props including wiki_last_reviewed
-        live_type_resp = _make_live_type_response(
-            type_key="wiki_concept",
-            type_id=type_id,
-            user_prop_keys=[
-                "wiki_definition", "wiki_open_questions", "wiki_related",
-                "wiki_sources", "wiki_domain_tags", "wiki_contradictions",
-                "wiki_status", "wiki_last_reviewed",
-            ],
-        )
+        # Every existing type is already complete: return each type's FULL declared
+        # property set from WIKI_TYPES, keyed by the requested type_id, so the
+        # reconcile computes an empty missing-set for all six types (no-op).
+        from anytype_llm_wiki.wiki.types_schema import WIKI_TYPES as _WIKI_TYPES
+
+        _complete_by_type_id = {
+            f"type-id-{t['type_key']}": _make_live_type_response(
+                type_key=t["type_key"],
+                type_id=f"type-id-{t['type_key']}",
+                user_prop_keys=[p["property_key"] for p in t["properties"]],
+            )
+            for t in _WIKI_TYPES
+        }
 
         type_patch_calls: list[str] = []
 
         def get_response(request, **kwargs):
             path = str(request.url).split("?")[0]
             if "/types/" in path:
-                return httpx.Response(200, json=live_type_resp)
+                requested_id = path.rsplit("/", 1)[-1]
+                return httpx.Response(
+                    200, json=_complete_by_type_id[requested_id]
+                )
             if path.endswith("/types"):
                 return httpx.Response(200, json={
                     "data": _ALL_SIX_EXISTING_TYPES,
