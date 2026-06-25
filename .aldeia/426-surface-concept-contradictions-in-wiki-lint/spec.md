@@ -7,7 +7,7 @@ parent: 325
 
 # Surface concept contradictions in wiki_lint (#426)
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-25
 **Author:** spec-writer agent
 **Review rounds:** 0
