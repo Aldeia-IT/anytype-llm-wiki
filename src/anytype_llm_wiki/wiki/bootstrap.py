@@ -149,6 +149,7 @@ def _empty_result(space_id: str) -> dict:
         "space_id": space_id,
         "types_created": [],
         "types_skipped": [],
+        "types_reconciled": [],
         "properties_created": [],
         "properties_skipped": [],
         "tags_created": [],
@@ -270,6 +271,7 @@ def _run_bootstrap(
     # --- Types (inline properties are created AND linked in one call) --------
     existing_types = client.list_types(space_id)
     existing_type_keys = {t.get("key") for t in existing_types if t.get("key")}
+    existing_type_map = {t.get("key"): t for t in existing_types if t.get("key")}
     pre_existing_prop_keys = {
         p.get("key") or p.get("property_key")
         for p in client.list_properties(space_id)
@@ -279,9 +281,9 @@ def _run_bootstrap(
     for type_def in types_schema.WIKI_TYPES:
         type_key = type_def["type_key"]
         if type_key in existing_type_keys:
-            result["types_skipped"].append(
-                {"type_key": type_key, "reason": "already_exists"}
-            )
+            # --- existing type: reconcile missing declared properties (§3) ----
+            _reconcile_existing_type(client, space_id, type_def, type_key,
+                                     existing_type_map, result)
             continue
         created = client.create_type(
             space_id,
@@ -481,6 +483,124 @@ def _run_bootstrap(
         )
 
     return result
+
+
+def _reconcile_existing_type(
+    client: WikiClient,
+    space_id: str,
+    type_def: dict,
+    type_key: str,
+    existing_type_map: dict,
+    result: dict,
+) -> None:
+    """Idempotently link missing declared properties onto an existing type (§3).
+
+    Read-modify-write: GET the live type, compute the declared-but-missing set,
+    and (if non-empty) PATCH the UNION of the live user properties plus the
+    missing declared ones. Never sends only the delta (replace-not-merge footgun),
+    never sends Anytype system properties (auto-re-added). Gated only on the
+    per-type missing-set — NOT on is_upgrade — so it runs on every bootstrap and is
+    a no-op once a space is fully reconciled.
+    """
+    entry = existing_type_map.get(type_key)
+    type_id = entry.get("id") if entry else None
+    if type_id is None:
+        # SF-2: visible-but-non-fatal. Cannot reconcile without an id.
+        result["warnings"].append(
+            f"reconcile_skipped: no type_id for existing type {type_key}; "
+            "cannot reconcile missing properties"
+        )
+        result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
+        return
+
+    # get_type's transport/HTTP errors propagate (wrapper categorizes them). A
+    # malformed envelope (missing "type" key → KeyError, or a non-dict body →
+    # TypeError) is treated like a partial read: it must NEVER drive a destructive
+    # replace-PATCH, so abort this type with a visible warning (BL-6.3).
+    try:
+        live_type = client.get_type(space_id, type_id)
+    except (KeyError, TypeError):
+        result["warnings"].append(
+            f"reconcile_skipped: malformed get_type read for {type_key}; "
+            "not reconciling to avoid dropping properties"
+        )
+        result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
+        return
+
+    # Pagination / shape guard (BL-6.3): a truncated read would drop a real
+    # user prop from the union and DESTROY it on the replace-PATCH. Abort.
+    pag = live_type.get("pagination") if isinstance(live_type, dict) else None
+    pag = pag or {}
+    if not isinstance(live_type, dict) or "properties" not in live_type or pag.get("has_more") is True:
+        result["warnings"].append(
+            f"reconcile_skipped: partial/paginated get_type read for {type_key}; "
+            "not reconciling to avoid dropping properties"
+        )
+        result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
+        return
+
+    # Normalize BOTH sides through the tolerant accessor (BL-3); skip malformed.
+    live_props = live_type.get("properties", [])
+    live_prop_keys = {
+        k for p in live_props
+        if (k := (p.get("key") or p.get("property_key"))) is not None
+    }
+    declared_prop_keys = {
+        k for p in type_def["properties"]
+        if (k := (p.get("property_key") or p.get("key"))) is not None
+    }
+    missing = declared_prop_keys - live_prop_keys
+
+    if not missing:
+        result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
+        return
+
+    # Build name/format from the DECLARED schema where keys overlap (BL-6.2).
+    declared_by_key = {
+        (p.get("property_key") or p.get("key")): p for p in type_def["properties"]
+    }
+
+    union_props: list[dict] = []
+    live_user_count = 0
+    for p in live_props:  # keep live USER props
+        k = p.get("key") or p.get("property_key")
+        if k is None or k in types_schema.SYSTEM_PROP_KEYS:
+            continue  # system props auto-re-added
+        live_user_count += 1
+        decl = declared_by_key.get(k)
+        union_props.append({
+            "key": k,
+            "name": (decl or p).get("name") or k,
+            "format": (decl or p).get("format"),
+        })
+    for k in missing:  # add missing declared props
+        decl = declared_by_key[k]
+        union_props.append({
+            "key": k,
+            "name": decl.get("name") or k,
+            "format": decl.get("format"),
+        })
+
+    # Monotonic-union guard (BL-6.1, SF-7): a union that would SHRINK the live
+    # user set, or an empty payload, is always a bug — never PATCH.
+    if not union_props or len(union_props) < live_user_count + len(missing):
+        result["warnings"].append(
+            f"reconcile_skipped: computed union for {type_key} would not grow the "
+            f"property set ({len(union_props)} < {live_user_count}+{len(missing)}); aborting"
+        )
+        result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
+        return
+
+    logger.info(  # SG-e: audit log of the union before the destructive PATCH
+        "wiki_reconcile type=%s adding=%s union_keys=%s",
+        type_key, sorted(missing), [p["key"] for p in union_props],
+    )
+    client.update_type(space_id, type_id, {"properties": union_props})
+    result["types_reconciled"].append({
+        "type_key": type_key,
+        "type_id": type_id,
+        "properties_added": sorted(missing),
+    })
 
 
 def _schema_version_from_objects(objects: list[dict]) -> str | None:
