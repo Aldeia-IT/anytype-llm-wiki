@@ -90,41 +90,41 @@ class TestReadmeDetectionScopeDisclosure:
         )
 
     def test_readme_discloses_concept_lint_surfacing_gap(self):
-        """#325 (supersedes the v0.6.0 entity-only disclosure): detection now fires
-        for BOTH entity and concept updates, so the README must NO LONGER claim
-        detection is entity-only. Instead it must disclose the remaining surfacing
-        gap — concept contradictions are detected and cross-linked but not yet
-        flagged by wiki_lint (follow-up).
+        """#426 (supersedes the #325 surfacing-gap disclosure): the surfacing gap is
+        now CLOSED — wiki_lint flags BOTH entity and concept contradictions. The
+        README must NO LONGER claim detection is entity-only, and must NO LONGER
+        describe the concept-lint surfacing gap as an open "planned follow-up".
+        Instead it must disclose that concept-contradiction surfacing is live.
 
-        This test replaces the former test_readme_discloses_entity_only_scope: #325
-        ships the concept detection extension, making the "entity-only" scope claim
-        false. The operator-facing disclosure required now is the lint-surfacing
-        follow-up, not an entity-only scope.
+        This updates the former #325 disclosure assertion: #426 ships the concept
+        lint gate + bootstrap reconcile together, so the "not yet flagged / planned
+        follow-up" framing is now false (see tests/wiki/test_docs_surfacing.py, which
+        asserts that stale clause is gone).
         """
         readme = _readme_text().lower()
 
         # The stale entity-only scope claim must be gone (detection now covers concepts).
         assert "entity-only" not in readme, (
             "README.md must NOT claim contradiction detection is 'entity-only' — #325 "
-            "extends detection to wiki_concept updates. Replace the stale scope claim "
-            "with the lint-surfacing follow-up disclosure."
+            "extends detection to wiki_concept updates and #426 surfaces it in wiki_lint."
         )
 
-        # The surfacing gap (concept contradictions detected but not yet lint-flagged)
-        # must be disclosed so no reader infers a closed integrity loop.
-        surfacing_gap_disclosed = (
+        # The surfacing gap is CLOSED (#426): the README must describe concept
+        # contradictions as flagged by wiki_lint, not as a pending follow-up.
+        surfacing_disclosed = (
             "concept" in readme
             and "wiki_lint" in readme
-            and "follow-up" in readme
             and "contradiction" in readme
         )
-        assert surfacing_gap_disclosed, (
-            "README.md must disclose the #325 surfacing gap (addendum item 3 / "
-            "CA-CPO-ADV-3): concept contradictions are detected and cross-linked via "
-            "wiki_contradictions but are NOT yet flagged by wiki_lint (a planned "
-            "follow-up), so no reader infers a closed integrity loop. Expected the "
-            "contradiction-detection section to mention 'concept', 'wiki_lint', and "
-            "'follow-up'."
+        assert surfacing_disclosed, (
+            "README.md must describe concept-contradiction surfacing as live (#426): "
+            "the contradiction-detection section must mention 'concept', 'wiki_lint', "
+            "and 'contradiction'."
+        )
+        # The closed gap must NOT still be framed as a planned follow-up (#426 closes it).
+        assert "not yet flagged" not in readme, (
+            "README.md must NOT still describe concept contradictions as 'not yet "
+            "flagged' by wiki_lint — #426 closes that gap (see test_docs_surfacing.py)."
         )
 
     def test_readme_passive_section_replaced(self):

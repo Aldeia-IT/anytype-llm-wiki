@@ -24,7 +24,13 @@ API-contract notes (verified against the Anytype local API, version
 # Semver x.y.z. v0.3.0 ships the wiki_ingest compile pipeline; v0.3.1 adds the
 # wiki_remember agent-memory write path plus wiki_status / wiki_source_type tag
 # seeding. MUST be > "0.1.0".
-WIKI_SCHEMA_VERSION = "0.4.1"
+WIKI_SCHEMA_VERSION = "0.4.2"
+
+# The Anytype-managed property set. These system properties are auto-re-added by
+# Anytype when omitted from an update-type payload, so the bootstrap reconcile
+# (see bootstrap.py) must never send them in the property union — sending only the
+# declared wiki properties is sufficient and safest under replace-not-merge.
+SYSTEM_PROP_KEYS = {"tag", "backlinks", "created_date", "creator", "links"}
 
 # Allowed tag colors per the Anytype API (CreateTagRequest.color enum). Tags are
 # assigned a color by cycling this palette deterministically at bootstrap time.
@@ -110,6 +116,7 @@ WIKI_TYPES = [
             {"property_key": "wiki_domain_tags", "name": "Wiki Domain Tags", "format": "multi_select"},
             {"property_key": "wiki_contradictions", "name": "Wiki Contradictions", "format": "objects"},
             {"property_key": "wiki_status", "name": "Wiki Status", "format": "select"},
+            {"property_key": "wiki_last_reviewed", "name": "Wiki Last Reviewed", "format": "date"},
         ],
     },
     {

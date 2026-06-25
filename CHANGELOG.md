@@ -9,12 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Concept contradictions surfaced in `wiki_lint` (#426).** `wiki_lint` now flags
+  `wiki_concept` contradictions (severity `critical`) exactly as it already flags
+  `wiki_entity` ones; the finding is resolved by setting `wiki_last_reviewed` on the
+  Object. The wiki schema is bumped to **0.4.2**: `wiki_last_reviewed` is added to the
+  `wiki_concept` type so concept contradictions are resolvable. Bootstrap gains an
+  idempotent **type reconcile** capability — on every run it links any declared-but-missing
+  property onto an existing type (read-modify-write `update_type`, union-send under
+  Anytype's replace-not-merge semantics), recording reconciled types in a new
+  `types_reconciled` result section. Re-running `wiki_bootstrap` is **REQUIRED** for every
+  existing space to gain `wiki_last_reviewed` on `wiki_concept` before running the new
+  `wiki_lint` (see MIGRATIONS.md / docs/deploy-runbook.md). The CLI now configures stderr
+  logging at `WIKI_LOG_LEVEL` (default `info`) so the reconcile SG-e audit line
+  (`wiki_reconcile …`, emitted before each destructive `update_type` PATCH) is actually
+  captured instead of being dropped under the root WARNING default.
 - **Contradiction detection extended to Concepts (#325).** Contradiction detection now fires
   for `wiki_concept` updates as well as `wiki_entity` updates; concept contradictions are
   detected and cross-linked via `wiki_contradictions` (candidates drawn from `wiki_related`,
   comparable text from `wiki_definition`; mixed-kind peers read their own type's text key).
-  `wiki_lint` surfacing for concept contradictions is a follow-up (#426) — concept
-  contradictions are recorded and browsable in Anytype but not yet flagged by lint.
+  Concept contradictions are now surfaced by `wiki_lint` (#426, above).
 
 ## [0.8.0] - 2026-06-14
 

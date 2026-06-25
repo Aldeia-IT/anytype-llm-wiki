@@ -22,6 +22,32 @@ class WikiClient(_BaseAnytypeClient):
         resp.raise_for_status()
         return resp.json()["type"]
 
+    def get_type(self, space_id: str, type_id: str) -> dict:
+        """GET a single type by id. Returns the type dict (the value under the "type" key)."""
+        c = self._client()
+        resp = c.get(f"/v1/spaces/{space_id}/types/{type_id}")
+        resp.raise_for_status()
+        return resp.json()["type"]
+
+    def update_type(self, space_id: str, type_id: str, type_def: dict) -> dict:
+        """PATCH an existing type. Returns the updated type dict.
+
+        Refuses an empty/None ``properties`` payload — under Anytype's replace-not-merge
+        semantics a {"properties": []} PATCH would wipe every user property on the type.
+        """
+        # type_def is dict per annotation; an empty/missing properties list must be refused —
+        # a {"properties": []} PATCH would wipe every user property under replace-not-merge.
+        props = type_def.get("properties")
+        if not props:
+            raise ValueError(
+                "update_type refused: empty or missing 'properties' payload would "
+                "destroy all properties on the type under replace-not-merge semantics"
+            )
+        c = self._client()
+        resp = c.patch(f"/v1/spaces/{space_id}/types/{type_id}", json=type_def)
+        resp.raise_for_status()
+        return resp.json()["type"]
+
     def create_property(self, space_id: str, type_key: str, prop_def: dict) -> dict:
         """POST a new property. Returns the created property dict.
 

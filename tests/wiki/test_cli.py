@@ -8,6 +8,7 @@ unreachable in v0.7.0. These tests pin the two lists together.
 """
 
 import argparse
+import logging
 
 from anytype_llm_wiki.wiki import cli
 
@@ -53,3 +54,33 @@ def test_every_subcommand_has_a_handler():
             argv += ["--question", "x"]
         ns = parser.parse_args(argv)
         assert callable(getattr(ns, "func", None)), f"{name} has no handler"
+
+
+def test_configure_logging_enables_info_audit_line_by_default(monkeypatch):
+    """#426 SG-e: the reconcile audit line is logged at INFO. The CLI must
+    configure logging so it is not silently dropped under the root WARNING
+    default — otherwise the forensic record of each destructive update_type
+    PATCH never reaches a durable channel."""
+    root = logging.getLogger()
+    saved = root.level
+    try:
+        monkeypatch.delenv("WIKI_LOG_LEVEL", raising=False)
+        cli._configure_logging()
+        assert root.isEnabledFor(logging.INFO), (
+            "CLI must enable INFO so the wiki_reconcile audit line emits"
+        )
+    finally:
+        root.setLevel(saved)
+
+
+def test_configure_logging_honors_wiki_log_level(monkeypatch):
+    """WIKI_LOG_LEVEL (previously resolved but applied nowhere) is now honored."""
+    root = logging.getLogger()
+    saved = root.level
+    try:
+        monkeypatch.setenv("WIKI_LOG_LEVEL", "warning")
+        cli._configure_logging()
+        assert root.level == logging.WARNING
+        assert not root.isEnabledFor(logging.INFO)
+    finally:
+        root.setLevel(saved)

@@ -484,10 +484,10 @@ def wiki_lint(
                                 f"{window}s of an ingest relation_rollback failure",
                             ))
 
-            # (d) contradiction_unresolved (Critical) — active; wiki_entity only (SF9).
+            # (d) contradiction_unresolved (Critical) — active; wiki_entity and wiki_concept.
             # Severity ranks ABOVE structural checks (asymmetric/orphan are High): a
             # semantic conflict in asserted knowledge is the most user-visible defect.
-            if tk == "wiki_entity":
+            if tk in ("wiki_entity", "wiki_concept"):
                 contra_prop = _prop(o, "wiki_contradictions")
                 contradictions = (
                     _parse_relation_elements(contra_prop.get("objects"))
