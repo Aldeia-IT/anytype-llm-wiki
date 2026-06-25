@@ -1,6 +1,6 @@
 ---
 name: retrieval-lexical-hybrid-dense-sparse-fusion
-status: DRAFT
+status: SPEC
 issue: 327
 repo: anytype-llm-wiki
 target_repo: anytype-llm-wiki
@@ -11,10 +11,10 @@ parent_spec: 323-retrieval-metadata-filters-type-tag-scoping-for-wi
 
 # Retrieval: Lexical / Hybrid Dense+Sparse Fusion (#327)
 
-**Status:** DRAFT
+**Status:** SPEC
 **Date:** 2026-06-25
 **Author:** spec-writer agent
-**Review rounds:** 1
+**Review rounds:** 2 (R2: APPROVED WITH CONDITIONS — conditions SF-A/SF-B/SF-C/SG-α/SG-β applied inline)
 **Epic:** aldeia-box#140 | **Depends on:** #323 (metadata filters), #336 (source_type/domain_tags) — both merged on this branch
 
 ---
@@ -281,6 +281,18 @@ def _ensure_bm25_fresh() -> None:
     _bm25_built_version = on_disk         # only advance after a successful build
 ```
 
+**Staleness guarantee (SF-A).** The version is read *before* the scroll and stamped as
+`_bm25_built_version` only after a successful build. The build scrolls live Qdrant, so it may
+capture a corpus slightly *newer* than `on_disk` reflects (a cron bump landing during the
+scroll). The guarantee is therefore **monotonic eventual consistency with an at-most-one-extra-
+rebuild window**: any version bump strictly greater than the stamped value triggers exactly one
+rebuild on the next query; the worst case is a single redundant rebuild or a one-version skew that
+the next bump heals. This is acceptable because (a) the server is single-writer per process, (b) a
+rebuild is <100 ms (§16), and (c) recall is never wrong — only at most one query-interval stale.
+The version read is `_load_state()`-backed, so it scales with `state.json` size (per-space/object
+maps); at the current corpus this is sub-millisecond (SG-α), and a future sidecar-file split is
+noted in §19 if state grows large.
+
 ### 6.4 `_build_bm25_index(client: QdrantClient) -> None`
 
 ```python
@@ -457,6 +469,8 @@ def hybrid_search_core(query, space_id=None, types=None, ingested_after=None,
 ```
 
 `_passes_inline_filters` (§7.3) reads the real `type`, `source_type`, `domain_tags` keys now populated by `_bm25_search` (BL-2). Dense chunks are exempt from the gate (Qdrant already filtered them).
+
+**Result-count note (SF-B).** Each signal fetches only `fetch_limit = limit*2` candidates (D7), and BM25-only chunks dropped by the date/filter gate consume no output slot. Under aggressive filtering the hybrid path can therefore return slightly **fewer** than `limit` results even when more dense candidates exist beyond the fused-and-gated window. This is acceptable (the dense hits that pass Qdrant's filter are always present and ranked); it is a recall-coverage trade of the app-level fusion, not a correctness bug. If it proves limiting in practice, raise `fetch_limit` per signal.
 
 ---
 
@@ -713,7 +727,10 @@ def test_hybrid_fusion_end_to_end(monkeypatch):
     assert ids.count("o1") == 1         # appears exactly once
     assert "o2" in ids                  # BM25-only chunk recalled
     assert all("_point_id" not in r for r in out)
-    assert all(r["score"] < 0.1 for r in out)   # RRF scores, not cosine
+    # RRF scores, not cosine: dual-retriever o1 ≈ 1/61 + 1/61 ≈ 0.0328; the
+    # single-list chunks are ≈ 1/61 ≈ 0.0164. Pin the value, not just "< 0.1" (SG-β).
+    assert out[0]["score"] == pytest.approx(2 / 61, rel=1e-3)
+    assert all(r["score"] < out[0]["score"] for r in out[1:])
 ```
 
 **AC-H3 — fallback to dense-only when BM25 raises (cosine score preserved)**
@@ -900,6 +917,7 @@ def test_reembed_bumps_corpus_version(monkeypatch, tmp_path):
     before = ix._read_bm25_corpus_version()
     ix.reembed_object("sp", "obj-1", {"id": "obj-1", "space_id": "sp", "name": "X",
         "type": {"key": "wiki_entity"}, "markdown": "# H\nbody", "properties": []})
+    assert fake.upserted_points, "reembed must upsert chunks for the bump path (SF-C)"
     assert ix._read_bm25_corpus_version() == before + 1
 ```
 
@@ -1186,6 +1204,18 @@ Inherited from #323; must pass unmodified (it guards that the `_build_search_fil
 | **SG-7** scroll mock shape | Fixed. `FakeQdrantClientWithSearch.scroll` matches the real keyword-arg call shape (§6.4, §11.1). |
 
 Preserved verified-good parts (per review "What Aligns Well"): rank-bm25 choice and v2 deferral (§3, §19), `semantic_search_core` invariant + OD-B (D1), Qdrant-error propagation boundary (D9, AC-H13), aggregate eval metric (§10.1), `_rrf_fuse` edge tests (AC-H2).
+
+### R2 verdict: APPROVED WITH CONDITIONS — conditions applied inline
+
+The R2 architecture re-review confirmed all seven R1 BLOCKING findings genuinely resolved (no new BLOCKING). The remaining SHOULD-FIX/SUGGESTION conditions were applied to this spec by the lead:
+
+| Finding | Resolution |
+|---|---|
+| **SF-A** Staleness-stamp skew window | Documented the monotonic-eventual-consistency / at-most-one-extra-rebuild guarantee in §6.3 (recall never wrong; next bump heals a one-version skew). |
+| **SF-B** Hybrid may return < `limit` under aggressive filtering | Documented as an accepted recall-coverage trade in §6.7 (dense filter-passing hits always present; raise `fetch_limit` if limiting). |
+| **SF-C** reembed bump test depends on chunk production | Added `assert fake.upserted_points` to `test_reembed_bumps_corpus_version` so a no-chunk early-return fails legibly. |
+| **SG-α** state read scales with state size | Noted in §6.3; future sidecar-file split referenced. |
+| **SG-β** AC-H2b loose `< 0.1` score proxy | Tightened to pin the dual-retriever RRF value `≈ 2/61` and strict descending order. |
 
 ---
 
