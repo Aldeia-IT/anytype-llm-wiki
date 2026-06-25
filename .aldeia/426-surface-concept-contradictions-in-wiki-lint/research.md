@@ -47,6 +47,52 @@ the technical-researcher subagent). **Date:** 2026-06-24.
 
 ---
 
+## 1b. Read-side probe (BL-6.4 / council Advisory 1 / addendum item 2) — VERIFIED
+
+**Date:** 2026-06-25 (test phase, dev-lead via `anytype` MCP).
+The §1 probe verified the *write* contract. This closes the carried-forward *read* contract:
+the exact `get_type` (raw `GET /v1/spaces/{id}/types/{type_id}`) response shape, against a
+bootstrapped wiki type in `wiki-validation-throwaway`
+(`bafyreif52zwqdm3vd4gvensmfvthncmwlnlhqi3brxezjdh5nhwsuxhesq.meysp1f5qul1`).
+
+Probed type `wiki_t_2` (`bafyreibtkkasylnmyatcdeb5s65mavjqhdc5bwush4cmmcyg53skwsrpum`), a
+bootstrapped wiki-style type carrying a system+user property mix.
+
+### Observed `get_type` response (verbatim shape)
+```json
+{"type": {
+  "object": "type", "id": "bafyrei…rpum", "key": "wiki_t_2", "name": "T2",
+  "plural_name": "T2s", "icon": null, "archived": false, "layout": "basic",
+  "properties": [
+    {"object":"property","id":"bafyrei…ipba","key":"tag","name":"Tag","format":"multi_select"},
+    {"object":"property","id":"bafyrei…3mke","key":"backlinks","name":"Backlinks","format":"objects"},
+    {"object":"property","id":"bafyrei…gn7m","key":"wiki_excerpt","name":"Excerpt","format":"text"},
+    {"object":"property","id":"bafyrei…6cum","key":"wiki_domain_tags","name":"Domain Tags","format":"multi_select"}
+  ]
+}}
+```
+
+### Verified read contract (the test mocks MUST mirror this)
+- **Envelope:** the response wraps the type in a top-level `"type"` key →
+  `resp.json()["type"]` (spec §2 `get_type` is correct).
+- **Per-property field set:** each entry carries `object`, `id`, **`key`** (NOT
+  `property_key`), **`name`**, **`format`**. So on the read side the accessor is `p["key"]`
+  and `name`/`format` ARE present per entry. (The spec's tolerant `p.get("key") or
+  p.get("property_key")` is correct — live data uses `key`.)
+- **Pagination: NONE.** The single-type `get_type` response has **no `pagination` key** and
+  no nested pagination on `properties[]`; the array is returned inline and complete. (Only the
+  *list*-types response carries a top-level `pagination` block; `get_type` does not.) →
+  the §3 pagination/shape guard (`pag.get("has_more") is True`) never fires on a real read,
+  so the guard is a defensive backstop, exercised only by a synthetic mock (addendum item 3 /
+  Advisory 3). System props (`tag`, `backlinks`) ARE echoed in the read and must be filtered
+  via `SYSTEM_PROP_KEYS` before building the union (spec §3 does this).
+
+### Consequences for the test phase
+- **Normal/success `get_type` mock** → mirror the shape above: `{"type": {"id","key","properties":[{object,id,key,name,format}, …]}}`, **NO `pagination` key** (this is the real contract — addendum item 2's "at least one mock mirrors the actual observed shape").
+- **Pagination-abort mock** (addendum item 3) → a *synthetic* `{"type": {"key":…, "pagination": {"has_more": true}}}` or a `get_type` missing the `properties` key, to drive the guard → assert reconcile ABORTS with a `warnings[]` entry and NO `update_type` PATCH. Note in the test that this shape is synthetic (the live API does not paginate single-type reads) — the guard defends against an unadvertised future change.
+
+---
+
 ## 2. Current-main integration map (verified by reading the files post-merge)
 
 ### 2a. Detection — already done (#325), no change needed
