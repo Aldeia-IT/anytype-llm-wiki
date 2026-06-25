@@ -161,8 +161,15 @@ def _make_concept(
     backlinks: list | None = None,
     wiki_status: str | None = None,
     wiki_sources: list | None = None,
+    wiki_contradictions: list | None = None,
+    wiki_last_reviewed: str | None = None,
 ) -> dict:
-    """Build a wiki_concept object dict."""
+    """Build a wiki_concept object dict.
+
+    NOTE (SG-b): the existing props seed ``wiki_description`` while the schema
+    declares ``wiki_definition``.  This is a pre-existing harmless inconsistency;
+    the new params do NOT propagate it and do NOT "fix" it (out of scope for #426).
+    """
     props = [
         {"key": "wiki_description", "text": f"Description of {name}."},
         {"key": "wiki_related", "objects": relations or []},
@@ -172,6 +179,10 @@ def _make_concept(
         props.append({"key": "wiki_status", "select": {"name": wiki_status, "id": f"tag-{wiki_status}-id"}})
     if wiki_sources is not None:
         props.append({"key": "wiki_sources", "objects": wiki_sources})
+    if wiki_contradictions is not None:
+        props.append({"key": "wiki_contradictions", "objects": wiki_contradictions})
+    if wiki_last_reviewed is not None:
+        props.append({"key": "wiki_last_reviewed", "date": wiki_last_reviewed})
 
     obj: dict = {
         "id": object_id,
@@ -1258,6 +1269,139 @@ class TestContradictionCheck:
         assert not any(f.get("object_id") == "obj-reviewed" for f in contradictions), (
             f"AC4: contradiction_unresolved must NOT fire when wiki_last_reviewed is set; "
             f"findings: {contradictions}"
+        )
+
+
+class TestConceptContradictionCheck:
+    """AC#426-1: contradiction_unresolved must fire for wiki_concept, not only wiki_entity.
+
+    These tests FAIL against the current lint.py which gates on
+    ``if tk == "wiki_entity":`` at line 490.  They will pass when the gate is
+    widened to ``tk in ("wiki_entity", "wiki_concept")``.
+
+    Mirroring: TestContradictionCheck above (entity path); _make_concept extended
+    with wiki_contradictions / wiki_last_reviewed params (spec Test Plan §1).
+    """
+
+    @respx.mock
+    def test_concept_contradiction_unresolved(self, monkeypatch):
+        """AC#426-1 (fail-first): three assertions covering the concept contradiction gate.
+
+        (a) concept with wiki_contradictions=["contra-id-1"] + wiki_last_reviewed=None
+            → exactly one finding with check=="contradiction_unresolved" and
+              severity=="critical".
+        (b) same concept with wiki_last_reviewed="2026-01-01"
+            → zero contradiction_unresolved findings.
+        (c) concept with NO wiki_contradictions
+            → zero contradiction_unresolved findings.
+
+        FAILS against current lint.py (entity-only gate at line 490).
+        Will pass when gate is changed to: if tk in ("wiki_entity", "wiki_concept"):
+        """
+        # --- (a) concept with contradictions, no last_reviewed ---
+        concept_with_contradiction = _make_concept(
+            "concept-contra-001",
+            name="Conflicted Concept",
+            wiki_contradictions=["contra-id-1"],
+            wiki_last_reviewed=None,
+        )
+
+        get_side_effect_a, register_a = _standard_mocks(
+            objects=[concept_with_contradiction]
+        )
+        register_a(concept_with_contradiction)
+
+        respx.get().mock(side_effect=get_side_effect_a)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result_a = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        findings_a = result_a.get("findings", [])
+        contra_findings_a = [
+            f for f in findings_a
+            if f.get("check") == "contradiction_unresolved"
+            and f.get("object_id") == "concept-contra-001"
+        ]
+
+        assert len(contra_findings_a) == 1, (
+            f"AC#426-1(a): wiki_concept with wiki_contradictions set and no "
+            f"wiki_last_reviewed must produce exactly one contradiction_unresolved "
+            f"finding; got {len(contra_findings_a)} findings. "
+            f"All findings: {findings_a}. "
+            f"(FAILS until lint.py:490 is widened from 'wiki_entity' to "
+            f"'(\"wiki_entity\", \"wiki_concept\")')"
+        )
+        assert contra_findings_a[0].get("severity") == "critical", (
+            f"AC#426-1(a): contradiction_unresolved for wiki_concept must have "
+            f"severity='critical'; got: {contra_findings_a[0].get('severity')!r}"
+        )
+
+    @respx.mock
+    def test_concept_contradiction_cleared_by_review(self, monkeypatch):
+        """AC#426-1(b): concept with wiki_contradictions AND wiki_last_reviewed set
+        → zero contradiction_unresolved findings.
+
+        Mirrors the entity cleared-by-review test (TestContradictionCheck.test_contradiction_cleared_by_review).
+        """
+        concept_reviewed = _make_concept(
+            "concept-reviewed-001",
+            name="Reviewed Concept",
+            wiki_contradictions=["contra-id-2"],
+            wiki_last_reviewed="2026-01-01",
+        )
+
+        get_side_effect, register = _standard_mocks(objects=[concept_reviewed])
+        register(concept_reviewed)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        findings = result.get("findings", [])
+        contra_findings = [
+            f for f in findings
+            if f.get("check") == "contradiction_unresolved"
+            and f.get("object_id") == "concept-reviewed-001"
+        ]
+
+        assert len(contra_findings) == 0, (
+            f"AC#426-1(b): contradiction_unresolved must NOT fire for wiki_concept "
+            f"when wiki_last_reviewed is set; got: {contra_findings}"
+        )
+
+    @respx.mock
+    def test_concept_no_contradictions_no_finding(self, monkeypatch):
+        """AC#426-1(c): concept with NO wiki_contradictions field
+        → zero contradiction_unresolved findings.
+        """
+        concept_clean = _make_concept(
+            "concept-clean-001",
+            name="Clean Concept",
+            # No wiki_contradictions param → property absent
+        )
+
+        get_side_effect, register = _standard_mocks(objects=[concept_clean])
+        register(concept_clean)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        result = wiki_lint(space_id=FAKE_SPACE_ID)
+
+        findings = result.get("findings", [])
+        contra_findings = [
+            f for f in findings
+            if f.get("check") == "contradiction_unresolved"
+            and f.get("object_id") == "concept-clean-001"
+        ]
+
+        assert len(contra_findings) == 0, (
+            f"AC#426-1(c): contradiction_unresolved must NOT fire for wiki_concept "
+            f"with no wiki_contradictions; got: {contra_findings}"
         )
 
 

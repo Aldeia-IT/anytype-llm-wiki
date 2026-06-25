@@ -850,24 +850,30 @@ class TestBootstrapLiveAPI:
 
 
 class TestSchemaVersionBumped:
-    """Guard: WIKI_SCHEMA_VERSION must be '0.4.1' (D11, prerequisite of AC-R11)."""
+    """Guard: WIKI_SCHEMA_VERSION must be '0.4.2' (D11 updated, AC#426 addendum item 1).
 
-    def test_wiki_schema_version_is_041(self):
-        """D11: WIKI_SCHEMA_VERSION must be pinned at '0.4.1' (spec §5 D11).
+    NOTE (addendum item 1 / QA-1): the spec's Test Plan erroneously claimed no
+    hardcoded pin existed.  The addendum corrects this: the pin is updated from
+    '0.4.1' to '0.4.2' so the version bump in §1 is guarded by a positive pin.
+    """
+
+    def test_wiki_schema_version_is_042(self):
+        """D11 (updated): WIKI_SCHEMA_VERSION must be pinned at '0.4.2' (AC#426 §1).
 
         The schema version is load-bearing for the AC-R11 schema-outdated abort:
         a live space at an older version must read as outdated against the code
-        version. #303 (v0.4.1) renamed all property display names to a `Wiki `
-        prefix (Anytype native export/import collapses bundled-relation names
-        like "Status"/"Description"/"Timestamp"), which is a schema change, so
-        the version is bumped 0.3.1 -> 0.4.1. A positive pin is a stronger
+        version. #426 (v0.4.2) adds wiki_last_reviewed to wiki_concept and
+        introduces the bootstrap reconcile capability, which is a schema change,
+        so the version is bumped 0.4.1 -> 0.4.2. A positive pin is a stronger
         regression guard than the version-relative checks elsewhere in this module.
-        Covers: §10.1 checklist item, D11, AC-R11.
+        Covers: §10.1 checklist item, D11 (updated), AC-R11, addendum item 1.
+
+        FAILS until types_schema.py WIKI_SCHEMA_VERSION is bumped to '0.4.2'.
         """
         from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
-        assert WIKI_SCHEMA_VERSION == "0.4.1", (
-            f"WIKI_SCHEMA_VERSION must be '0.4.1' (D11, prerequisite of AC-R11); "
-            f"got: {WIKI_SCHEMA_VERSION!r}. Bump types_schema.py."
+        assert WIKI_SCHEMA_VERSION == "0.4.2", (
+            f"WIKI_SCHEMA_VERSION must be '0.4.2' (AC#426 §1, addendum item 1); "
+            f"got: {WIKI_SCHEMA_VERSION!r}. Bump types_schema.py WIKI_SCHEMA_VERSION."
         )
 
 
@@ -1967,3 +1973,995 @@ class TestDoctorGreenAfterV031Bootstrap:
             f"breaks on a freshly-bootstrapped v0.3.1 space. "
             f"before_fails={before_fail_names}, after_fails={after_fail_names}"
         )
+
+
+# =============================================================================
+# v0.4.2 NEW TESTS — #426 Bootstrap Reconcile + Schema / Lint Gate
+# These tests FAIL until:
+#   1. types_schema.py: WIKI_SCHEMA_VERSION bumped to "0.4.2", wiki_last_reviewed
+#      added to wiki_concept, SYSTEM_PROP_KEYS constant added.
+#   2. wiki_client.py: get_type / update_type methods added.
+#   3. bootstrap.py: existing_type_map + reconcile loop implemented,
+#      "types_reconciled" key added to _empty_result.
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Helper: build the all-six-types existing_types list used by reconcile tests.
+# Each entry has {id, key, name} matching the real list_types response shape.
+# ---------------------------------------------------------------------------
+
+_ALL_SIX_EXISTING_TYPES = [
+    {"id": f"type-id-{key}", "key": key, "name": key.replace("wiki_", "").capitalize()}
+    for key in CANONICAL_TYPE_KEYS
+]
+
+
+def _make_live_type_response(
+    type_key: str,
+    type_id: str,
+    user_prop_keys: list[str],
+    system_prop_keys: list[str] | None = None,
+) -> dict:
+    """Build a get_type response mirroring the verified live API shape (research.md §1b).
+
+    Shape: {"type": {"object":"type", "id":..., "key":..., "properties":[...]}}
+    Each property entry: {"object":"property","id":...,"key":...,"name":...,"format":...}
+    NO "pagination" key — the live single-type GET is never paginated (research.md §1b).
+
+    System props (tag, backlinks) are echoed in the live response and must be
+    filtered via SYSTEM_PROP_KEYS before building the union (spec §3).
+    """
+    if system_prop_keys is None:
+        system_prop_keys = ["tag", "backlinks"]
+
+    props = []
+    for k in system_prop_keys:
+        props.append({
+            "object": "property",
+            "id": f"prop-id-{k}",
+            "key": k,
+            "name": k.capitalize(),
+            "format": "multi_select" if k == "tag" else "objects",
+        })
+    for k in user_prop_keys:
+        props.append({
+            "object": "property",
+            "id": f"prop-id-{k}",
+            "key": k,
+            "name": k.replace("wiki_", "").replace("_", " ").capitalize(),
+            "format": "text",
+        })
+
+    return {
+        "type": {
+            "object": "type",
+            "id": type_id,
+            "key": type_key,
+            "name": type_key.replace("wiki_", "").capitalize(),
+            "layout": "basic",
+            "properties": props,
+        }
+    }
+
+
+class TestSchemaWikiConceptHasWikiLastReviewed:
+    """AC#426-§1: wiki_concept in WIKI_TYPES must declare wiki_last_reviewed (schema bump).
+
+    FAILS until types_schema.py wiki_concept properties list is updated.
+    """
+
+    def test_wiki_concept_schema_has_wiki_last_reviewed(self):
+        """AC#426-§1: wiki_concept in WIKI_TYPES must contain a 'wiki_last_reviewed'
+        property entry.
+
+        FAILS until types_schema.py adds
+        {"property_key": "wiki_last_reviewed", "name": "Wiki Last Reviewed", "format": "date"}
+        to the wiki_concept properties list.
+        """
+        from anytype_llm_wiki.wiki.types_schema import WIKI_TYPES
+
+        concept_type = next(
+            (t for t in WIKI_TYPES if t["type_key"] == "wiki_concept"), None
+        )
+        assert concept_type is not None, (
+            "wiki_concept must be in WIKI_TYPES"
+        )
+        prop_keys = {p["property_key"] for p in concept_type.get("properties", [])}
+        assert "wiki_last_reviewed" in prop_keys, (
+            f"AC#426-§1: wiki_concept in WIKI_TYPES must declare 'wiki_last_reviewed'; "
+            f"current property keys: {sorted(prop_keys)}. "
+            f"Add it to types_schema.py wiki_concept properties list."
+        )
+
+    def test_wiki_concept_wiki_last_reviewed_has_date_format(self):
+        """AC#426-§1: wiki_last_reviewed on wiki_concept must have format='date'."""
+        from anytype_llm_wiki.wiki.types_schema import WIKI_TYPES
+
+        concept_type = next(
+            (t for t in WIKI_TYPES if t["type_key"] == "wiki_concept"), None
+        )
+        assert concept_type is not None, "wiki_concept must be in WIKI_TYPES"
+        prop = next(
+            (p for p in concept_type.get("properties", [])
+             if p.get("property_key") == "wiki_last_reviewed"),
+            None,
+        )
+        assert prop is not None, (
+            "wiki_last_reviewed must be present in wiki_concept.properties"
+        )
+        assert prop.get("format") == "date", (
+            f"wiki_last_reviewed on wiki_concept must have format='date'; "
+            f"got: {prop.get('format')!r}"
+        )
+
+
+class TestSystemPropKeys:
+    """AC#426-§1: SYSTEM_PROP_KEYS constant must exist with exact membership.
+
+    FAILS until types_schema.py adds
+    SYSTEM_PROP_KEYS = {"tag", "backlinks", "created_date", "creator", "links"}.
+    """
+
+    def test_system_prop_keys_exists(self):
+        """SYSTEM_PROP_KEYS must be importable from anytype_llm_wiki.wiki.types_schema."""
+        from anytype_llm_wiki.wiki import types_schema
+        assert hasattr(types_schema, "SYSTEM_PROP_KEYS"), (
+            "AC#426-§1: SYSTEM_PROP_KEYS constant must exist in types_schema.py; "
+            "add: SYSTEM_PROP_KEYS = {\"tag\", \"backlinks\", \"created_date\", "
+            "\"creator\", \"links\"}"
+        )
+
+    def test_system_prop_keys_exact_membership(self):
+        """SYSTEM_PROP_KEYS must equal exactly {"tag","backlinks","created_date","creator","links"}.
+
+        A positive pin so an accidental edit fails loudly (spec §1, addendum item 6).
+        FAILS until types_schema.py adds SYSTEM_PROP_KEYS with the correct members.
+        """
+        from anytype_llm_wiki.wiki import types_schema
+        expected = {"tag", "backlinks", "created_date", "creator", "links"}
+        # If the attribute doesn't exist, skip with a clear message rather than AttributeError
+        actual = getattr(types_schema, "SYSTEM_PROP_KEYS", None)
+        assert actual is not None, (
+            "SYSTEM_PROP_KEYS must exist in types_schema.py"
+        )
+        assert actual == expected, (
+            f"AC#426-§1: SYSTEM_PROP_KEYS must equal {expected!r}; "
+            f"got: {actual!r}. Update types_schema.py."
+        )
+
+
+class TestResultHasTypesReconciled:
+    """AC#426-§3 / BL-5: 'types_reconciled' key must be present in _empty_result.
+
+    FAILS until bootstrap.py _empty_result adds "types_reconciled": [].
+    """
+
+    @respx.mock
+    def test_result_has_types_reconciled_key(self, monkeypatch):
+        """types_reconciled must be present in wiki_bootstrap result on every run
+        (including non-reconciling runs that skip all types).
+
+        FAILS until bootstrap.py _empty_result includes "types_reconciled": [].
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+
+        respx.post().mock(return_value=httpx.Response(200, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "option": {"id": "o1", "name": "wiki_ai-research"},
+            "object": {"id": "c1", "name": "Wiki"},
+        }))
+        respx.get().mock(return_value=httpx.Response(200, json={
+            "data": [], "pagination": {"has_more": False}
+        }))
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        assert "types_reconciled" in result, (
+            "AC#426-§3/BL-5: 'types_reconciled' must be present in wiki_bootstrap "
+            "result on every run; got keys: " + str(sorted(result.keys()))
+        )
+        assert isinstance(result["types_reconciled"], list), (
+            f"'types_reconciled' must be a list; got: {type(result['types_reconciled'])!r}"
+        )
+
+    @respx.mock
+    def test_types_reconciled_empty_on_fresh_space(self, monkeypatch):
+        """On a fresh space (all types created, none skipped), types_reconciled is [].
+
+        Reconcile only runs on existing types; a clean bootstrap has no existing types
+        to reconcile, so types_reconciled must be an empty list.
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+
+        respx.post().mock(return_value=httpx.Response(200, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "option": {"id": "o1", "name": "wiki_ai-research"},
+            "object": {"id": "c1", "name": "Wiki"},
+        }))
+        respx.get().mock(return_value=httpx.Response(200, json={
+            "data": [], "pagination": {"has_more": False}
+        }))
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        assert result.get("types_reconciled", "MISSING") != "MISSING", (
+            "types_reconciled must exist in result"
+        )
+        assert result["types_reconciled"] == [], (
+            f"On a fresh space types_reconciled must be []; "
+            f"got: {result['types_reconciled']}"
+        )
+
+
+class TestReconcileAddsMissingProperty:
+    """AC#426-2 (fail-first): bootstrap reconciles wiki_last_reviewed onto wiki_concept.
+
+    Given: existing wiki_concept type is missing wiki_last_reviewed in its live
+    property set (0.4.1 state).
+    Expected: bootstrap calls update_type with the UNION (existing user props +
+    wiki_last_reviewed) and records the type in types_reconciled with
+    properties_added == ["wiki_last_reviewed"].
+
+    FAILS until bootstrap.py implements the reconcile loop (§3).
+    """
+
+    @respx.mock
+    def test_reconcile_adds_missing_property(self, monkeypatch):
+        """AC#426-2 (fail-first): wiki_concept is missing wiki_last_reviewed →
+        bootstrap calls update_type with the UNION and records types_reconciled entry.
+
+        Mock shape mirrors the verified live get_type response (research.md §1b):
+        {"type": {"id","key","properties":[{object,id,key,name,format},...]}}
+        NO pagination key (live API does not paginate single-type GET — research.md §1b).
+
+        FAILS until bootstrap.py §3 reconcile loop is implemented.
+        """
+        import json as _json
+
+        type_id = "type-id-wiki_concept"
+
+        # wiki_concept live state: has wiki_definition, wiki_contradictions, wiki_status
+        # but is MISSING wiki_last_reviewed (0.4.1 schema state)
+        live_type_resp = _make_live_type_response(
+            type_key="wiki_concept",
+            type_id=type_id,
+            user_prop_keys=["wiki_definition", "wiki_contradictions", "wiki_status"],
+        )
+
+        patch_payloads: list[dict] = []
+
+        def get_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            # Single-type GET must be matched BEFORE the list branch (SF-1)
+            if "/types/" in path:
+                return httpx.Response(200, json=live_type_resp)
+            if path.endswith("/types"):
+                return httpx.Response(200, json={
+                    "data": _ALL_SIX_EXISTING_TYPES,
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def patch_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            try:
+                payload = _json.loads(request.content)
+                patch_payloads.append({"path": path, "payload": payload})
+            except Exception:
+                pass
+            if "/types/" in path:
+                return httpx.Response(200, json={
+                    "type": {"id": type_id, "key": "wiki_concept", "properties": []}
+                })
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        respx.get().mock(side_effect=get_response)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "coll-001", "name": "Wiki"},
+        }))
+        respx.patch().mock(side_effect=patch_response)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        # Assert types_reconciled contains wiki_concept with properties_added == ["wiki_last_reviewed"]
+        reconciled = result.get("types_reconciled", [])
+        concept_reconciled = [r for r in reconciled if r.get("type_key") == "wiki_concept"]
+
+        assert len(concept_reconciled) == 1, (
+            f"AC#426-2 (fail-first): wiki_concept must appear in types_reconciled "
+            f"with wiki_last_reviewed added; types_reconciled={reconciled}. "
+            f"result keys: {sorted(result.keys())}. "
+            f"FAILS until bootstrap.py §3 reconcile loop is implemented."
+        )
+        assert concept_reconciled[0].get("properties_added") == ["wiki_last_reviewed"], (
+            f"AC#426-2: types_reconciled entry for wiki_concept must have "
+            f"properties_added==['wiki_last_reviewed']; "
+            f"got: {concept_reconciled[0].get('properties_added')!r}"
+        )
+
+        # Assert wiki_concept is NOT also in types_skipped (it moved to types_reconciled)
+        skipped_keys = {s.get("type_key") for s in result.get("types_skipped", [])}
+        assert "wiki_concept" not in skipped_keys, (
+            f"AC#426-2: wiki_concept must NOT appear in both types_skipped and "
+            f"types_reconciled; types_skipped={result.get('types_skipped')}"
+        )
+
+        # Assert update_type was called with a payload containing wiki_last_reviewed
+        type_patch_payloads = [
+            p for p in patch_payloads if "/types/" in p["path"]
+        ]
+        assert len(type_patch_payloads) >= 1, (
+            f"AC#426-2: update_type (PATCH /types/{{type_id}}) must be called; "
+            f"patch_payloads: {patch_payloads}"
+        )
+        union_keys = {
+            prop.get("key") or prop.get("property_key")
+            for p in type_patch_payloads
+            for prop in p["payload"].get("properties", [])
+        }
+        assert "wiki_last_reviewed" in union_keys, (
+            f"AC#426-2: update_type payload must include 'wiki_last_reviewed'; "
+            f"union_keys sent: {union_keys}"
+        )
+
+
+class TestReconcileNoOpWhenComplete:
+    """AC#426-2 (forward guard): bootstrap does NOT call update_type when all declared
+    properties are already present on the live type.
+
+    This is a forward regression guard (not fail-first): the code path for a fully-
+    reconciled space must skip the PATCH call.
+
+    FAILS if the reconcile loop incorrectly PATCHes a complete type.
+    """
+
+    @respx.mock
+    def test_reconcile_no_op_when_complete(self, monkeypatch):
+        """wiki_concept already has all declared properties (including wiki_last_reviewed)
+        → no PATCH to /types/{type_id} (no update_type call).
+
+        FAILS until bootstrap.py §3 reconcile loop is implemented with proper no-op
+        detection when missing-set is empty.  Once implemented the PATCH count
+        for /types/ paths must be 0.
+        """
+        import json as _json
+
+        type_id = "type-id-wiki_concept"
+
+        # wiki_concept live state: has ALL declared props including wiki_last_reviewed
+        live_type_resp = _make_live_type_response(
+            type_key="wiki_concept",
+            type_id=type_id,
+            user_prop_keys=[
+                "wiki_definition", "wiki_open_questions", "wiki_related",
+                "wiki_sources", "wiki_domain_tags", "wiki_contradictions",
+                "wiki_status", "wiki_last_reviewed",
+            ],
+        )
+
+        type_patch_calls: list[str] = []
+
+        def get_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                return httpx.Response(200, json=live_type_resp)
+            if path.endswith("/types"):
+                return httpx.Response(200, json={
+                    "data": _ALL_SIX_EXISTING_TYPES,
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def patch_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                type_patch_calls.append(path)
+                return httpx.Response(200, json={
+                    "type": {"id": type_id, "key": "wiki_concept", "properties": []}
+                })
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        respx.get().mock(side_effect=get_response)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "coll-001", "name": "Wiki"},
+        }))
+        respx.patch().mock(side_effect=patch_response)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        assert len(type_patch_calls) == 0, (
+            f"AC#426-2 (no-op guard): update_type must NOT be called when wiki_concept "
+            f"already has all declared properties; PATCH /types/ calls: {type_patch_calls}"
+        )
+        # Also assert types_reconciled is empty (no-op means nothing to report)
+        reconciled = result.get("types_reconciled", [])
+        assert reconciled == [], (
+            f"AC#426-2 (no-op guard): types_reconciled must be [] when all types are "
+            f"already complete; got: {reconciled}"
+        )
+
+
+class TestReconcileNeverDropsExistingProperties:
+    """AC#426-2 regression (fail-first): existing user properties are NEVER dropped.
+
+    The replace-not-merge footgun: if update_type is called with only the missing
+    delta (wiki_last_reviewed), all pre-existing properties are destroyed.
+    The reconcile MUST send the UNION: live user props + missing declared props.
+
+    FAILS until bootstrap.py §3 reconcile loop sends the union (not the delta).
+    """
+
+    @respx.mock
+    def test_reconcile_never_drops_existing_properties(self, monkeypatch):
+        """AC#426-2 regression (fail-first): existing wiki_concept carries a custom user
+        property; after reconcile, the PATCH payload must include BOTH the custom prop
+        AND wiki_last_reviewed (union, not delta).
+
+        Scenario: live wiki_concept has wiki_definition + wiki_custom_user_prop.
+        Declared schema: wiki_definition + ... + wiki_last_reviewed (missing from live).
+        Expected: PATCH payload includes wiki_definition, wiki_custom_user_prop,
+                  wiki_last_reviewed (all non-system props from the live set + missing).
+
+        FAILS until bootstrap.py §3 sends the union (not just ["wiki_last_reviewed"]).
+        """
+        import json as _json
+
+        type_id = "type-id-wiki_concept"
+
+        # wiki_concept live state: has wiki_definition + a custom user prop
+        # but is MISSING wiki_last_reviewed
+        live_type_resp = _make_live_type_response(
+            type_key="wiki_concept",
+            type_id=type_id,
+            user_prop_keys=["wiki_definition", "wiki_custom_user_prop"],
+        )
+
+        patch_payloads: list[dict] = []
+
+        def get_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                return httpx.Response(200, json=live_type_resp)
+            if path.endswith("/types"):
+                return httpx.Response(200, json={
+                    "data": _ALL_SIX_EXISTING_TYPES,
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def patch_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            try:
+                payload = _json.loads(request.content)
+                patch_payloads.append({"path": path, "payload": payload})
+            except Exception:
+                pass
+            if "/types/" in path:
+                return httpx.Response(200, json={
+                    "type": {"id": type_id, "key": "wiki_concept", "properties": []}
+                })
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        respx.get().mock(side_effect=get_response)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "coll-001", "name": "Wiki"},
+        }))
+        respx.patch().mock(side_effect=patch_response)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        # Assert PATCH was made to the types endpoint
+        type_patch_payloads = [p for p in patch_payloads if "/types/" in p["path"]]
+        assert len(type_patch_payloads) >= 1, (
+            f"AC#426-2 regression (fail-first): update_type must be called for "
+            f"wiki_concept (wiki_last_reviewed is missing); "
+            f"all patch_payloads: {patch_payloads}. "
+            f"FAILS until bootstrap.py §3 reconcile loop is implemented."
+        )
+
+        # Assert the UNION: custom user prop AND wiki_last_reviewed are BOTH in payload
+        union_keys = {
+            prop.get("key") or prop.get("property_key")
+            for p in type_patch_payloads
+            for prop in p["payload"].get("properties", [])
+        }
+        assert "wiki_custom_user_prop" in union_keys, (
+            f"AC#426-2 regression: update_type payload MUST include the existing "
+            f"custom user prop 'wiki_custom_user_prop' (union, not delta); "
+            f"keys sent: {union_keys}. "
+            f"FAILS until the reconcile sends the full union."
+        )
+        assert "wiki_last_reviewed" in union_keys, (
+            f"AC#426-2 regression: update_type payload must include 'wiki_last_reviewed'; "
+            f"keys sent: {union_keys}"
+        )
+
+
+class TestReconcilePaginationAbort:
+    """AC#426 addendum item 3: pagination/shape guard aborts reconcile for that type.
+
+    Scenario: get_type returns a response with pagination.has_more=True (SYNTHETIC —
+    the live API does NOT paginate single-type GET responses; see research.md §1b).
+    This test exercises the defensive guard against an unadvertised future API change.
+
+    Expected: reconcile ABORTS for that type (appends warnings[] entry), does NOT
+    call update_type PATCH, and records the type in types_skipped.
+
+    FAILS until bootstrap.py §3 implements the pagination/shape guard (BL-6.3).
+    """
+
+    @respx.mock
+    def test_reconcile_pagination_abort_warns_no_patch(self, monkeypatch):
+        """Addendum item 3: get_type returns pagination.has_more=True →
+        reconcile aborts with warnings[] entry and NO update_type PATCH.
+
+        NOTE: this shape is SYNTHETIC. The live Anytype API does NOT paginate
+        single-type GET responses (research.md §1b — the properties[] array is
+        returned inline and complete, with NO pagination key). This guard defends
+        against an unadvertised future API change that could cause a truncated
+        get_type read to silently drop user properties before a destructive
+        replace-PATCH.
+
+        FAILS until bootstrap.py §3 implements the pagination guard (BL-6.3).
+        """
+        type_id = "type-id-wiki_concept"
+
+        # SYNTHETIC paginated shape: wiki_concept missing wiki_last_reviewed,
+        # but get_type returns pagination.has_more=True → reconcile must abort
+        paginated_type_resp = {
+            "type": {
+                "object": "type",
+                "id": type_id,
+                "key": "wiki_concept",
+                "name": "Concept",
+                "layout": "basic",
+                "pagination": {"has_more": True, "total": 10},
+                "properties": [
+                    {"object": "property", "id": "p-tag", "key": "tag",
+                     "name": "Tag", "format": "multi_select"},
+                ],
+            }
+        }
+
+        type_patch_calls: list[str] = []
+
+        def get_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                return httpx.Response(200, json=paginated_type_resp)
+            if path.endswith("/types"):
+                return httpx.Response(200, json={
+                    "data": _ALL_SIX_EXISTING_TYPES,
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def patch_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                type_patch_calls.append(path)
+                return httpx.Response(200, json={
+                    "type": {"id": type_id, "key": "wiki_concept", "properties": []}
+                })
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        respx.get().mock(side_effect=get_response)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "coll-001", "name": "Wiki"},
+        }))
+        respx.patch().mock(side_effect=patch_response)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        # Assert NO update_type PATCH was issued for the types endpoint
+        assert len(type_patch_calls) == 0, (
+            f"Addendum item 3: pagination/shape guard must prevent update_type PATCH "
+            f"when get_type returns pagination.has_more=True; "
+            f"PATCH /types/ calls: {type_patch_calls}. "
+            f"FAILS until bootstrap.py §3 implements BL-6.3."
+        )
+
+        # Assert a warnings[] entry was appended for this abort
+        warnings = result.get("warnings", [])
+        assert any("wiki_concept" in str(w) for w in warnings), (
+            f"Addendum item 3: a warning must be appended when reconcile is aborted "
+            f"due to pagination/shape guard for wiki_concept; "
+            f"warnings: {warnings}"
+        )
+
+        # Assert wiki_concept is in types_skipped (aborted types go there)
+        skipped_keys = {s.get("type_key") for s in result.get("types_skipped", [])}
+        assert "wiki_concept" in skipped_keys, (
+            f"Addendum item 3: wiki_concept must be in types_skipped when reconcile "
+            f"aborts due to pagination guard; types_skipped: {result.get('types_skipped')}"
+        )
+
+    @respx.mock
+    def test_reconcile_missing_properties_key_aborts(self, monkeypatch):
+        """Addendum item 3 (variant): get_type returns a response with NO 'properties' key
+        → reconcile aborts with warnings[] entry and NO update_type PATCH.
+
+        NOTE: SYNTHETIC shape — the live API always includes properties[] (research.md §1b).
+        """
+        type_id = "type-id-wiki_concept"
+
+        # SYNTHETIC: no 'properties' key at all
+        no_props_type_resp = {
+            "type": {
+                "object": "type",
+                "id": type_id,
+                "key": "wiki_concept",
+                "name": "Concept",
+                "layout": "basic",
+                # deliberately no "properties" key
+            }
+        }
+
+        type_patch_calls: list[str] = []
+
+        def get_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                return httpx.Response(200, json=no_props_type_resp)
+            if path.endswith("/types"):
+                return httpx.Response(200, json={
+                    "data": _ALL_SIX_EXISTING_TYPES,
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def patch_response(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                type_patch_calls.append(path)
+                return httpx.Response(200, json={
+                    "type": {"id": type_id, "key": "wiki_concept", "properties": []}
+                })
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        respx.get().mock(side_effect=get_response)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "coll-001", "name": "Wiki"},
+        }))
+        respx.patch().mock(side_effect=patch_response)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+        result = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        assert len(type_patch_calls) == 0, (
+            f"Addendum item 3 (no-props-key): reconcile must NOT issue update_type "
+            f"PATCH when get_type response has no 'properties' key; "
+            f"PATCH /types/ calls: {type_patch_calls}"
+        )
+        warnings = result.get("warnings", [])
+        assert any("wiki_concept" in str(w) for w in warnings), (
+            f"Addendum item 3 (no-props-key): a warning must be appended for wiki_concept; "
+            f"warnings: {warnings}"
+        )
+
+
+class TestReconcilePartialFailureRecoversOnRerun:
+    """AC#426-2 / SF-3 (addendum item 4): partial failure ordering invariant.
+
+    Two types each missing a declared property; update_type raises on the 2nd.
+    Assertions (addendum item 4 — strengthened):
+      1. The error propagates out of wiki_bootstrap (not silently swallowed).
+      2. The schema-version marker is NOT stamped to '0.4.2' after the failing run
+         (the WikiLog entry is not written — it is the sole automated guard on the
+         marker-after-loop ordering invariant).
+      3. A clean re-run (update_type no longer raising) completes the remaining type.
+
+    FAILS until bootstrap.py §3 reconcile is implemented AND the schema-version
+    marker stamp comes AFTER the full reconcile loop (ordering invariant).
+    """
+
+    @respx.mock
+    def test_reconcile_partial_failure_recovers_on_rerun(self, monkeypatch):
+        """SF-3 / addendum item 4: mid-loop update_type failure leaves marker unstamped;
+        clean re-run completes the remaining type.
+
+        Setup: two types (wiki_concept, wiki_entity) each missing wiki_last_reviewed.
+        update_type raises HTTPStatusError on wiki_entity (the 2nd call).
+
+        Assertions:
+          A. wiki_bootstrap raises (error propagates).
+          B. Schema-version marker NOT stamped to '0.4.2' after the failing run
+             (the WikiLog PATCH with wiki_schema_version='0.4.2' was NOT issued).
+          C. Clean re-run (update_type no longer raises) returns a result with
+             wiki_concept OR wiki_entity in types_reconciled (the remaining type).
+
+        FAILS until bootstrap.py §3 reconcile loop is implemented with correct
+        ordering (marker stamp comes AFTER the full loop, never before).
+        """
+        import json as _json
+
+        concept_id = "type-id-wiki_concept"
+        entity_id = "type-id-wiki_entity"
+
+        # Both types missing wiki_last_reviewed (wiki_entity also misses it in live state)
+        live_concept = _make_live_type_response(
+            type_key="wiki_concept",
+            type_id=concept_id,
+            user_prop_keys=["wiki_definition", "wiki_contradictions", "wiki_status"],
+        )
+        live_entity = _make_live_type_response(
+            type_key="wiki_entity",
+            type_id=entity_id,
+            user_prop_keys=["wiki_description", "wiki_facts", "wiki_relations",
+                            "wiki_sources", "wiki_domain_tags", "wiki_contradictions",
+                            "wiki_status"],
+        )
+
+        # Track whether wiki_schema_version='0.4.2' was stamped via WikiLog PATCH
+        schema_version_stamped = {"value": None}
+        type_patch_count = {"count": 0}
+
+        def get_response_failing(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                # Return appropriate live type based on which type_id is requested
+                if concept_id in path:
+                    return httpx.Response(200, json=live_concept)
+                elif entity_id in path:
+                    return httpx.Response(200, json=live_entity)
+                # Other types: return complete (no-op)
+                return httpx.Response(200, json={
+                    "type": {
+                        "object": "type", "id": "type-id-other", "key": "wiki_source",
+                        "layout": "basic",
+                        "properties": [
+                            {"object": "property", "id": "p1", "key": "wiki_url",
+                             "name": "Wiki URL", "format": "url"},
+                            {"object": "property", "id": "p2", "key": "wiki_file_path",
+                             "name": "Wiki File Path", "format": "text"},
+                            {"object": "property", "id": "p3", "key": "wiki_ingested_at",
+                             "name": "Wiki Ingested At", "format": "date"},
+                            {"object": "property", "id": "p4", "key": "wiki_domain_tags",
+                             "name": "Wiki Domain Tags", "format": "multi_select"},
+                            {"object": "property", "id": "p5", "key": "wiki_source_type",
+                             "name": "Wiki Source Type", "format": "select"},
+                            {"object": "property", "id": "p6", "key": "wiki_excerpt",
+                             "name": "Wiki Excerpt", "format": "text"},
+                        ],
+                    }
+                })
+            if path.endswith("/types"):
+                return httpx.Response(200, json={
+                    "data": _ALL_SIX_EXISTING_TYPES,
+                    "pagination": {"has_more": False},
+                })
+            return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+
+        def patch_response_failing(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                type_patch_count["count"] += 1
+                # Fail on the 2nd update_type call (wiki_entity)
+                if type_patch_count["count"] >= 2:
+                    raise httpx.HTTPStatusError(
+                        "500 Internal Server Error",
+                        request=request,
+                        response=httpx.Response(500, json={"error": "internal"}),
+                    )
+                return httpx.Response(200, json={
+                    "type": {"id": concept_id, "key": "wiki_concept", "properties": []}
+                })
+            # Track WikiLog schema-version stamp (PATCH on objects endpoint)
+            try:
+                payload = _json.loads(request.content)
+                props = payload.get("properties", [])
+                for p in props:
+                    if p.get("key") == "wiki_schema_version":
+                        schema_version_stamped["value"] = p.get("text")
+            except Exception:
+                pass
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        respx.get().mock(side_effect=get_response_failing)
+        respx.post().mock(return_value=httpx.Response(201, json={
+            "type": {"id": "t1", "key": "wiki_source"},
+            "property": {"id": "p1", "key": "wiki_url"},
+            "tag": {"id": "tag-1", "name": "bootstrap"},
+            "object": {"id": "coll-001", "name": "Wiki"},
+        }))
+        respx.patch().mock(side_effect=patch_response_failing)
+
+        from anytype_llm_wiki.wiki.bootstrap import wiki_bootstrap
+
+        # Assertion A: error propagates (wiki_bootstrap raises or returns error status).
+        # Use a sentinel to capture whether it raised and what status it returned,
+        # without catching our own AssertionError assertions.
+        raised_exc: list[Exception] = []
+        result_failing_holder: list[dict] = []
+        try:
+            result_failing_holder.append(wiki_bootstrap(space_id=FAKE_SPACE_ID))
+        except httpx.HTTPStatusError as exc:
+            raised_exc.append(exc)  # raised as expected
+        except Exception as exc:
+            if isinstance(exc, AssertionError):
+                raise  # let our own test assertions propagate
+            raised_exc.append(exc)
+
+        if not raised_exc:
+            # Did not raise — must have returned error status
+            result_failing = result_failing_holder[0]
+            assert result_failing.get("status") == "error", (
+                f"SF-3 / addendum item 4 (assertion A): when update_type raises on the "
+                f"2nd call, wiki_bootstrap must propagate the error (raise or return "
+                f"status='error'); got status: {result_failing.get('status')!r}. "
+                f"FAILS until bootstrap.py §3 reconcile is implemented."
+            )
+
+        # Assertion B: schema-version marker NOT stamped to '0.4.2' after failing run
+        from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION as _VERSION
+        assert schema_version_stamped["value"] != "0.4.2", (
+            f"SF-3 / addendum item 4 (assertion B — ordering invariant): "
+            f"schema-version marker must NOT be stamped to '0.4.2' when update_type "
+            f"fails mid-loop (the WikiLog stamp must come AFTER the full reconcile loop); "
+            f"but got stamped value: {schema_version_stamped['value']!r}. "
+            f"Move the marker stamp to AFTER the reconcile loop in bootstrap.py."
+        )
+
+        # Assertion C: clean re-run completes the remaining type
+        # Reset state for the clean re-run
+        type_patch_count["count"] = 0
+        reconciled_on_rerun: list[dict] = []
+
+        def patch_response_clean(request, **kwargs):
+            path = str(request.url).split("?")[0]
+            if "/types/" in path:
+                try:
+                    payload = _json.loads(request.content)
+                    prop_keys = [
+                        p.get("key") or p.get("property_key")
+                        for p in payload.get("properties", [])
+                    ]
+                    reconciled_on_rerun.append({"path": path, "prop_keys": prop_keys})
+                except Exception:
+                    pass
+                return httpx.Response(200, json={
+                    "type": {"id": entity_id, "key": "wiki_entity", "properties": []}
+                })
+            return httpx.Response(200, json={"object": {"id": "coll-001", "name": "Wiki"}})
+
+        respx.patch().mock(side_effect=patch_response_clean)
+
+        result_clean = wiki_bootstrap(space_id=FAKE_SPACE_ID)
+
+        types_reconciled_on_rerun = result_clean.get("types_reconciled", [])
+        assert len(types_reconciled_on_rerun) >= 1, (
+            f"SF-3 / addendum item 4 (assertion C): clean re-run must complete the "
+            f"remaining type(s); types_reconciled on re-run: {types_reconciled_on_rerun}. "
+            f"FAILS until bootstrap.py §3 reconcile is implemented."
+        )
+
+
+class TestUpdateTypeGuard:
+    """AC#426 addendum item 6: update_type must refuse empty/None properties payload.
+
+    The empty-payload guard lives inside update_type itself so a destructive
+    {"properties": []} PATCH can never be issued regardless of call site.
+
+    FAILS until wiki_client.py update_type is implemented with the guard.
+    """
+
+    def test_update_type_raises_on_empty_properties(self, monkeypatch):
+        """Addendum item 6: update_type(space_id, type_id, {"properties": []}) must
+        raise or abort without issuing a PATCH.
+
+        FAILS until wiki_client.py adds update_type with the empty-payload guard.
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+
+        from anytype_llm_wiki.wiki import wiki_client as _wc
+        assert hasattr(_wc.WikiClient, "update_type"), (
+            "WikiClient must have an update_type method; "
+            "FAILS until wiki_client.py adds update_type."
+        )
+
+        client = _wc.WikiClient()
+        try:
+            # Should raise ValueError or similar — must NOT issue a network call
+            client.update_type(FAKE_SPACE_ID, "type-id-001", {"properties": []})
+            pytest.fail(
+                "Addendum item 6: update_type must raise on empty properties=[]; "
+                "a destructive replace-PATCH with no properties would wipe the type."
+            )
+        except (ValueError, AssertionError, TypeError):
+            pass  # correct — guard raised
+        except Exception as exc:
+            # Accept any exception that is NOT an HTTP call succeeding
+            if "HTTPStatusError" in type(exc).__name__ or "ConnectError" in type(exc).__name__:
+                pytest.fail(
+                    f"Addendum item 6: update_type must guard BEFORE making the HTTP call; "
+                    f"got HTTP error instead of guard: {exc}"
+                )
+            pass  # other exceptions accepted as guard
+
+    def test_update_type_raises_on_none_properties(self, monkeypatch):
+        """Addendum item 6: update_type(space_id, type_id, {"properties": None}) must
+        raise or abort without issuing a PATCH.
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+
+        from anytype_llm_wiki.wiki import wiki_client as _wc
+        if not hasattr(_wc.WikiClient, "update_type"):
+            pytest.skip("update_type not yet implemented")
+
+        client = _wc.WikiClient()
+        try:
+            client.update_type(FAKE_SPACE_ID, "type-id-001", {"properties": None})
+            pytest.fail(
+                "Addendum item 6: update_type must raise on properties=None; "
+                "a None payload would send {properties: null} to the API."
+            )
+        except (ValueError, AssertionError, TypeError):
+            pass  # correct
+        except Exception as exc:
+            if "HTTPStatusError" in type(exc).__name__ or "ConnectError" in type(exc).__name__:
+                pytest.fail(
+                    f"Addendum item 6: update_type must guard BEFORE making the HTTP call; "
+                    f"got HTTP error: {exc}"
+                )
+            pass  # other guard exceptions accepted
+
+    def test_update_type_raises_on_missing_properties_key(self, monkeypatch):
+        """Addendum item 6: update_type(space_id, type_id, {}) (missing 'properties' key)
+        must raise or abort without issuing a PATCH.
+        """
+        monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
+        monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
+        monkeypatch.setenv("ANYTYPE_API_VERSION", FAKE_API_VERSION)
+
+        from anytype_llm_wiki.wiki import wiki_client as _wc
+        if not hasattr(_wc.WikiClient, "update_type"):
+            pytest.skip("update_type not yet implemented")
+
+        client = _wc.WikiClient()
+        try:
+            client.update_type(FAKE_SPACE_ID, "type-id-001", {})
+            pytest.fail(
+                "Addendum item 6: update_type must raise when 'properties' key is absent; "
+                "a missing properties key would send an incomplete payload."
+            )
+        except (ValueError, AssertionError, TypeError, KeyError):
+            pass  # correct
+        except Exception as exc:
+            if "HTTPStatusError" in type(exc).__name__ or "ConnectError" in type(exc).__name__:
+                pytest.fail(
+                    f"Addendum item 6: update_type must guard BEFORE making the HTTP call; "
+                    f"got HTTP error: {exc}"
+                )
+            pass  # other guard exceptions accepted
