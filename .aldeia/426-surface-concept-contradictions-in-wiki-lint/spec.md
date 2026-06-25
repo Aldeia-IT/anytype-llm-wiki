@@ -164,7 +164,7 @@ recorded in both `types_skipped` and `types_reconciled`:
 for type_def in WIKI_TYPES:
     type_key = type_def["type_key"]
     if type_key not in existing_type_keys:
-        ... create_type (unchanged) ...
+        ... create_type (unchanged) ...   # retain the existing types_created.append(...) reporting verbatim
         continue
 
     # --- existing type: reconcile missing declared properties ---
