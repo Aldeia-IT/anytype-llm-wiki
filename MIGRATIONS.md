@@ -88,6 +88,35 @@ acknowledgement file is written under
 
 ## Upgrading to the next release (Unreleased)
 
+### Schema 0.4.2: concept-contradiction surfacing — re-bootstrap is REQUIRED
+
+v0.4.2 bumps `WIKI_SCHEMA_VERSION` to `0.4.2`. The schema adds `wiki_last_reviewed`
+to the `wiki_concept` type, and `wiki_lint` now flags **concept** contradictions
+(severity `critical`) — exactly as it already flags entity contradictions — resolved
+by setting `wiki_last_reviewed` on the Object.
+
+**Re-running `wiki_bootstrap` is REQUIRED (not optional) for every existing space**
+before running the new `wiki_lint`:
+
+```bash
+uv run anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
+```
+
+Bootstrap is idempotent and non-destructive. It now also **reconciles** declared
+properties onto existing types: it reads each live type, computes the
+declared-but-missing properties, and links them on via a union `update_type` PATCH
+(never the bare delta — Anytype's `update-type` REPLACES the property set, so the
+union preserves every existing property). For 0.4.1 → 0.4.2 this links
+`wiki_last_reviewed` onto `wiki_concept`. Reconciled types appear in the new
+`types_reconciled` result section. No data backfill is required.
+
+> ⚠️ **Sequencing matters.** Running the new `wiki_lint` on a space that has **not**
+> been re-bootstrapped yields an **un-clearable `critical` finding**: concept
+> contradictions fire `critical`, but without `wiki_last_reviewed` on `wiki_concept`
+> there is no field to set to resolve them. Always re-bootstrap each space **before**
+> running `wiki_lint`. The lint gate and the bootstrap reconcile ship together in this
+> release for exactly this reason.
+
 ### One-time: prune stale `wiki_query` citation edges
 
 Earlier versions of `wiki_query` file-back wrote a reciprocal back-reference from
