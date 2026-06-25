@@ -76,6 +76,13 @@ _FORMAT_VALUE_FIELD = {
 }
 
 
+def _prop_key(p: dict) -> str | None:
+    """Tolerant property-key accessor: live API props carry 'key', declared schema
+    props carry 'property_key'. The two dicts are disjoint in which they carry, so a
+    single 'key' or 'property_key' fallback resolves both correctly."""
+    return p.get("key") or p.get("property_key")
+
+
 def _type_deeplink(space_id: str, type_key: str) -> str:
     return f"anytype://type/{space_id}/{type_key}"
 
@@ -282,7 +289,7 @@ def _run_bootstrap(
         type_key = type_def["type_key"]
         if type_key in existing_type_keys:
             # --- existing type: reconcile missing declared properties (§3) ----
-            _reconcile_existing_type(client, space_id, type_def, type_key,
+            _reconcile_existing_type(client, space_id, type_def,
                                      existing_type_map, result)
             continue
         created = client.create_type(
@@ -489,7 +496,6 @@ def _reconcile_existing_type(
     client: WikiClient,
     space_id: str,
     type_def: dict,
-    type_key: str,
     existing_type_map: dict,
     result: dict,
 ) -> None:
@@ -502,6 +508,7 @@ def _reconcile_existing_type(
     per-type missing-set — NOT on is_upgrade — so it runs on every bootstrap and is
     a no-op once a space is fully reconciled.
     """
+    type_key = type_def["type_key"]
     entry = existing_type_map.get(type_key)
     type_id = entry.get("id") if entry else None
     if type_id is None:
@@ -519,6 +526,8 @@ def _reconcile_existing_type(
     # replace-PATCH, so abort this type with a visible warning (BL-6.3).
     try:
         live_type = client.get_type(space_id, type_id)
+        if not isinstance(live_type, dict) or "properties" not in live_type:
+            raise TypeError("get_type returned an unexpected shape")
     except (KeyError, TypeError):
         result["warnings"].append(
             f"reconcile_skipped: malformed get_type read for {type_key}; "
@@ -527,11 +536,10 @@ def _reconcile_existing_type(
         result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
         return
 
-    # Pagination / shape guard (BL-6.3): a truncated read would drop a real
-    # user prop from the union and DESTROY it on the replace-PATCH. Abort.
-    pag = live_type.get("pagination") if isinstance(live_type, dict) else None
-    pag = pag or {}
-    if not isinstance(live_type, dict) or "properties" not in live_type or pag.get("has_more") is True:
+    # Pagination guard (BL-6.3): a truncated read would drop a real user prop
+    # from the union and DESTROY it on the replace-PATCH. Abort.
+    pag = live_type.get("pagination") or {}
+    if pag.get("has_more") is True:
         result["warnings"].append(
             f"reconcile_skipped: partial/paginated get_type read for {type_key}; "
             "not reconciling to avoid dropping properties"
@@ -542,12 +550,10 @@ def _reconcile_existing_type(
     # Normalize BOTH sides through the tolerant accessor (BL-3); skip malformed.
     live_props = live_type.get("properties", [])
     live_prop_keys = {
-        k for p in live_props
-        if (k := (p.get("key") or p.get("property_key"))) is not None
+        k for p in live_props if (k := _prop_key(p)) is not None
     }
     declared_prop_keys = {
-        k for p in type_def["properties"]
-        if (k := (p.get("property_key") or p.get("key"))) is not None
+        k for p in type_def["properties"] if (k := _prop_key(p)) is not None
     }
     missing = declared_prop_keys - live_prop_keys
 
@@ -556,16 +562,16 @@ def _reconcile_existing_type(
         return
 
     # Build name/format from the DECLARED schema where keys overlap (BL-6.2).
-    declared_by_key = {
-        (p.get("property_key") or p.get("key")): p for p in type_def["properties"]
-    }
+    declared_by_key = {_prop_key(p): p for p in type_def["properties"]}
 
     union_props: list[dict] = []
+    seen_user_keys: set[str] = set()
     live_user_count = 0
     for p in live_props:  # keep live USER props
-        k = p.get("key") or p.get("property_key")
-        if k is None or k in types_schema.SYSTEM_PROP_KEYS:
-            continue  # system props auto-re-added
+        k = _prop_key(p)
+        if k is None or k in types_schema.SYSTEM_PROP_KEYS or k in seen_user_keys:
+            continue  # system props auto-re-added; skip duplicate live keys (S-MINOR-1)
+        seen_user_keys.add(k)
         live_user_count += 1
         decl = declared_by_key.get(k)
         union_props.append({
@@ -581,12 +587,17 @@ def _reconcile_existing_type(
             "format": decl.get("format"),
         })
 
-    # Monotonic-union guard (BL-6.1, SF-7): a union that would SHRINK the live
-    # user set, or an empty payload, is always a bug — never PATCH.
-    if not union_props or len(union_props) < live_user_count + len(missing):
+    if not union_props:
         result["warnings"].append(
-            f"reconcile_skipped: computed union for {type_key} would not grow the "
-            f"property set ({len(union_props)} < {live_user_count}+{len(missing)}); aborting"
+            f"reconcile_skipped: empty union for {type_key}; aborting"
+        )
+        result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
+        return
+    # Monotonic-union guard (BL-6.1, SF-7): the union must never shrink the live user set.
+    if len(union_props) < live_user_count + len(missing):
+        result["warnings"].append(
+            f"reconcile_skipped: computed union for {type_key} would shrink the property set "
+            f"({len(union_props)} < {live_user_count}+{len(missing)}); aborting"
         )
         result["types_skipped"].append({"type_key": type_key, "reason": "already_exists"})
         return

@@ -35,7 +35,9 @@ class WikiClient(_BaseAnytypeClient):
         Refuses an empty/None ``properties`` payload — under Anytype's replace-not-merge
         semantics a {"properties": []} PATCH would wipe every user property on the type.
         """
-        props = type_def.get("properties") if isinstance(type_def, dict) else None
+        # type_def is dict per annotation; an empty/missing properties list must be refused —
+        # a {"properties": []} PATCH would wipe every user property under replace-not-merge.
+        props = type_def.get("properties")
         if not props:
             raise ValueError(
                 "update_type refused: empty or missing 'properties' payload would "
