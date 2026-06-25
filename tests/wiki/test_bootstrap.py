@@ -2496,6 +2496,17 @@ class TestReconcileNeverDropsExistingProperties:
             f"AC#426-2 regression: update_type payload must include 'wiki_last_reviewed'; "
             f"keys sent: {union_keys}"
         )
+        # Assert system props are NOT in the PATCH payload — they are auto-re-added by
+        # Anytype and must be excluded from the union (spec §3 SYSTEM_PROP_KEYS).
+        # Sending system props in the union would cause Anytype to duplicate them or
+        # reject the request.
+        system_keys_in_payload = union_keys & {"tag", "backlinks", "created_date", "creator", "links"}
+        assert not system_keys_in_payload, (
+            f"AC#426-2 regression: system props must NOT appear in update_type payload "
+            f"(Anytype auto-re-adds them; sending them risks duplication or rejection); "
+            f"found: {system_keys_in_payload}. "
+            f"FAILS until the reconcile loop correctly filters SYSTEM_PROP_KEYS from the union."
+        )
 
 
 class TestReconcilePaginationAbort:
@@ -2910,7 +2921,12 @@ class TestUpdateTypeGuard:
 
     def test_update_type_raises_on_none_properties(self, monkeypatch):
         """Addendum item 6: update_type(space_id, type_id, {"properties": None}) must
-        raise or abort without issuing a PATCH.
+        raise ValueError (or AssertionError/TypeError) without issuing a PATCH.
+
+        Spec §2 / addendum item 6: update_type must raise/abort on None properties.
+        Pinned to ValueError (conventional invalid-argument refusal) or the closely
+        related AssertionError/TypeError — NOT a broad except-all that would accept
+        an unrelated crash (AttributeError, NotImplementedError, etc.) as a valid guard.
         """
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
@@ -2921,25 +2937,16 @@ class TestUpdateTypeGuard:
             pytest.skip("update_type not yet implemented")
 
         client = _wc.WikiClient()
-        try:
+        with pytest.raises((ValueError, AssertionError, TypeError)):
             client.update_type(FAKE_SPACE_ID, "type-id-001", {"properties": None})
-            pytest.fail(
-                "Addendum item 6: update_type must raise on properties=None; "
-                "a None payload would send {properties: null} to the API."
-            )
-        except (ValueError, AssertionError, TypeError):
-            pass  # correct
-        except Exception as exc:
-            if "HTTPStatusError" in type(exc).__name__ or "ConnectError" in type(exc).__name__:
-                pytest.fail(
-                    f"Addendum item 6: update_type must guard BEFORE making the HTTP call; "
-                    f"got HTTP error: {exc}"
-                )
-            pass  # other guard exceptions accepted
 
     def test_update_type_raises_on_missing_properties_key(self, monkeypatch):
         """Addendum item 6: update_type(space_id, type_id, {}) (missing 'properties' key)
-        must raise or abort without issuing a PATCH.
+        must raise ValueError (or AssertionError/TypeError/KeyError) without issuing a PATCH.
+
+        Spec §2 / addendum item 6: update_type must raise/abort on a missing 'properties'
+        key. Pinned to specific exception types so an unrelated crash (AttributeError,
+        NotImplementedError, etc.) does not masquerade as a valid guard.
         """
         monkeypatch.setenv("ANYTYPE_API_KEY", FAKE_API_KEY)
         monkeypatch.setenv("ANYTYPE_API_URL", ANYTYPE_BASE)
@@ -2950,18 +2957,5 @@ class TestUpdateTypeGuard:
             pytest.skip("update_type not yet implemented")
 
         client = _wc.WikiClient()
-        try:
+        with pytest.raises((ValueError, AssertionError, TypeError, KeyError)):
             client.update_type(FAKE_SPACE_ID, "type-id-001", {})
-            pytest.fail(
-                "Addendum item 6: update_type must raise when 'properties' key is absent; "
-                "a missing properties key would send an incomplete payload."
-            )
-        except (ValueError, AssertionError, TypeError, KeyError):
-            pass  # correct
-        except Exception as exc:
-            if "HTTPStatusError" in type(exc).__name__ or "ConnectError" in type(exc).__name__:
-                pytest.fail(
-                    f"Addendum item 6: update_type must guard BEFORE making the HTTP call; "
-                    f"got HTTP error: {exc}"
-                )
-            pass  # other guard exceptions accepted
