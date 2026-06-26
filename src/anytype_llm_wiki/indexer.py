@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -187,7 +188,7 @@ def _build_search_filter(
     source_type: list[str] | None = None,
     domain_tags: list[str] | None = None,
 ):
-    """Construct the Qdrant ``query_filter`` for the dense retrieval paths.
+    """Construct the Qdrant ``query_filter`` (``Filter | None``) for the dense paths.
 
     Extracted VERBATIM from ``semantic_search_core`` so ``semantic_search_core``
     and ``_dense_search_with_ids`` share one filter implementation and can never
@@ -294,7 +295,6 @@ def _build_bm25_index(client: QdrantClient) -> None:
     (SF-3). Silently no-ops if rank_bm25 is not importable (graceful degradation).
     """
     global _bm25_index
-    import time
 
     try:
         from rank_bm25 import BM25Okapi
@@ -417,7 +417,11 @@ def _bm25_search(
     return out
 
 
-def _rrf_fuse(dense_results, bm25_results, k=60):
+def _rrf_fuse(
+    dense_results: list[dict],
+    bm25_results: list[dict],
+    k: int = 60,
+) -> list[tuple[float, dict]]:
     """RRF (Cormack et al. 2009) over two ranked lists, keyed on ``_point_id``.
 
     Returns ``(rrf_score, chunk)`` pairs ordered by descending RRF score so the
@@ -445,7 +449,7 @@ def _passes_inline_filters(r, types, source_type, domain_tags) -> bool:
     """
     if types and r.get("type") not in types:
         return False
-    if source_type and r.get("source_type") not in (source_type or []):
+    if source_type and r.get("source_type") not in source_type:
         return False
     if domain_tags:
         obj_tags = r.get("domain_tags") or []
