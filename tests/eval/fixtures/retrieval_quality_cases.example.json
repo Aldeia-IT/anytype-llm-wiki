@@ -1,0 +1,45 @@
+[
+  {
+    "id": "repro-327",
+    "query": "What is the contradiction detection capability in the anytype-llm-wiki and its limitations?",
+    "space_id": "<CURATE: the production fleet wiki space_id>",
+    "types": ["wiki_entity", "wiki_concept"],
+    "expected_ids": [
+      "<CURATE: object_id of the contradiction-detection concept>",
+      "<CURATE: object_id of a related limitation concept, e.g. 'seed-only file-back bound' / 'SG-3 accepted risk'>"
+    ],
+    "note": "Live reproduction from ticket #327 comment 2026-06-25. Dense-only wiki_query MISSED these (answer claimed no contradiction-detection info); semantic_search DID surface them, so they are in the index. expected_ids MUST be captured independently via live `semantic_search('contradiction detection limitations linked entities')` + manual inspection (NOT reverse-engineered from BM25 wins). Strict gate: dense_recall < hybrid_recall for this case."
+  },
+  {
+    "id": "underscore-identifier",
+    "query": "wiki_entity object type relations",
+    "space_id": "<CURATE>",
+    "types": ["wiki_entity", "wiki_concept"],
+    "expected_ids": ["<CURATE: object whose body contains the literal token wiki_entity>"],
+    "note": "Exercises D4/SG-2: the v1 tokenizer does NOT split underscores, so `wiki_entity` matches only the literal token. Makes the deferral of non-alphanumeric splitting data-driven (spec §18.1)."
+  },
+  {
+    "id": "exact-name-lift",
+    "query": "<CURATE: an exact Object name / proper noun present in the wiki>",
+    "space_id": "<CURATE>",
+    "types": ["wiki_entity", "wiki_concept"],
+    "expected_ids": ["<CURATE>"],
+    "note": "MUST be a case where hybrid STRICTLY beats dense (the aggregate >= assertion tolerates a no-op tie; the council requires >=1 strict hybrid>dense lift). Pick a keyword-precise name query dense ranks poorly."
+  },
+  {
+    "id": "technical-keyword",
+    "query": "<CURATE: a technical keyword query, e.g. an acronym or API symbol>",
+    "space_id": "<CURATE>",
+    "types": ["wiki_entity", "wiki_concept"],
+    "expected_ids": ["<CURATE>"],
+    "note": "Keyword-precise lookup where surface form diverges from the semantic neighborhood."
+  },
+  {
+    "id": "semantic-control",
+    "query": "<CURATE: a paraphrase/semantic query dense already handles well>",
+    "space_id": "<CURATE>",
+    "types": ["wiki_entity", "wiki_concept"],
+    "expected_ids": ["<CURATE>"],
+    "note": "Control case: hybrid must NOT regress dense on a query dense already serves (guards the mean MRR@5 >= assertion)."
+  }
+]
