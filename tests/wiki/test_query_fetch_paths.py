@@ -260,7 +260,7 @@ class TestTier2CandidateFetchFailureReplacement:
                 {"object_id": bad_id, "type": "wiki_entity", "score": 0.8},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "partial " * 10)
 
         def dispatcher(request, **kwargs):
@@ -699,7 +699,7 @@ class TestFanOutCap:
                 {"object_id": seed_b_id, "type": "wiki_entity", "score": 0.8},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "cap answer " * 10)
 
         fetch_counts: dict[str, int] = {}
@@ -793,7 +793,7 @@ class TestFanOutCap:
         def stub_search(query, space_id, types, limit=10):
             return [{"object_id": seed_id, "type": "wiki_entity", "score": 0.9}]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "partial answer " * 10)
 
         # Seed in list so count=1 >= threshold=1 → Tier-2. Dispatcher provides full obj.
@@ -895,7 +895,7 @@ class TestDeterministicTrimOrder:
                 {"object_id": seed_b_id, "type": "wiki_entity", "score": 0.5},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "trim order " * 10)
 
         # Both seeds in list so count=2 >= threshold=2 → Tier-2. Dispatcher provides full objs.
@@ -997,7 +997,7 @@ class TestFileBackSeedOnly:
                 {"object_id": seed_b_id, "type": "wiki_entity", "score": 0.8},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize",
                             lambda q, ctx: "filed answer with enough words here now")
 
@@ -1121,7 +1121,7 @@ class TestFanOutDebugLog:
         def stub_search(query, space_id, types, limit=10):
             return [{"object_id": seed_id, "type": "wiki_entity", "score": 0.9}]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "debug log answer " * 10)
 
         # Seed in list so count=1 >= threshold=1 → Tier-2. Dispatcher provides full obj.
@@ -1182,7 +1182,7 @@ class TestFanOutDebugLog:
         def stub_search(query, space_id, types, limit=10):
             return [{"object_id": seed_id, "type": "wiki_entity", "score": 0.9}]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "fanout warn answer " * 10)
 
         # Seed in list so count=1 >= threshold=1 → Tier-2.
@@ -1245,7 +1245,7 @@ class TestFanOutDebugLog:
         def stub_search(query, space_id, types, limit=10):
             return [{"object_id": seed_id, "type": "wiki_entity", "score": 0.9}]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "no fanout warn " * 10)
 
         # Seed in list so count=1 >= threshold=1 → Tier-2.
@@ -1413,7 +1413,7 @@ class TestD5SortKeyIsolation:
                 {"object_id": seed_b_id, "type": "wiki_entity", "score": 0.5},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "t1a answer " * 10)
 
         list_resp = {"data": [
@@ -1503,7 +1503,7 @@ class TestD5SortKeyIsolation:
         def stub_search(query, space_id, types, limit=10):
             return [{"object_id": seed_id, "type": "wiki_comparison", "score": 0.9}]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "t1b answer " * 10)
 
         list_resp = {"data": [

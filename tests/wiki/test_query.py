@@ -466,7 +466,7 @@ class TestRetrieval:
                     for o in objects[:10]
                 ]
 
-            monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_semantic_search_core)
+            monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_semantic_search_core)
 
             def fake_synthesize(question, context_objects):
                 return " ".join(["word"] * 120)  # > 100 words
@@ -1012,7 +1012,7 @@ class TestQdrantDownFallback:
         def raising_semantic_search_core(*args, **kwargs):
             raise ConnectionError("Qdrant connection refused")
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", raising_semantic_search_core)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", raising_semantic_search_core)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "answer " * 15)
 
         respx.get().mock(return_value=httpx.Response(200, json=list_resp))
@@ -1059,7 +1059,7 @@ class TestQdrantDownFallback:
 
         import anytype_llm_wiki.indexer as _idx_mod
         import anytype_llm_wiki.wiki.query as _q_mod
-        monkeypatch.setattr(_idx_mod, "semantic_search_core",
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core",
                             lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("down")))
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "some answer " * 15)
 
@@ -1090,7 +1090,7 @@ class TestQdrantDownFallback:
         list_resp = {"data": all_data, "pagination": {"has_more": False}}
 
         import anytype_llm_wiki.indexer as _idx_mod
-        monkeypatch.setattr(_idx_mod, "semantic_search_core",
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core",
                             lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("down")))
 
         respx.get().mock(return_value=httpx.Response(200, json=list_resp))
@@ -2372,14 +2372,14 @@ class TestCompoundingBackstop:
         import anytype_llm_wiki.indexer as _idx_mod
         import anytype_llm_wiki.wiki.query as _q_mod
 
-        # Stub semantic_search_core to return the filed query as the top result
+        # Stub hybrid_search_core to return the filed query as the top result
         def stubbed_search(query, space_id, types, limit=10):
             return [
                 {"object_id": filed_query_id, "type": "wiki_query", "score": 0.95},
                 {"object_id": "entity-000", "type": "wiki_entity", "score": 0.80},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stubbed_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stubbed_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "compounded answer " * 10)
 
         respx.get().mock(return_value=httpx.Response(200, json=list_resp))
@@ -2474,14 +2474,14 @@ class TestTier2CandidateFetchFailure:
         import anytype_llm_wiki.indexer as _idx_mod
         import anytype_llm_wiki.wiki.query as _q_mod
 
-        # semantic_search_core returns both candidates
+        # hybrid_search_core returns both candidates
         def stubbed_search(query, space_id, types, limit=10):
             return [
                 {"object_id": good_cand_id, "type": "wiki_entity", "score": 0.9},
                 {"object_id": bad_cand_id, "type": "wiki_entity", "score": 0.8},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stubbed_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stubbed_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "partial answer " * 10)
 
         def get_obj_side_effect(request, **kwargs):
@@ -2936,7 +2936,7 @@ class TestContextBudgetD5Extension:
                 {"object_id": seed_b_id, "type": "wiki_entity", "score": 0.5},
             ]
 
-        monkeypatch.setattr(_idx_mod, "semantic_search_core", stub_search)
+        monkeypatch.setattr(_idx_mod, "hybrid_search_core", stub_search)
         monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: "d5 order answer " * 10)
 
         def _dispatch(request, **kwargs):
@@ -3224,7 +3224,7 @@ class TestWikiQueryTypeFiltering:
             return []
 
         monkeypatch.setattr(query_mod.config, "index_threshold", lambda: 1)
-        monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
+        monkeypatch.setattr(query_mod.indexer, "hybrid_search_core", _fake_core)
         monkeypatch.setattr(query_mod, "synthesize", lambda q, ctx: "SENTINEL ANSWER")
 
         list_resp = _tier2_list_resp()
@@ -3241,7 +3241,7 @@ class TestWikiQueryTypeFiltering:
         query_mod.wiki_query(question="q", space_id=FAKE_SPACE_ID)  # no `types` arg
 
         assert captured.get("types") is not None, (
-            "wiki_query must pass types (not None) to semantic_search_core by default"
+            "wiki_query must pass types (not None) to hybrid_search_core by default"
         )
         assert set(captured["types"]) == set(query_mod._WIKI_TYPE_KEYS), (
             f"Default types must be the full _WIKI_TYPE_KEYS set. "
@@ -3265,7 +3265,7 @@ class TestWikiQueryTypeFiltering:
             return []
 
         monkeypatch.setattr(query_mod.config, "index_threshold", lambda: 1)
-        monkeypatch.setattr(query_mod.indexer, "semantic_search_core", _fake_core)
+        monkeypatch.setattr(query_mod.indexer, "hybrid_search_core", _fake_core)
         monkeypatch.setattr(query_mod, "synthesize", lambda q, ctx: "SENTINEL ANSWER")
 
         list_resp = _tier2_list_resp()
@@ -3669,3 +3669,47 @@ class TestWikiQuerySourceTypeNoop:
             f"source_type on wiki_query is a no-op — entity/concept results must be identical. "
             f"Plain: {plain_ids}, with source_type: {st_ids}"
         )
+
+
+# ---------------------------------------------------------------------------
+# AC-H11 — wiki_query Tier-2 routes through hybrid_search_core
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_wiki_query_tier2_calls_hybrid(monkeypatch):
+    """AC-H11: Tier-2 routes through hybrid_search_core, not semantic_search_core.
+
+    Built on the established @respx.mock + monkeypatched-synthesize Tier-2 harness.
+    Uses a real list response with schema marker + wiki_entity objects so Tier-2
+    fires, then asserts hybrid_search_core is called and semantic_search_core is NOT.
+    """
+    import respx as _respx
+    import httpx as _httpx
+    import anytype_llm_wiki.wiki.query as query_mod
+    import anytype_llm_wiki.indexer as _idx_mod
+
+    called = {}
+    # >= threshold objects so Tier-2 fires (threshold patched to 1)
+    objs = [{"id": f"obj-{i}", "type": {"key": "wiki_entity"}} for i in range(2)]
+    schema = _make_schema_ok_response()["data"][0]
+    list_resp = {"data": [schema] + objs, "pagination": {"has_more": False}}
+
+    respx.get().mock(return_value=_httpx.Response(200, json=list_resp))
+    respx.get(url__regex=rf"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/objects/obj-").mock(
+        side_effect=lambda request, **kw: _httpx.Response(
+            200, json=_make_get_object_response(
+                str(request.url).rstrip("/").split("/")[-1].split("?")[0])))
+    respx.post().mock(return_value=_httpx.Response(201, json={"object": {"id": "log-1"}}))
+    respx.patch().mock(return_value=_httpx.Response(200, json={"object": {"id": "obj-0"}}))
+
+    monkeypatch.setattr(query_mod.config, "index_threshold", lambda: 1)
+    monkeypatch.setattr(_idx_mod, "hybrid_search_core",
+                        lambda **kw: called.setdefault("hit", True) or [])
+    monkeypatch.setattr(_idx_mod, "semantic_search_core",
+                        lambda **kw: (_ for _ in ()).throw(
+                            AssertionError("semantic_search_core called in Tier-2")))
+    monkeypatch.setattr(query_mod, "synthesize", lambda q, ctx: "X")
+
+    query_mod.wiki_query(question="q", space_id=FAKE_SPACE_ID)
+    assert called.get("hit"), "hybrid_search_core was not called in Tier-2"
