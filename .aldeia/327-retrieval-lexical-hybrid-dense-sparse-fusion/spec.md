@@ -516,6 +516,8 @@ Applied only to BM25-only chunks (dense chunks already passed Qdrant). Date filt
 
 **Justification (supply-chain posture):** `rank-bm25` is 8.6 kB, depends only on `numpy` (already present as a transitive dep of `qdrant-client`). Zero new packages download. No network calls. Next-major cap (`<1.0.0`) matches the project's pin style. FastEmbed (the alternative) requires onnxruntime (~200 MB) and was rejected on supply-chain grounds. `uv.lock` MUST be regenerated and committed (SF-9): it is a required artifact, and any test importing `rank_bm25` (AC-H1) fails until the dependency is locked and synced.
 
+**License (LEGAL-1):** `rank-bm25` is **Apache-2.0** (verified on PyPI) — permissive, no copyleft. License metadata is kept intact in `uv.lock`; no bespoke attribution file is required for this internal, non-distributed tool.
+
 ---
 
 ## 9. Call-Path Diagram
@@ -1149,6 +1151,8 @@ Inherited from #323; must pass unmodified (it guards that the `_build_search_fil
 **In-memory state:** `_bm25_index` holds chunk texts already in Qdrant and already reachable via `semantic_search_core`. No privilege escalation. Logs never include chunk texts (SG-5).
 
 **Trust model unchanged:** local stdio MCP server; callers are the local AI assistant.
+
+**`state.json` cross-process trust channel (CSO-2):** the `bm25_corpus_version` stamp travels through `state.json`, a same-trust-domain local file written and read only by the reindex/reembed and server processes on this host. Its worst-case tampering effect is a redundant index rebuild or a dense-only fallback — not a security event: no code execution, no data exposure, and no cross-space leakage (cross-space isolation is enforced independently by `_bm25_search`'s in-memory `space_id` check and by Qdrant's filter on the dense path).
 
 ---
 

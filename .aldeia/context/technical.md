@@ -70,6 +70,22 @@ original `domain_hint` for pre-#336 objects is recoverable nowhere, so existing 
 are NOT retroactively tagged. Only objects created/updated after the upgrade carry
 `domain_tags`; `wiki_source` objects are stamped `source_type` on next ingest/remember.
 
+## Retrieval: hybrid dense + lexical (BM25) fusion (#327)
+
+Retrieval is **hybrid**: the dense (bge-m3 cosine) signal is fused with a lexical
+**BM25** signal via app-level **Reciprocal Rank Fusion (RRF, k=60)** in
+`indexer.hybrid_search_core` (the shared core behind the `semantic_search` MCP tool
+and `wiki_query` Tier-2). The dense path is unchanged (`_dense_search_with_ids`
+reuses `semantic_search_core`'s filter construction via the extracted
+`_build_search_filter`). The BM25 index is a **lazy, in-memory** `_BM25Index` built
+on the first hybrid query after a corpus change or process restart by scrolling
+Qdrant. Cross-process freshness is signalled by a monotonic `bm25_corpus_version`
+integer stamped into the index state file on every reindex/reembed; the long-lived
+server reads it on each query and rebuilds when it changes (the cron reindexes in a
+separate interpreter and only bumps the stamp). BM25 failures degrade gracefully to
+dense-only; a Qdrant outage on the dense path propagates. `rank-bm25` (Apache-2.0,
+numpy-only) is the only new dependency.
+
 ## Configuration (environment variables)
 
 ```
