@@ -5,7 +5,8 @@ import sys
 from fastmcp import FastMCP
 
 from . import __version__ as _VERSION
-from .indexer import reindex, semantic_search_core
+from . import indexer
+from .indexer import reindex
 from .wiki.bootstrap import wiki_bootstrap as _wiki_bootstrap
 
 # Report the package version over MCP (serverInfo.version) instead of falling
@@ -92,7 +93,9 @@ def semantic_search(
     if types is None and not source_type:
         effective_types = list(_SEMANTIC_SEARCH_DEFAULT_TYPES)
 
-    return semantic_search_core(
+    # Module-qualified call so tests can monkeypatch indexer.hybrid_search_core
+    # (AC-H11 test_server_semantic_search_calls_hybrid).
+    return indexer.hybrid_search_core(
         query=query,
         space_id=space_id,
         types=effective_types,

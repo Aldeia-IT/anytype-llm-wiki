@@ -1141,7 +1141,7 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
     test_no_filter_regression stays GREEN because that test calls semantic_search_core
     directly — the OD-B guard is in server.py, not in semantic_search_core.
     """
-    import anytype_llm_wiki.server as _server_mod
+    import anytype_llm_wiki.indexer as _idx_mod
 
     captured_calls: list[dict] = []
 
@@ -1150,7 +1150,11 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
         captured_calls.append({"types": types, "query": query})
         return []
 
-    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    # #327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # switch); retarget this #336 OD-B seam test to the new module-qualified
+    # symbol. The OD-B logic under test (server.py's effective_types) is
+    # unchanged — only the callee name is.
+    monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_core)
 
     from anytype_llm_wiki.server import semantic_search
 
@@ -1192,7 +1196,7 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
     non-source default forced), leaving wiki_source chunks searchable so the
     source_type filter can match them.
     """
-    import anytype_llm_wiki.server as _server_mod
+    import anytype_llm_wiki.indexer as _idx_mod
 
     captured_calls: list[dict] = []
 
@@ -1202,7 +1206,11 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
         captured_calls.append({"types": types, "source_type": source_type})
         return []
 
-    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    # #327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # switch); retarget this #336 OD-B seam test to the new module-qualified
+    # symbol. The guard under test (`if types is None and not source_type`) is
+    # unchanged.
+    monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_core)
     from anytype_llm_wiki.server import semantic_search
 
     semantic_search(query="test", source_type=["document"])
