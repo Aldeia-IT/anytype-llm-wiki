@@ -452,21 +452,21 @@ class TestRetrieval:
             obj_id = url.rstrip("/").split("/")[-1].split("?")[0]
             return httpx.Response(200, json=_make_get_object_response(obj_id))
 
-        # For Tier 2, semantic_search_core needs to be monkeypatched
+        # For Tier 2, hybrid_search_core needs to be monkeypatched
         # But the import doesn't exist yet — this test expects ModuleNotFoundError or ImportError
-        # When implemented: monkeypatch semantic_search_core to return top-10 candidates
+        # When implemented: monkeypatch hybrid_search_core to return top-10 candidates
         try:
             import anytype_llm_wiki.wiki.query as _q_mod
             import anytype_llm_wiki.indexer as _idx_mod
 
-            def fake_semantic_search_core(query, space_id, types, limit=10):
+            def fake_hybrid_search_core(query, space_id, types, limit=10):
                 # Return first 10 objects as candidates
                 return [
                     {"object_id": o["id"], "type": o["type"]["key"], "score": 0.9}
                     for o in objects[:10]
                 ]
 
-            monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_semantic_search_core)
+            monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_hybrid_search_core)
 
             def fake_synthesize(question, context_objects):
                 return " ".join(["word"] * 120)  # > 100 words
@@ -475,7 +475,7 @@ class TestRetrieval:
 
         except (ImportError, AttributeError):
             pytest.fail(
-                "anytype_llm_wiki.wiki.query or indexer.semantic_search_core not importable — "
+                "anytype_llm_wiki.wiki.query or indexer.hybrid_search_core not importable — "
                 "implementation missing"
             )
 
@@ -3199,7 +3199,7 @@ class TestWikiQueryTypeFiltering:
     - @respx.mock decorator
     - respx.get().mock(return_value=...) for list_objects
     - monkeypatch on query_mod.config.index_threshold → 1
-    - monkeypatch on query_mod.indexer.semantic_search_core to capture kwargs
+    - monkeypatch on query_mod.indexer.hybrid_search_core to capture kwargs
     - monkeypatch on query_mod.synthesize to avoid Ollama call
 
     The respx ordering pitfall (Mem0 lesson): register the POST mock AFTER the GET
@@ -3212,7 +3212,7 @@ class TestWikiQueryTypeFiltering:
         """AC-F1b: wiki_query with no types arg passes the full _WIKI_TYPE_KEYS to core.
 
         Tier-2 seam: threshold=1, count=1 (schema marker + 1 wiki entity) → tier2=True.
-        Captures the types kwarg on semantic_search_core.
+        Captures the types kwarg on hybrid_search_core.
         """
         import anytype_llm_wiki.wiki.query as query_mod
 
@@ -3251,7 +3251,7 @@ class TestWikiQueryTypeFiltering:
     @respx.mock
     def test_wiki_query_mixed_types_silently_narrowed(self, monkeypatch):
         """AC-F10b: types=[wiki_entity, wiki_source] → wiki_source silently dropped,
-        only wiki_entity passed to semantic_search_core.
+        only wiki_entity passed to hybrid_search_core.
 
         Tier-2 seam: same setup as test_wiki_query_default_passes_full_type_keys.
         """
