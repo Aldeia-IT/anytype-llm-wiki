@@ -177,6 +177,7 @@ Extraction and synthesis run on local Ollama by default (`WIKI_EXTRACT_MODEL`, d
 - **Safe repeated writes (`wiki_remember`).** Reworded duplicates merge, genuinely new facts append, superseding facts replace (the prior text is recorded in the WikiLog and recoverable), contradictions are flagged not overwritten, and re-asserting the same knowledge converges to a no-op.
 - **Fleet-safe concurrent writes (no read-after-write).** Independent agents on separate PIDs/terminals can `wiki_remember` the *same* space at once: each durably queues its subjects (a lock-free append to the work-log) and whichever process holds the per-space lock drains them — nobody blocks, nobody's learnings are dropped. A submit may return *before* its subjects are applied, so a `wiki_query` immediately afterward may not see them yet (the wiki is for the *next* agent, not the submitter's own next line). Same-host only — see [known limitations](docs/known-limitations.md). The `wiki-drain` CLI forces a synchronous drain when you need one.
 - **Tiered retrieval.** Below `WIKI_INDEX_THRESHOLD` (default 200) Objects, `wiki_query` reads the whole wiki directly (exhaustive and fast); above it, it uses vector search plus 1-hop neighborhood expansion.
+- **Hybrid dense + lexical retrieval (#327).** The vector-search tier now fuses dense (semantic) similarity with a lexical **BM25** signal via app-level Reciprocal Rank Fusion, so exact names and technical keywords that dense embeddings miss are still surfaced. This is internal to retrieval — no tool signature or API change; failures degrade gracefully to dense-only.
 - **Incremental, schedulable indexing.** Only changed objects are re-embedded. For continuous indexing, run `reindex_anytype` on a schedule (cron/launchd — a sample launchd plist ships at [`docs/samples/com.aldeia.anytype-llm-wiki-reindex.plist`](docs/samples/com.aldeia.anytype-llm-wiki-reindex.plist)). For high agent write-rates, set `WIKI_AUTO_REINDEX=false` and batch a scheduled reindex, since reindex cost scales with total space size.
 
 ## Performance
@@ -233,7 +234,7 @@ Dependencies are pinned in two layers: **`uv.lock`** locks every direct and tran
 
 ## Roadmap
 
-- Hybrid search — metadata filtering (object type + date range) ships now; keyword/sparse fusion remains roadmap (#327); tag/source filtering tracked in #336
+- Hybrid search — metadata filtering (object type + date range) ships now; keyword/sparse fusion (BM25 + RRF) ships in #327; tag/source filtering tracked in #336
 - Contradiction detection beyond linked peers (semantic pre-filter)
 - Cross-space federation with access control
 - Webhook-based indexing when Anytype adds webhook support
