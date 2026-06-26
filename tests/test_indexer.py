@@ -1465,8 +1465,15 @@ def test_hybrid_bm25_domain_tags_gate_real_build(monkeypatch):
     _build_bm25_index + _bm25_search path (monkeypatch only _qdrant/embed_query).
 
     A matching chunk (domain_tags=['ml']) must survive; a non-matching one
-    (domain_tags=['finance']) must be dropped. This prevents a real
-    keying/field-surfacing regression from passing while production fails.
+    (domain_tags=['finance']) must be DROPPED BY THE FILTER GATE, not by the
+    zero-score break.  To ensure the drop-candidate reaches the gate:
+    - obj_fin's text contains "machine" (a query token) so BM25 scores it > 0
+    - obj_fin's domain_tags=['finance'] does NOT match query domain_tags=['ml']
+    - Therefore _passes_inline_filters is what drops it (gate exercise confirmed)
+
+    This prevents a real keying/field-surfacing regression from passing while
+    production fails.  A deleted _passes_inline_filters would incorrectly allow
+    obj_fin into the results — the assertion catches that.
     """
     import anytype_llm_wiki.indexer as ix
     from anytype_llm_wiki import config
@@ -1477,9 +1484,12 @@ def test_hybrid_bm25_domain_tags_gate_real_build(monkeypatch):
             "type_key": "wiki_entity", "heading": "", "space_id": "sp",
             "source_type": "", "domain_tags": domain_tags}})()
 
+    # obj_fin deliberately contains "machine" (a query token) so BM25 > 0
+    # and it is NOT dropped by _bm25_search's `if score <= 0: break` guard.
+    # It must instead be dropped by _passes_inline_filters (domain_tags mismatch).
     pts = [
         mk("p_ml", "machine learning algorithm", "obj_ml", ["ml"]),
-        mk("p_fin", "financial analysis report", "obj_fin", ["finance"]),
+        mk("p_fin", "machine financial analysis", "obj_fin", ["finance"]),
         mk("p_dense", "dense retrieval baseline", "obj_dense", []),
     ]
 

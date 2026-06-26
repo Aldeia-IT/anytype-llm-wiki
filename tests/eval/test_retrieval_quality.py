@@ -39,13 +39,19 @@ def _mrr_at_k(expected, results, k=5):
 
 @pytest.mark.live
 def test_hybrid_recall_aggregate():
-    """AC-EVAL: Aggregate Recall@5 and MRR@5 (hybrid >= dense) AND repro-327 improves.
+    """AC-EVAL: Aggregate Recall@5 and MRR@5 (hybrid >= dense) AND repro-327 strictly improves.
 
     This is a live test requiring a running Anytype/Qdrant/Ollama stack.
     Run with: uv run python -m pytest tests/eval/ -m live -v
 
     The fixture file must contain >=5 cases including a 'repro-327' case
     (owned by the implementer, Step 8 in the spec).
+
+    Assertions:
+    - AGGREGATE: mean Recall@5 and MRR@5 each require hybrid >= dense (tolerates ties)
+    - REPRO-327 PER-CASE: requires hybrid > dense STRICTLY (dense_recall < hybrid_recall)
+      A no-op hybrid returning the same results as dense would produce hr==dr and FAIL here.
+      Per addendum item 2 (CPO-1/QA-1/QA-2), this case must prove the feature's lift is real.
     """
     from anytype_llm_wiki.indexer import hybrid_search_core, semantic_search_core
 
@@ -84,6 +90,7 @@ def test_hybrid_recall_aggregate():
     assert statistics.mean(h_mrr) >= statistics.mean(d_mrr), (
         f"MRR@5 regressed\n{rpt}"
     )
-    assert repro and repro["hr"] >= repro["dr"], (
-        f"repro-327 regressed\n{rpt}"
+    assert repro and repro["hr"] > repro["dr"], (
+        f"repro-327: hybrid recall must strictly exceed dense recall "
+        f"(dense_recall < hybrid_recall required — a no-op tie is a failure)\n{rpt}"
     )
