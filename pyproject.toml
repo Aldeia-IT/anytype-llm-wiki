@@ -29,6 +29,9 @@ dependencies = [
     "psutil>=5.9,<8.0.0",
     "markdownify>=1.2.2,<1.3.0",
     "pydantic>=2.13.4,<3.0",
+    # Lexical BM25 signal for hybrid retrieval (#327). Apache-2.0; 8.6 kB wheel;
+    # numpy-only (already a transitive dep of qdrant-client). Zero new downloads.
+    "rank-bm25>=0.2.2,<1.0.0",
 ]
 
 [project.urls]
