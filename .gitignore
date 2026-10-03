@@ -18,3 +18,9 @@ build/
 # SDLC agent signal files (abs-phase-complete, abs-pr-ready, abs-escalation).
 # Written by pipeline leads to their work folder; consumed by the watcher.
 abs-*
+
+# UI-verification screenshots stay on disk in the work folder, never in git (aldeia-box #1109)
+.aldeia/**/*.png
+.aldeia/**/*.jpg
+.aldeia/**/*.jpeg
+.aldeia/**/*.webp
