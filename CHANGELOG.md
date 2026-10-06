@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hybrid dense + lexical (BM25) retrieval with RRF fusion (#327).** Retrieval now
+  fuses the dense (bge-m3 cosine) signal with a lexical **BM25** signal via app-level
+  **Reciprocal Rank Fusion (k=60)** in the shared `hybrid_search_core`, surfacing exact
+  names and technical keywords that dense embeddings alone miss. The `semantic_search`
+  MCP tool and `wiki_query` Tier-2 both route through it; no tool signature or API
+  change. The BM25 index is built lazily in-memory from a Qdrant scroll and invalidated
+  across processes by a monotonic `bm25_corpus_version` stamp in the index state file
+  (the cron reindexes in a separate interpreter and only bumps the stamp; the long-lived
+  server rebuilds on the next query). BM25 failures degrade gracefully to dense-only; a
+  Qdrant outage on the dense path propagates. Adds one dependency, `rank-bm25`
+  (Apache-2.0, numpy-only). No Qdrant schema change and no `PAYLOAD_SCHEMA_VERSION` bump.
 - **Concept contradictions surfaced in `wiki_lint` (#426).** `wiki_lint` now flags
   `wiki_concept` contradictions (severity `critical`) exactly as it already flags
   `wiki_entity` ones; the finding is resolved by setting `wiki_last_reviewed` on the

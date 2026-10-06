@@ -380,6 +380,8 @@ class FakeQdrantClientWithSearch:
     Supports query_points (captures query_filter), create_payload_index
     (records which fields were indexed), upsert, delete, get_collections,
     create_collection.  Never emits UserWarning.
+
+    Extended for #327: scroll() returns all upserted points (single page).
     """
 
     def __init__(self, mock_results=None):
@@ -425,6 +427,14 @@ class FakeQdrantClientWithSearch:
 
         _Result.points = self._mock_results
         return _Result()
+
+    def scroll(self, collection_name, limit=1000, offset=None,
+               with_payload=True, with_vectors=False):
+        """Single page: return all upserted points, next_offset=None.
+
+        Required by _build_bm25_index (spec §11.1 / SG-7).
+        """
+        return list(self.upserted_points), None
 
 
 # ---------------------------------------------------------------------------
@@ -1129,7 +1139,7 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
     test_no_filter_regression stays GREEN because that test calls semantic_search_core
     directly — the OD-B guard is in server.py, not in semantic_search_core.
     """
-    import anytype_llm_wiki.server as _server_mod
+    import anytype_llm_wiki.indexer as _idx_mod
 
     captured_calls: list[dict] = []
 
@@ -1138,7 +1148,11 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
         captured_calls.append({"types": types, "query": query})
         return []
 
-    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    # #327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # switch); retarget this #336 OD-B seam test to the new module-qualified
+    # symbol. The OD-B logic under test (server.py's effective_types) is
+    # unchanged — only the callee name is.
+    monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_core)
 
     from anytype_llm_wiki.server import semantic_search
 
@@ -1180,7 +1194,7 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
     non-source default forced), leaving wiki_source chunks searchable so the
     source_type filter can match them.
     """
-    import anytype_llm_wiki.server as _server_mod
+    import anytype_llm_wiki.indexer as _idx_mod
 
     captured_calls: list[dict] = []
 
@@ -1190,7 +1204,11 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
         captured_calls.append({"types": types, "source_type": source_type})
         return []
 
-    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    # #327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # switch); retarget this #336 OD-B seam test to the new module-qualified
+    # symbol. The guard under test (`if types is None and not source_type`) is
+    # unchanged.
+    monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_core)
     from anytype_llm_wiki.server import semantic_search
 
     semantic_search(query="test", source_type=["document"])
@@ -1222,4 +1240,681 @@ def test_payload_schema_version_is_3():
     assert _config.PAYLOAD_SCHEMA_VERSION == 3, (
         f"PAYLOAD_SCHEMA_VERSION must be 3 after #336 (was 2 pre-impl); "
         f"got {_config.PAYLOAD_SCHEMA_VERSION}"
+    )
+
+
+# ===========================================================================
+# #327 — Hybrid Dense+Sparse Fusion (BM25 + RRF)
+# Tests FAIL until the implementation exists.  Import all new symbols INSIDE
+# test bodies so the file collects cleanly before any code is written.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# AC-H1 — BM25 tokenization and scoring
+# ---------------------------------------------------------------------------
+
+
+def test_bm25_scores_keyword_match():
+    """AC-H1: BM25Okapi ranks a keyword-matching corpus item above non-matching items."""
+    from rank_bm25 import BM25Okapi
+    corpus = [["contradiction", "detection", "capability"],
+              ["semantic", "search", "dense"], ["knowledge", "graph", "entity"]]
+    scores = BM25Okapi(corpus).get_scores(["contradiction", "detection"])
+    assert scores[0] > scores[1] and scores[0] > scores[2]
+
+
+# ---------------------------------------------------------------------------
+# AC-H2 — _rrf_fuse: dual-list chunk outranks single-list; dedup; pairs returned
+# ---------------------------------------------------------------------------
+
+
+def test_rrf_fuse_order_and_scores():
+    """AC-H2: dual-list chunk (p2) tops the fused list; no duplicates; scores descend."""
+    from anytype_llm_wiki.indexer import _rrf_fuse
+    dense = [{"_point_id": "p1", "object_id": "o1"},
+             {"_point_id": "p2", "object_id": "o2"}]
+    bm25 = [{"_point_id": "p2", "object_id": "o2"},   # p2 in both
+            {"_point_id": "p3", "object_id": "o3"}]
+    fused = _rrf_fuse(dense, bm25, k=60)
+    assert fused[0][1]["_point_id"] == "p2"           # summed RRF → top
+    pids = [c["_point_id"] for _, c in fused]
+    assert len(pids) == len(set(pids))                # no dup
+    assert fused[0][0] > fused[1][0]                  # scores descend
+
+
+def test_rrf_fuse_both_empty():
+    """AC-H2: both-empty → empty list."""
+    from anytype_llm_wiki.indexer import _rrf_fuse
+    assert _rrf_fuse([], [], k=60) == []
+
+
+def test_rrf_fuse_one_empty():
+    """AC-H2: one-empty → the non-empty list's order is preserved."""
+    from anytype_llm_wiki.indexer import _rrf_fuse
+    d = [{"_point_id": "p1", "object_id": "o1"}]
+    assert [c["_point_id"] for _, c in _rrf_fuse(d, [], 60)] == ["p1"]
+    assert [c["_point_id"] for _, c in _rrf_fuse([], d, 60)] == ["p1"]
+
+
+# ---------------------------------------------------------------------------
+# AC-H2b — End-to-end fusion via REAL _point_id keying (monkeypatch _qdrant/embed_query only)
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_fusion_end_to_end(monkeypatch):
+    """AC-H2b: dual-retriever chunk outranks single-retriever; appears exactly once;
+    RRF scores, not cosine; o2 (BM25-only) is recalled; no _point_id in output.
+    """
+    import pytest as _pytest
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config
+
+    # Build a real BM25 index over 3 chunks; p_shared also matches dense top-1.
+    def mk(pid, text, oid):
+        return type("P", (), {"id": pid, "payload": {
+            "text": text, "object_id": oid, "object_name": oid,
+            "type_key": "wiki_entity", "heading": "", "space_id": "sp"}})()
+    pts = [mk("p_shared", "contradiction detection", "o1"),
+           mk("p_bm25",   "contradiction only here", "o2"),
+           mk("p_dense",  "unrelated dense neighbor", "o3")]
+
+    class FC:
+        def scroll(self, collection_name, limit=1000, offset=None,
+                   with_payload=True, with_vectors=False):
+            return pts, None
+
+        def query_points(self, collection_name, query, query_filter=None,
+                         limit=10, with_payload=True):
+            # Dense ranks p_shared then p_dense (NOT p_bm25).
+            order = [pts[0], pts[2]]
+            res = [type("R", (), {"id": p.id, "score": 0.9 - i * 0.1,
+                                  "payload": p.payload})()
+                   for i, p in enumerate(order)]
+            return type("Res", (), {"points": res})()
+
+    monkeypatch.setattr(ix, "_qdrant", lambda: FC())
+    monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    monkeypatch.setattr(ix, "_read_bm25_corpus_version", lambda: 1)
+    ix._bm25_index = None
+    ix._bm25_built_version = -1
+    out = ix.hybrid_search_core(query="contradiction detection", limit=3)
+    ids = [r["object_id"] for r in out]
+    assert ids[0] == "o1"               # found by both → ranks first
+    assert ids.count("o1") == 1         # appears exactly once
+    assert "o2" in ids                  # BM25-only chunk recalled
+    assert all("_point_id" not in r for r in out)
+    # RRF scores, not cosine: dual-retriever o1 ≈ 1/61 + 1/61 ≈ 0.0328
+    assert out[0]["score"] == _pytest.approx(2 / 61, rel=1e-3)
+    assert all(r["score"] < out[0]["score"] for r in out[1:])
+
+
+# ---------------------------------------------------------------------------
+# AC-H3 — fallback to dense-only when BM25 raises (cosine score preserved)
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_fallback_to_dense(monkeypatch):
+    """AC-H3: BM25 raises → dense-only, cosine score preserved, no error, _point_id stripped."""
+    import anytype_llm_wiki.indexer as ix
+    dense = [{"_point_id": "p1", "object_name": "X", "object_id": "o1",
+              "type": "wiki_entity", "heading": "", "text": "b", "score": 0.9}]
+    monkeypatch.setattr(ix, "_dense_search_with_ids", lambda **kw: [dict(d) for d in dense])
+    monkeypatch.setattr(ix, "_ensure_bm25_fresh",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no index")))
+    out = ix.hybrid_search_core(query="t", limit=10)
+    assert out[0]["object_id"] == "o1" and out[0]["score"] == 0.9   # cosine kept
+    assert all("_point_id" not in r for r in out)
+
+
+# ---------------------------------------------------------------------------
+# AC-H4 — output shape; no internal keys
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_output_shape(monkeypatch):
+    """AC-H4: output has the 6 public keys; _point_id is stripped."""
+    import anytype_llm_wiki.indexer as ix
+    dense = [{"_point_id": "p1", "object_name": "N", "object_id": "o1",
+              "type": "wiki_entity", "heading": "H", "text": "T", "score": 0.8}]
+    bm25 = [{"_point_id": "p1", "object_name": "N", "object_id": "o1",
+             "type": "wiki_entity", "heading": "H", "text": "T", "score": 1.2,
+             "source_type": "", "domain_tags": []}]
+    monkeypatch.setattr(ix, "_dense_search_with_ids", lambda **kw: [dict(d) for d in dense])
+    monkeypatch.setattr(ix, "_ensure_bm25_fresh", lambda: None)
+    monkeypatch.setattr(ix, "_bm25_search", lambda *a, **kw: [dict(b) for b in bm25])
+    out = ix.hybrid_search_core(query="t", limit=10)
+    for k in ("object_name", "object_id", "type", "heading", "text", "score"):
+        assert all(k in r for r in out)
+    # Only the fusion key must be stripped; the six public keys must remain.
+    assert all("_point_id" not in r for r in out)
+
+
+# ---------------------------------------------------------------------------
+# AC-H5 — limit respected; limit<=0 → []
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_respects_limit(monkeypatch):
+    """AC-H5: output length <= limit."""
+    import anytype_llm_wiki.indexer as ix
+    dense = [{"_point_id": f"p{i}", "object_name": f"N{i}", "object_id": f"o{i}",
+              "type": "wiki_entity", "heading": "", "text": "", "score": 1.0 - i * 0.05}
+             for i in range(20)]
+    bm25 = [{"_point_id": f"q{i}", "object_name": f"M{i}", "object_id": f"x{i}",
+             "type": "wiki_entity", "heading": "", "text": "", "score": 1.0 - i * 0.03,
+             "source_type": "", "domain_tags": []} for i in range(20)]
+    monkeypatch.setattr(ix, "_dense_search_with_ids", lambda **kw: [dict(d) for d in dense])
+    monkeypatch.setattr(ix, "_ensure_bm25_fresh", lambda: None)
+    monkeypatch.setattr(ix, "_bm25_search", lambda *a, **kw: [dict(b) for b in bm25])
+    assert len(ix.hybrid_search_core(query="t", limit=5)) <= 5
+
+
+def test_hybrid_limit_zero(monkeypatch):
+    """AC-H5: limit=0 → [] without any work."""
+    import anytype_llm_wiki.indexer as ix
+    assert ix.hybrid_search_core(query="t", limit=0) == []
+
+
+# ---------------------------------------------------------------------------
+# AC-H6 — type filter honored; BM25-only excluded-type chunk dropped
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_filter_prevents_type_leak(monkeypatch):
+    """AC-H6: BM25-only wiki_source chunk dropped when types=['wiki_entity']."""
+    import anytype_llm_wiki.indexer as ix
+    dense = [{"_point_id": "pE", "object_name": "E", "object_id": "o1",
+              "type": "wiki_entity", "heading": "", "text": "", "score": 0.8}]
+    bm25 = [{"_point_id": "pS", "object_name": "S", "object_id": "o2",
+             "type": "wiki_source", "heading": "", "text": "", "score": 2.0,
+             "source_type": "doc", "domain_tags": []},           # BM25-only, wrong type
+            {"_point_id": "pE", "object_name": "E", "object_id": "o1",
+             "type": "wiki_entity", "heading": "", "text": "", "score": 1.5,
+             "source_type": "", "domain_tags": []}]
+    monkeypatch.setattr(ix, "_dense_search_with_ids", lambda **kw: [dict(d) for d in dense])
+    monkeypatch.setattr(ix, "_ensure_bm25_fresh", lambda: None)
+    monkeypatch.setattr(ix, "_bm25_search", lambda *a, **kw: [dict(b) for b in bm25])
+    out = ix.hybrid_search_core(query="t", types=["wiki_entity"], limit=10)
+    assert "wiki_source" not in {r["type"] for r in out}
+
+
+# ---------------------------------------------------------------------------
+# AC-H6b — BM25-only domain_tags gate (hand-fed _point_id)
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_bm25_only_domain_tags_gate(monkeypatch):
+    """AC-H6b: BM25-only chunk with matching domain_tags survives; non-matching dropped."""
+    import anytype_llm_wiki.indexer as ix
+    dense = [{"_point_id": "pD", "object_name": "D", "object_id": "od",
+              "type": "wiki_entity", "heading": "", "text": "", "score": 0.7}]
+    bm25 = [{"_point_id": "pM", "object_name": "M", "object_id": "om",
+             "type": "wiki_entity", "heading": "", "text": "", "score": 2.0,
+             "source_type": "", "domain_tags": ["ml"]},          # matches
+            {"_point_id": "pN", "object_name": "N", "object_id": "on",
+             "type": "wiki_entity", "heading": "", "text": "", "score": 1.9,
+             "source_type": "", "domain_tags": ["finance"]}]     # does not match
+    monkeypatch.setattr(ix, "_dense_search_with_ids", lambda **kw: [dict(d) for d in dense])
+    monkeypatch.setattr(ix, "_ensure_bm25_fresh", lambda: None)
+    monkeypatch.setattr(ix, "_bm25_search", lambda *a, **kw: [dict(b) for b in bm25])
+    ids = {r["object_id"] for r in ix.hybrid_search_core(
+        query="t", domain_tags=["ml"], limit=10)}
+    assert "om" in ids and "on" not in ids
+
+
+# ---------------------------------------------------------------------------
+# AC-H6b (QA-4 addendum) — domain_tags gate driven through REAL _build_bm25_index
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_bm25_domain_tags_gate_real_build(monkeypatch):
+    """QA-4 (addendum item 4): drive domain_tags filter gate through the real
+    _build_bm25_index + _bm25_search path (monkeypatch only _qdrant/embed_query).
+
+    A matching chunk (domain_tags=['ml']) must survive; a non-matching one
+    (domain_tags=['finance']) must be DROPPED BY THE FILTER GATE, not by the
+    zero-score break.  To ensure the drop-candidate reaches the gate:
+    - obj_fin's text contains "machine" (a query token) so BM25 scores it > 0
+    - obj_fin's domain_tags=['finance'] does NOT match query domain_tags=['ml']
+    - Therefore _passes_inline_filters is what drops it (gate exercise confirmed)
+
+    This prevents a real keying/field-surfacing regression from passing while
+    production fails.  A deleted _passes_inline_filters would incorrectly allow
+    obj_fin into the results — the assertion catches that.
+    """
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config
+
+    def mk(pid, text, oid, domain_tags):
+        return type("P", (), {"id": pid, "payload": {
+            "text": text, "object_id": oid, "object_name": oid,
+            "type_key": "wiki_entity", "heading": "", "space_id": "sp",
+            "source_type": "", "domain_tags": domain_tags}})()
+
+    # obj_fin deliberately contains "machine" (a query token) so BM25 > 0
+    # and it is NOT dropped by _bm25_search's `if score <= 0: break` guard.
+    # It must instead be dropped by _passes_inline_filters (domain_tags mismatch).
+    pts = [
+        mk("p_ml", "machine learning algorithm", "obj_ml", ["ml"]),
+        mk("p_fin", "machine financial analysis", "obj_fin", ["finance"]),
+        mk("p_dense", "dense retrieval baseline", "obj_dense", []),
+    ]
+
+    class FC:
+        def scroll(self, collection_name, limit=1000, offset=None,
+                   with_payload=True, with_vectors=False):
+            return pts, None
+
+        def query_points(self, collection_name, query, query_filter=None,
+                         limit=10, with_payload=True):
+            # Dense returns only the no-tag chunk
+            order = [pts[2]]
+            res = [type("R", (), {"id": p.id, "score": 0.7,
+                                  "payload": p.payload})()
+                   for p in order]
+            return type("Res", (), {"points": res})()
+
+    monkeypatch.setattr(ix, "_qdrant", lambda: FC())
+    monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    monkeypatch.setattr(ix, "_read_bm25_corpus_version", lambda: 1)
+    ix._bm25_index = None
+    ix._bm25_built_version = -1
+
+    out = ix.hybrid_search_core(query="machine learning", domain_tags=["ml"], limit=10)
+    result_ids = {r["object_id"] for r in out}
+    assert "obj_ml" in result_ids, (
+        "QA-4: BM25-only chunk with matching domain_tags=['ml'] must survive the filter gate"
+    )
+    assert "obj_fin" not in result_ids, (
+        "QA-4: BM25-only chunk with domain_tags=['finance'] must be dropped when filter=['ml']"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC-H7 — _build_bm25_index from scroll; only used fields retained
+# ---------------------------------------------------------------------------
+
+
+def test_build_bm25_index_from_scroll():
+    """AC-H7: _build_bm25_index builds from scroll; point_ids/source_types/domain_tags set."""
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki.indexer import _BM25Index
+    p = type("P", (), {"id": "u1", "payload": {
+        "text": "contradiction detection", "space_id": "sp", "object_id": "o1",
+        "object_name": "X", "type_key": "wiki_entity", "heading": "",
+        "source_type": "doc", "domain_tags": ["ml"]}})()
+    fc = type("FC", (), {"scroll": lambda self, **kw: ([p], None)})()
+    ix._bm25_index = None
+    ix._build_bm25_index(fc)
+    assert isinstance(ix._bm25_index, _BM25Index)
+    assert ix._bm25_index.point_ids == ["u1"]
+    assert ix._bm25_index.source_types == ["doc"]
+    assert ix._bm25_index.domain_tags == [["ml"]]
+
+
+# ---------------------------------------------------------------------------
+# AC-H8 — empty scroll keeps a prior good index; cold empty stays None
+# ---------------------------------------------------------------------------
+
+
+def test_build_bm25_empty_keeps_prior(monkeypatch):
+    """AC-H8: empty scroll keeps prior index intact (SF-3)."""
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki.indexer import _BM25Index
+    prior = _BM25Index(bm25=object(), point_ids=["u1"], object_ids=["o"],
+        object_names=["n"], type_keys=["t"], headings=[""], texts=["x"],
+        space_ids=["sp"], source_types=[""], domain_tags=[[]])
+    ix._bm25_index = prior
+    fc = type("FC", (), {"scroll": lambda self, **kw: ([], None)})()
+    ix._build_bm25_index(fc)
+    assert ix._bm25_index is prior          # not nulled on transient empty
+
+
+def test_build_bm25_empty_cold_stays_none():
+    """AC-H8: cold empty scroll → _bm25_index stays None."""
+    import anytype_llm_wiki.indexer as ix
+    ix._bm25_index = None
+    fc = type("FC", (), {"scroll": lambda self, **kw: ([], None)})()
+    ix._build_bm25_index(fc)
+    assert ix._bm25_index is None
+
+
+# ---------------------------------------------------------------------------
+# AC-H9 — staleness: rebuild only when on-disk version changes
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_bm25_fresh_rebuilds_on_version_change(monkeypatch):
+    """AC-H9: _ensure_bm25_fresh rebuilds exactly once per corpus-version change."""
+    import anytype_llm_wiki.indexer as ix
+    calls = {"n": 0}
+    monkeypatch.setattr(ix, "_qdrant", lambda: object())
+
+    def fake_build(client):
+        calls["n"] += 1
+        ix._bm25_index = object()
+
+    monkeypatch.setattr(ix, "_build_bm25_index", fake_build)
+    ix._bm25_index = None
+    ix._bm25_built_version = -1
+    monkeypatch.setattr(ix, "_read_bm25_corpus_version", lambda: 5)
+    ix._ensure_bm25_fresh()
+    assert calls["n"] == 1   # cold build
+    ix._ensure_bm25_fresh()
+    assert calls["n"] == 1   # same version → no rebuild
+    monkeypatch.setattr(ix, "_read_bm25_corpus_version", lambda: 6)
+    ix._ensure_bm25_fresh()
+    assert calls["n"] == 2   # version bumped → rebuild
+
+
+# ---------------------------------------------------------------------------
+# AC-H10 — version stamp bumped by reindex and reembed_object
+# ---------------------------------------------------------------------------
+
+
+def test_reindex_bumps_corpus_version(monkeypatch, tmp_path):
+    """AC-H10: reindex() increments bm25_corpus_version in state.json monotonically."""
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config as _config
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(ix, "_qdrant", lambda: fake)
+    monkeypatch.setattr(ix, "list_spaces", lambda: [])
+    monkeypatch.setattr(_config, "INDEX_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(_config, "INDEX_STATE_DIR", tmp_path)
+    ix.reindex()
+    v1 = ix._read_bm25_corpus_version()
+    ix.reindex()
+    assert ix._read_bm25_corpus_version() == v1 + 1   # monotonic across runs
+
+
+def test_reembed_bumps_corpus_version(monkeypatch, tmp_path):
+    """AC-H10: reembed_object() increments bm25_corpus_version in state.json."""
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config as _config
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(ix, "_qdrant", lambda: fake)
+    monkeypatch.setattr(ix, "embed", lambda texts: [[0.1] * _config.EMBED_DIMS for _ in texts])
+    monkeypatch.setattr(_config, "INDEX_STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(_config, "INDEX_STATE_DIR", tmp_path)
+    before = ix._read_bm25_corpus_version()
+    ix.reembed_object("sp", "obj-1", {"id": "obj-1", "space_id": "sp", "name": "X",
+        "type": {"key": "wiki_entity"}, "markdown": "# H\nbody", "properties": []})
+    assert fake.upserted_points, "reembed must upsert chunks for the bump path (SF-C)"
+    assert ix._read_bm25_corpus_version() == before + 1
+
+
+# ---------------------------------------------------------------------------
+# AC-H12 — mixed-origin ordering by RRF score (BL-3)
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_origin_ordering(monkeypatch):
+    """AC-H12: dual-retriever chunk tops output; output ordered by RRF score, not raw BM25."""
+    import anytype_llm_wiki.indexer as ix
+    # Dense top has cosine 0.8; a BM25-only chunk has raw 5.0. Post-fusion the
+    # dual/dense chunk must not be displaced by raw BM25 magnitude.
+    dense = [{"_point_id": "pA", "object_name": "A", "object_id": "oA",
+              "type": "wiki_entity", "heading": "", "text": "", "score": 0.8},
+             {"_point_id": "pB", "object_name": "B", "object_id": "oB",
+              "type": "wiki_entity", "heading": "", "text": "", "score": 0.7}]
+    bm25 = [{"_point_id": "pA", "object_name": "A", "object_id": "oA",
+             "type": "wiki_entity", "heading": "", "text": "", "score": 5.0,
+             "source_type": "", "domain_tags": []},   # pA in both → top
+            {"_point_id": "pC", "object_name": "C", "object_id": "oC",
+             "type": "wiki_entity", "heading": "", "text": "", "score": 4.0,
+             "source_type": "", "domain_tags": []}]   # BM25-only raw 4.0
+    monkeypatch.setattr(ix, "_dense_search_with_ids", lambda **kw: [dict(d) for d in dense])
+    monkeypatch.setattr(ix, "_ensure_bm25_fresh", lambda: None)
+    monkeypatch.setattr(ix, "_bm25_search", lambda *a, **kw: [dict(b) for b in bm25])
+    out = ix.hybrid_search_core(query="t", limit=3)
+    assert out[0]["object_id"] == "oA"                # dual-retriever wins
+    assert [r["score"] for r in out] == sorted((r["score"] for r in out), reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# AC-H13 — Qdrant outage on the dense path propagates (not swallowed)
+# ---------------------------------------------------------------------------
+
+
+def test_qdrant_outage_propagates(monkeypatch):
+    """AC-H13: httpx.HTTPError from _dense_search_with_ids propagates out of hybrid_search_core."""
+    import anytype_llm_wiki.indexer as ix
+    import httpx
+
+    def boom(**kw):
+        raise httpx.HTTPError("qdrant down")
+
+    monkeypatch.setattr(ix, "_dense_search_with_ids", boom)
+    try:
+        ix.hybrid_search_core(query="t", limit=5)
+        assert False, "expected HTTPError to propagate"
+    except httpx.HTTPError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# AC-H14 — date filter drops BM25-only chunks (pins D5)
+# ---------------------------------------------------------------------------
+
+
+def test_date_filter_drops_bm25_only(monkeypatch):
+    """AC-H14: BM25-only chunk dropped when ingested_after is active; dense chunk kept."""
+    import anytype_llm_wiki.indexer as ix
+    dense = [{"_point_id": "pD", "object_name": "D", "object_id": "od",
+              "type": "wiki_entity", "heading": "", "text": "", "score": 0.7}]
+    bm25 = [{"_point_id": "pX", "object_name": "X", "object_id": "ox",
+             "type": "wiki_entity", "heading": "", "text": "", "score": 9.0,
+             "source_type": "", "domain_tags": []}]   # BM25-only
+    monkeypatch.setattr(ix, "_dense_search_with_ids", lambda **kw: [dict(d) for d in dense])
+    monkeypatch.setattr(ix, "_ensure_bm25_fresh", lambda: None)
+    monkeypatch.setattr(ix, "_bm25_search", lambda *a, **kw: [dict(b) for b in bm25])
+    ids = {r["object_id"] for r in ix.hybrid_search_core(
+        query="t", ingested_after="2026-01-01", limit=10)}
+    assert "ox" not in ids and "od" in ids
+
+
+# ---------------------------------------------------------------------------
+# AC-H-REG1 — semantic_search_core bare call still yields query_filter is None
+# ---------------------------------------------------------------------------
+
+
+def test_no_filter_regression_unchanged(monkeypatch):
+    """AC-H-REG1: semantic_search_core bare call → query_filter is None (unchanged contract)."""
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config as _config
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(ix, "_qdrant", lambda: fake)
+    monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * _config.EMBED_DIMS)
+    ix.semantic_search_core(query="test")
+    assert fake.query_calls[-1]["query_filter"] is None
+
+
+# ---------------------------------------------------------------------------
+# AC-H11 (partial) — server.py:semantic_search routes to hybrid_search_core
+# ---------------------------------------------------------------------------
+
+
+def test_server_semantic_search_calls_hybrid(monkeypatch):
+    """AC-H11: server.py:semantic_search calls hybrid_search_core, not semantic_search_core."""
+    import anytype_llm_wiki.indexer as ix
+    seen = {}
+    monkeypatch.setattr(ix, "hybrid_search_core",
+                        lambda **kw: seen.setdefault("kw", kw) or [])
+    from anytype_llm_wiki.server import semantic_search
+    semantic_search(query="test")
+    assert seen["kw"]["query"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# QA-3 (addendum item 3) — _dense_search_with_ids builds a filter structurally
+# identical to semantic_search_core under a fully-populated filter set
+# ---------------------------------------------------------------------------
+
+
+def test_dense_search_with_ids_filter_equals_semantic_search_core(monkeypatch):
+    """QA-3: _dense_search_with_ids constructs the same Qdrant query_filter as
+    semantic_search_core under types + space_id + source_type + domain_tags,
+    guarding the #336 OD-B / #323 nested-filter contract on the dense leg of hybrid.
+    """
+    from qdrant_client.models import FieldCondition
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config as _config
+
+    class CaptureBoth:
+        """Fake Qdrant client that captures the query_filter from both callers."""
+        def __init__(self):
+            self.calls = []
+
+        def get_collections(self):
+            class _Col:
+                name = _config.QDRANT_COLLECTION
+            class _Result:
+                collections = [_Col()]
+            return _Result()
+
+        def query_points(self, collection_name, query, query_filter=None,
+                         limit=10, with_payload=True):
+            self.calls.append(query_filter)
+
+            class _Res:
+                points = []
+            return _Res()
+
+        def scroll(self, collection_name, limit=1000, offset=None,
+                   with_payload=True, with_vectors=False):
+            return [], None
+
+    cap = CaptureBoth()
+    monkeypatch.setattr(ix, "_qdrant", lambda: cap)
+    monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * _config.EMBED_DIMS)
+
+    common_kwargs = dict(
+        query="test",
+        space_id="sp-42",
+        types=["wiki_entity", "wiki_concept"],
+        source_type=["document"],
+        domain_tags=["ai"],
+    )
+
+    # Call semantic_search_core → captures filter[0]
+    ix.semantic_search_core(**common_kwargs)
+    # Call _dense_search_with_ids → captures filter[1]
+    ix._dense_search_with_ids(**common_kwargs)
+
+    assert len(cap.calls) == 2, (
+        "Expected exactly 2 query_points calls (one from each function); "
+        f"got {len(cap.calls)}"
+    )
+    f_ssc, f_dense = cap.calls
+
+    # Both must be non-None
+    assert f_ssc is not None and f_dense is not None, (
+        "QA-3: both semantic_search_core and _dense_search_with_ids must produce a "
+        "non-None query_filter for a fully-populated input"
+    )
+
+    # must-list lengths must match
+    assert len(f_ssc.must) == len(f_dense.must), (
+        f"QA-3: must-list lengths differ: ssc={len(f_ssc.must)} vs dense={len(f_dense.must)}"
+    )
+
+    # space_id FieldCondition present in both
+    def _space_cond(f):
+        return next((c for c in f.must
+                     if isinstance(c, FieldCondition) and c.key == "space_id"), None)
+    assert _space_cond(f_ssc) is not None and _space_cond(f_dense) is not None, (
+        "QA-3: space_id FieldCondition must be present in both filters"
+    )
+    assert _space_cond(f_ssc).match.value == _space_cond(f_dense).match.value == "sp-42", (
+        "QA-3: space_id value must be 'sp-42' in both filters"
+    )
+
+    # types nested Filter(should=[...]) present in both
+    def _type_filter(f):
+        return next((c for c in f.must if hasattr(c, "should") and c.should), None)
+    assert _type_filter(f_ssc) is not None and _type_filter(f_dense) is not None, (
+        "QA-3: types nested Filter(should=[...]) must be present in both filters"
+    )
+    ssc_type_keys = {c.match.value for c in _type_filter(f_ssc).should}
+    dense_type_keys = {c.match.value for c in _type_filter(f_dense).should}
+    assert ssc_type_keys == dense_type_keys == {"wiki_entity", "wiki_concept"}, (
+        f"QA-3: type keys must match: ssc={ssc_type_keys} vs dense={dense_type_keys}"
+    )
+
+    # source_type FieldCondition present in both
+    def _st_cond(f):
+        return next((c for c in f.must
+                     if isinstance(c, FieldCondition) and c.key == "source_type"), None)
+    assert _st_cond(f_ssc) is not None and _st_cond(f_dense) is not None, (
+        "QA-3: source_type FieldCondition must be present in both filters"
+    )
+    assert set(_st_cond(f_ssc).match.any) == set(_st_cond(f_dense).match.any) == {"document"}, (
+        "QA-3: source_type MatchAny values must match"
+    )
+
+    # domain_tags FieldCondition present in both
+    def _dt_cond(f):
+        return next((c for c in f.must
+                     if isinstance(c, FieldCondition) and c.key == "domain_tags"), None)
+    assert _dt_cond(f_ssc) is not None and _dt_cond(f_dense) is not None, (
+        "QA-3: domain_tags FieldCondition must be present in both filters"
+    )
+    assert set(_dt_cond(f_ssc).match.any) == set(_dt_cond(f_dense).match.any) == {"ai"}, (
+        "QA-3: domain_tags MatchAny values must match"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CSO-1 (addendum item 5) — cross-space_id BM25-only exclusion
+# ---------------------------------------------------------------------------
+
+
+def test_bm25_cross_space_exclusion(monkeypatch):
+    """CSO-1 (addendum item 5): a BM25-only chunk whose space_id differs from the query's
+    space_id must NEVER appear in the results, pinning the in-memory
+    idx.space_ids[i] == space_id enforcement path in _bm25_search.
+    """
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config as _config
+
+    def mk(pid, text, oid, space):
+        return type("P", (), {"id": pid, "payload": {
+            "text": text, "object_id": oid, "object_name": oid,
+            "type_key": "wiki_entity", "heading": "", "space_id": space,
+            "source_type": "", "domain_tags": []}})()
+
+    pts = [
+        mk("p_target",  "contradiction detection", "obj_target",  "sp_A"),  # correct space
+        mk("p_other",   "contradiction detection", "obj_other",   "sp_B"),  # DIFFERENT space
+        mk("p_dense_a", "unrelated dense hit",     "obj_dense_a", "sp_A"),  # dense anchor
+    ]
+
+    class FC:
+        def scroll(self, collection_name, limit=1000, offset=None,
+                   with_payload=True, with_vectors=False):
+            return pts, None
+
+        def query_points(self, collection_name, query, query_filter=None,
+                         limit=10, with_payload=True):
+            # Dense returns only the anchor in sp_A (Qdrant's own filter handles space isolation)
+            res = [type("R", (), {"id": pts[2].id, "score": 0.7,
+                                  "payload": pts[2].payload})()]
+            return type("Res", (), {"points": res})()
+
+    monkeypatch.setattr(ix, "_qdrant", lambda: FC())
+    monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * _config.EMBED_DIMS)
+    monkeypatch.setattr(ix, "_read_bm25_corpus_version", lambda: 1)
+    ix._bm25_index = None
+    ix._bm25_built_version = -1
+
+    out = ix.hybrid_search_core(query="contradiction detection",
+                                space_id="sp_A", limit=10)
+    result_ids = {r["object_id"] for r in out}
+    assert "obj_other" not in result_ids, (
+        "CSO-1: BM25-only chunk from sp_B must never appear when querying sp_A "
+        "(cross-space isolation via idx.space_ids[i] == space_id in _bm25_search)"
+    )
+    assert "obj_target" in result_ids or "obj_dense_a" in result_ids, (
+        "CSO-1: at least one sp_A chunk must be present in results"
     )

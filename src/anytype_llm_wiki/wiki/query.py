@@ -666,7 +666,7 @@ def wiki_query(
                 # the entity/concept results; AC-T1-ST-NOOP pins identical output).
                 if domain_tags_filter:
                     _core_kwargs["domain_tags"] = domain_tags_filter
-                raw = indexer.semantic_search_core(**_core_kwargs)
+                raw = indexer.hybrid_search_core(**_core_kwargs)
                 # Dedupe candidate object_ids preserving best score / first seen.
                 seen: set[str] = set()
                 for r in raw:
