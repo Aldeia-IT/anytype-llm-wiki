@@ -24,3 +24,10 @@ abs-*
 .aldeia/**/*.jpg
 .aldeia/**/*.jpeg
 .aldeia/**/*.webp
+
+# Ticket documents (specs, reviews, debriefs) live in the private aldeia-work repo
+# (aldeia-box #1103). Only project configuration under .aldeia/ is tracked here.
+/.aldeia/*
+!/.aldeia/context/
+!/.aldeia/devops.md
+!/.aldeia/README.md
