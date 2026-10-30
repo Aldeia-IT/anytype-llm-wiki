@@ -584,3 +584,139 @@ class TestPropertyValueSanitized:
             assert forbidden_ls not in text, "U+2028 (LINE SEPARATOR) must be stripped from property chunk text"
             assert forbidden_ps not in text, "U+2029 (PARAGRAPH SEPARATOR) must be stripped from property chunk text"
             assert forbidden_tag not in text, "U+E0020 (TAG SPACE) must be stripped from property chunk text"
+
+
+# ---------------------------------------------------------------------------
+# Aldeia-IT/aldeia-box#1413 — wiki_url stamped on chunks of URL-ingested sources
+# ---------------------------------------------------------------------------
+
+_URL_PROP = {
+    "key": "wiki_url", "format": "url", "url": "https://example.org/page",
+}
+
+
+class TestChunkCarriesWikiUrl:
+    """#1413 AC1b / AC2 / D3: chunk_object stamps wiki_url on every chunk."""
+
+    def test_chunk_carries_wiki_url_property_only_source(self):
+        """AC1b: wiki_source (Anytype GET shape, excerpt-only) → every chunk has wiki_url."""
+        obj = _make_wiki_obj(
+            properties=[{"key": "wiki_excerpt", "text": "Some text."}, dict(_URL_PROP)],
+            type_key="wiki_source",
+        )
+        chunks = chunk_object(obj)
+        assert chunks, "Expected at least one chunk from wiki_excerpt"
+        assert all(c.get("wiki_url") == "https://example.org/page" for c in chunks), (
+            f"Every chunk must carry wiki_url; got {[c.get('wiki_url') for c in chunks]}"
+        )
+
+    def test_chunk_carries_wiki_url_on_markdown_body_path(self):
+        """AC1b: the body-chunk path stamps wiki_url on every chunk too."""
+        obj = _make_wiki_obj(
+            properties=[dict(_URL_PROP)],
+            markdown="# A\nfirst\n\n# B\nsecond",
+            type_key="wiki_source",
+        )
+        chunks = chunk_object(obj)
+        assert len(chunks) >= 2
+        assert all(c.get("wiki_url") == "https://example.org/page" for c in chunks)
+
+    def test_chunk_wiki_url_absent_when_property_missing(self):
+        """AC2: wiki_source without wiki_url (wiki_remember shape) → key ABSENT, not None."""
+        obj = _make_wiki_obj(
+            properties=[{"key": "wiki_excerpt", "text": "Remembered text."}],
+            type_key="wiki_source",
+        )
+        chunks = chunk_object(obj)
+        assert chunks
+        assert all("wiki_url" not in c for c in chunks)
+
+    def test_chunk_wiki_url_absent_for_file_ingested_source(self):
+        """AC2: file-ingested source (wiki_file_path, no wiki_url) → key absent."""
+        obj = _make_wiki_obj(
+            properties=[
+                {"key": "wiki_excerpt", "text": "File text."},
+                {"key": "wiki_file_path", "text": "/tmp/notes.md"},
+            ],
+            type_key="wiki_source",
+        )
+        chunks = chunk_object(obj)
+        assert chunks
+        assert all("wiki_url" not in c for c in chunks)
+
+    def test_chunk_wiki_url_absent_for_wiki_entity(self):
+        """AC2: wiki_entity chunks never carry wiki_url."""
+        obj = _make_wiki_obj(
+            properties=[{"key": "wiki_facts", "text": "Facts."}],
+            type_key="wiki_entity",
+        )
+        chunks = chunk_object(obj)
+        assert chunks
+        assert all("wiki_url" not in c for c in chunks)
+
+    @pytest.mark.parametrize(
+        "prop",
+        [
+            {"key": "wiki_url", "format": "url", "url": ""},
+            {"key": "wiki_url", "format": "url"},
+            {"key": "wiki_url", "format": "url", "url": None},
+        ],
+    )
+    def test_chunk_wiki_url_absent_when_value_empty(self, prop):
+        """Edge: empty / missing / null url value → key absent (no empty-string payload)."""
+        obj = _make_wiki_obj(
+            properties=[{"key": "wiki_excerpt", "text": "Text."}, prop],
+            type_key="wiki_source",
+        )
+        chunks = chunk_object(obj)
+        assert chunks
+        assert all("wiki_url" not in c for c in chunks)
+
+    def test_chunk_wiki_url_ignores_non_string_value(self):
+        """Edge: a malformed non-string url value is not stamped."""
+        obj = _make_wiki_obj(
+            properties=[
+                {"key": "wiki_excerpt", "text": "Text."},
+                {"key": "wiki_url", "format": "url", "url": 123},
+            ],
+            type_key="wiki_source",
+        )
+        chunks = chunk_object(obj)
+        assert chunks
+        assert all("wiki_url" not in c for c in chunks)
+
+    def test_chunk_wiki_url_is_credential_scrubbed(self):
+        """D3: a wiki_url with userinfo/query secrets is stored in scrubbed form."""
+        from anytype_llm_wiki.wiki.util import scrub_credentials
+
+        raw = "https://user:secret@host.example/p?token=abc"
+        obj = _make_wiki_obj(
+            properties=[
+                {"key": "wiki_excerpt", "text": "Text."},
+                {"key": "wiki_url", "format": "url", "url": raw},
+            ],
+            type_key="wiki_source",
+        )
+        chunks = chunk_object(obj)
+        assert chunks
+        for c in chunks:
+            assert c.get("wiki_url") == scrub_credentials(raw), (
+                f"wiki_url must equal scrub_credentials(raw); got {c.get('wiki_url')!r}"
+            )
+            assert "secret" not in c["wiki_url"] and "token=abc" not in c["wiki_url"]
+
+    def test_chunk_wiki_url_does_not_disturb_other_keys(self):
+        """AC2: adding wiki_url leaves the six base keys and their values unchanged."""
+        base = _make_wiki_obj(
+            properties=[{"key": "wiki_excerpt", "text": "Same text."}],
+            type_key="wiki_source",
+        )
+        with_url = _make_wiki_obj(
+            properties=[{"key": "wiki_excerpt", "text": "Same text."}, dict(_URL_PROP)],
+            type_key="wiki_source",
+        )
+        a, b = chunk_object(base), chunk_object(with_url)
+        assert len(a) == len(b) and a
+        for ca, cb in zip(a, b):
+            assert {k: v for k, v in cb.items() if k != "wiki_url"} == ca
+            assert "wiki_url" in cb  # red now: the key is not produced

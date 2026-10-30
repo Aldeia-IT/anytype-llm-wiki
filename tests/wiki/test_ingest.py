@@ -4105,3 +4105,81 @@ class TestImportRegressionForLintPy:
     def test_lint_module_imports_cleanly(self):
         """#336 CTO-A2: import anytype_llm_wiki.wiki.lint must succeed post-refactor."""
         import anytype_llm_wiki.wiki.lint  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# Aldeia-IT/aldeia-box#1413 — AC1a: wiki_url written on both _create_source branches
+# ---------------------------------------------------------------------------
+
+
+class _WikiUrlFakeClient:
+    """Records create_object / update_object properties for _create_source."""
+
+    def __init__(self):
+        self.created = []
+        self.updated = []
+
+    def list_properties(self, space_id):
+        return [{"id": "prop-st", "key": "wiki_source_type"}]
+
+    def list_tags(self, space_id, prop_id):
+        return [{"id": "doc-tag-id", "name": "document"}]
+
+    def create_object(self, space_id, type_key, name, properties):
+        self.created.append(properties)
+        return {"id": "new-src-001"}
+
+    def update_object(self, space_id, object_id, data):
+        self.updated.append(data.get("properties", []))
+        return {"id": object_id}
+
+
+def _stub_source_resolution(monkeypatch, action):
+    import anytype_llm_wiki.wiki.ingest as _ingest_mod
+
+    monkeypatch.setattr(
+        _ingest_mod, "_resolve_select_tag",
+        lambda client, space_id, key, name: ("doc-tag-id", False),
+    )
+    target = {"id": "existing-source-001", "type": {"key": "wiki_source"}, "properties": []}
+    monkeypatch.setattr(
+        _ingest_mod, "resolve_entity",
+        lambda *a, **k: {"action": action, "target": target if action == "update" else None},
+    )
+
+
+class TestCreateSourceWritesWikiUrl:
+    """#1413 AC1a: the URL reaches Anytype in the wiki_source's properties."""
+
+    URL = "https://example.org/page"
+
+    def test_create_branch_sends_wiki_url(self, monkeypatch):
+        """AC1a (regression guard: passes on current code): create branch sends wiki_url."""
+        from anytype_llm_wiki.wiki.ingest import _create_source
+
+        _stub_source_resolution(monkeypatch, "create")
+        client = _WikiUrlFakeClient()
+        _create_source(client, FAKE_SPACE_ID, self.URL, "content", {"warnings": []})
+        assert client.created and not client.updated
+        assert {"key": "wiki_url", "url": self.URL} in client.created[0]
+
+    def test_dedup_reuse_branch_sends_wiki_url(self, monkeypatch):
+        """AC1a (regression guard: passes on current code): update_object branch sends wiki_url."""
+        from anytype_llm_wiki.wiki.ingest import _create_source
+
+        _stub_source_resolution(monkeypatch, "update")
+        client = _WikiUrlFakeClient()
+        _create_source(client, FAKE_SPACE_ID, self.URL, "content", {"warnings": []})
+        assert client.updated and not client.created
+        assert {"key": "wiki_url", "url": self.URL} in client.updated[0]
+
+    def test_file_source_sends_no_wiki_url(self, monkeypatch):
+        """AC2 (regression guard): a file source writes wiki_file_path, never wiki_url."""
+        from anytype_llm_wiki.wiki.ingest import _create_source
+
+        _stub_source_resolution(monkeypatch, "create")
+        client = _WikiUrlFakeClient()
+        _create_source(client, FAKE_SPACE_ID, "/tmp/notes.md", "content", {"warnings": []})
+        keys = [p.get("key") for p in client.created[0]]
+        assert "wiki_url" not in keys
+        assert "wiki_file_path" in keys

@@ -388,6 +388,7 @@ class FakeQdrantClientWithSearch:
         self.query_calls = []
         self.query_filter = None
         self.created_indexes = []
+        self.set_payload_calls = []  # #1413: payload-only backfill recorder
         self._mock_results = mock_results or []
 
     def get_collections(self):
@@ -410,6 +411,13 @@ class FakeQdrantClientWithSearch:
 
     def delete(self, collection_name, points_selector):
         self.deleted.append(points_selector)
+
+    def set_payload(self, collection_name, payload, points=None, **kwargs):
+        self.set_payload_calls.append({
+            "collection_name": collection_name,
+            "payload": payload,
+            "points": points,
+        })
 
     def query_points(self, collection_name, query, query_filter=None, limit=10, with_payload=True):
         self.query_filter = query_filter
@@ -1208,18 +1216,352 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
 # ---------------------------------------------------------------------------
 
 
-def test_payload_schema_version_is_3():
-    """#336 §12: PAYLOAD_SCHEMA_VERSION must be exactly 3 in config.py.
+def test_payload_schema_version_is_4():
+    """#1413 AC3 / D1: PAYLOAD_SCHEMA_VERSION is exactly 4 in config.py.
 
-    test_schema_version_3_bump_forces_full_reembed monkeypatches the constant to 3
-    to exercise the mechanic — but that does NOT gate the actual constant in config.py.
-    An implementer who leaves PAYLOAD_SCHEMA_VERSION = 2 would pass the mechanic test
-    but break the payload index compat. This guard fails until the constant is bumped.
-
-    RED now (config has 2). GREEN after impl sets PAYLOAD_SCHEMA_VERSION = 3.
+    Supersedes the #336 guard that pinned 3. The monkeypatched mechanic tests do
+    not gate the real constant; this one does. RED while config still has 3.
     """
     from anytype_llm_wiki import config as _config
-    assert _config.PAYLOAD_SCHEMA_VERSION == 3, (
-        f"PAYLOAD_SCHEMA_VERSION must be 3 after #336 (was 2 pre-impl); "
-        f"got {_config.PAYLOAD_SCHEMA_VERSION}"
+    assert _config.PAYLOAD_SCHEMA_VERSION == 4, (
+        f"PAYLOAD_SCHEMA_VERSION must be 4 after #1413; got {_config.PAYLOAD_SCHEMA_VERSION}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Aldeia-IT/aldeia-box#1413 — wiki_url in payload, search hits and v3->v4 backfill
+# ---------------------------------------------------------------------------
+
+_WIKI_URL = "https://example.org/page"
+_LAST_MOD = "2026-01-01T00:00:00Z"
+_BASE_CHUNK = {
+    "object_id": "o", "space_id": "s", "object_name": "n",
+    "type_key": "wiki_source", "heading": "Excerpt", "text": "t",
+}
+_BASE_HIT_KEYS = {"object_name", "object_id", "type", "heading", "text", "score"}
+
+
+class _FakePoint:
+    def __init__(self, payload, score=0.9):
+        self.payload = payload
+        self.score = score
+
+
+def _source_payload(**extra):
+    payload = {
+        "object_id": "src-1", "space_id": "sp-1", "object_name": "S",
+        "type_key": "wiki_source", "heading": "Excerpt", "text": "Body text.",
+    }
+    payload.update(extra)
+    return payload
+
+
+def _search(monkeypatch, points):
+    import anytype_llm_wiki.indexer as _indexer
+
+    fake = FakeQdrantClientWithSearch(mock_results=points)
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
+    return _indexer.semantic_search_core(query="q", types=["wiki_source"])
+
+
+def test_chunk_to_payload_copies_wiki_url_and_omits_when_absent():
+    """#1413 AC1b/AC2: _chunk_to_payload copies wiki_url; key ABSENT (not null) otherwise."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    present = _indexer._chunk_to_payload({**_BASE_CHUNK, "wiki_url": _WIKI_URL})
+    assert present["wiki_url"] == _WIKI_URL
+    absent = _indexer._chunk_to_payload(dict(_BASE_CHUNK))
+    assert "wiki_url" not in absent
+
+
+def test_wiki_url_flows_from_anytype_object_to_payload():
+    """#1413 AC1b: Anytype GET shape -> chunk_object -> _chunk_to_payload keeps the URL."""
+    import anytype_llm_wiki.indexer as _indexer
+    from anytype_llm_wiki.chunker import chunk_object
+
+    obj = {
+        "id": "src-1", "space_id": "sp-1", "name": "S",
+        "type": {"key": "wiki_source"}, "markdown": "",
+        "properties": [
+            {"key": "wiki_excerpt", "text": "Some text."},
+            {"key": "wiki_url", "format": "url", "url": _WIKI_URL},
+        ],
+    }
+    payloads = [_indexer._chunk_to_payload(c) for c in chunk_object(obj)]
+    assert payloads
+    assert all(p.get("wiki_url") == _WIKI_URL for p in payloads)
+
+
+def test_payload_wiki_url_is_credential_scrubbed():
+    """#1413 D3: a credential-bearing wiki_url reaches the payload in scrubbed form."""
+    import anytype_llm_wiki.indexer as _indexer
+    from anytype_llm_wiki.chunker import chunk_object
+    from anytype_llm_wiki.wiki.util import scrub_credentials
+
+    raw = "https://user:secret@host.example/p?token=abc"
+    obj = {
+        "id": "src-1", "space_id": "sp-1", "name": "S",
+        "type": {"key": "wiki_source"}, "markdown": "",
+        "properties": [
+            {"key": "wiki_excerpt", "text": "Some text."},
+            {"key": "wiki_url", "format": "url", "url": raw},
+        ],
+    }
+    payloads = [_indexer._chunk_to_payload(c) for c in chunk_object(obj)]
+    assert payloads
+    for p in payloads:
+        assert p.get("wiki_url") == scrub_credentials(raw)
+
+
+def test_semantic_search_core_returns_wiki_url_for_url_source(monkeypatch):
+    """#1413 AC1b: a hit whose payload carries wiki_url returns it, equal to the URL."""
+    hits = _search(monkeypatch, [_FakePoint(_source_payload(wiki_url=_WIKI_URL))])
+    assert len(hits) == 1
+    assert hits[0].get("wiki_url") == _WIKI_URL
+
+
+def test_semantic_search_core_omits_wiki_url_when_payload_lacks_it(monkeypatch):
+    """#1413 AC2: no wiki_url in payload -> NO wiki_url key; the six base keys are unchanged."""
+    hits = _search(monkeypatch, [_FakePoint(_source_payload())])
+    assert len(hits) == 1
+    assert "wiki_url" not in hits[0]
+    assert set(hits[0]) == _BASE_HIT_KEYS
+    assert hits[0]["object_name"] == "S"
+    assert hits[0]["object_id"] == "src-1"
+    assert hits[0]["type"] == "wiki_source"
+    assert hits[0]["heading"] == "Excerpt"
+    assert hits[0]["text"] == "Body text."
+    assert hits[0]["score"] == 0.9
+
+
+def test_semantic_search_core_wiki_entity_hit_has_no_wiki_url(monkeypatch):
+    """#1413 AC2: a wiki_entity hit carries no wiki_url and exactly the six base keys."""
+    payload = _source_payload(type_key="wiki_entity", heading="Facts")
+    hits = _search(monkeypatch, [_FakePoint(payload)])
+    assert set(hits[0]) == _BASE_HIT_KEYS
+    assert hits[0]["type"] == "wiki_entity"
+
+
+def test_semantic_search_core_file_ingested_source_has_no_wiki_url(monkeypatch):
+    """#1413 AC2: a file-ingested source hit (wiki_file_path only) has no wiki_url key."""
+    payload = _source_payload(wiki_file_path="/tmp/notes.md")
+    hits = _search(monkeypatch, [_FakePoint(payload)])
+    assert set(hits[0]) == _BASE_HIT_KEYS
+
+
+@pytest.mark.parametrize("empty", [None, ""])
+def test_semantic_search_core_drops_empty_wiki_url(monkeypatch, empty):
+    """Edge: a null / empty wiki_url in the payload yields no key rather than a null."""
+    hits = _search(monkeypatch, [_FakePoint(_source_payload(wiki_url=empty))])
+    assert "wiki_url" not in hits[0]
+
+
+def test_semantic_search_core_mixed_hits_each_decide_on_their_own_payload(monkeypatch):
+    """#1413 D2: one builder for every hit; wiki_url appears per hit, never leaks across."""
+    points = [
+        _FakePoint(_source_payload(object_id="a", wiki_url=_WIKI_URL), 0.9),
+        _FakePoint(_source_payload(object_id="b"), 0.8),
+        _FakePoint(_source_payload(object_id="c", wiki_url="https://example.org/other"), 0.7),
+    ]
+    hits = _search(monkeypatch, points)
+    assert [h.get("wiki_url") for h in hits] == [
+        _WIKI_URL, None, "https://example.org/other",
+    ]
+    assert "wiki_url" not in hits[1]
+
+
+def test_semantic_search_core_hits_never_expose_source_type_or_domain_tags(monkeypatch):
+    """#1413 D5: source_type / domain_tags stay out of hits (non-goal)."""
+    payload = _source_payload(
+        wiki_url=_WIKI_URL, source_type="document", domain_tags=["ai"],
+    )
+    hits = _search(monkeypatch, [_FakePoint(payload)])
+    assert hits[0].get("wiki_url") == _WIKI_URL  # red now: proves the hit was read
+    assert "source_type" not in hits[0]
+    assert "domain_tags" not in hits[0]
+
+
+# --- v3 -> v4 payload-only backfill (AC3 / D1) ------------------------------
+
+
+def _backfill_env(monkeypatch, tmp_path, *, stored, objects, code_version=4):
+    """Wire reindex() against fakes. ``objects`` is {oid: full object dict}."""
+    import anytype_llm_wiki.indexer as _indexer
+
+    state = {"sp-1": {oid: _LAST_MOD for oid in objects}}
+    if stored is not None:
+        state["_payload_schema_version"] = stored
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr(config, "INDEX_STATE_FILE", state_file)
+    monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", code_version)
+
+    fake = FakeQdrantClientWithSearch()
+    embed_calls: list = []
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
+    monkeypatch.setattr(_indexer, "list_spaces", lambda: [{"id": "sp-1"}])
+    monkeypatch.setattr(
+        _indexer, "list_objects",
+        lambda sid: [
+            {
+                "id": oid,
+                "type": obj["type"],
+                "properties": [{"key": "last_modified_date", "date": _LAST_MOD}],
+            }
+            for oid, obj in objects.items()
+        ],
+    )
+    monkeypatch.setattr(_indexer, "get_object", lambda sid, oid: objects[oid])
+
+    def _embed(texts):
+        embed_calls.append(list(texts))
+        return [[0.1] * config.EMBED_DIMS for _ in texts]
+
+    monkeypatch.setattr(_indexer, "embed", _embed)
+    return _indexer, fake, embed_calls, state_file
+
+
+def _source_obj(oid="src-1", url=_WIKI_URL):
+    props = [
+        {"key": "wiki_excerpt", "text": "Some text."},
+        {"key": "last_modified_date", "date": _LAST_MOD},
+    ]
+    if url is not None:
+        props.append({"key": "wiki_url", "format": "url", "url": url})
+    return {
+        "id": oid, "space_id": "sp-1", "name": "S", "type": {"key": "wiki_source"},
+        "markdown": "", "properties": props,
+    }
+
+
+def _entity_obj(oid="ent-1"):
+    return {
+        "id": oid, "space_id": "sp-1", "name": "E", "type": {"key": "wiki_entity"},
+        "markdown": "# H\nbody",
+        "properties": [{"key": "last_modified_date", "date": _LAST_MOD}],
+    }
+
+
+def _object_id_of(points_selector):
+    """Return the object_id matched by a Filter(must=[FieldCondition(object_id)])."""
+    from qdrant_client.models import FieldCondition, Filter
+
+    assert isinstance(points_selector, Filter), f"expected a Filter, got {points_selector!r}"
+    conds = [c for c in points_selector.must if isinstance(c, FieldCondition)]
+    assert [c.key for c in conds] == ["object_id"], f"expected one object_id condition: {conds}"
+    return conds[0].match.value
+
+
+def test_backfill_v3_to_v4_sets_wiki_url_payload_without_reembed(monkeypatch, tmp_path):
+    """#1413 AC3/D1: stored 3, code 4: unchanged URL source gets set_payload by object_id;
+    no embed, no upsert, no delete."""
+    _indexer, fake, embeds, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects={"src-1": _source_obj()}
+    )
+    _indexer.reindex()
+    assert len(fake.set_payload_calls) == 1, f"calls: {fake.set_payload_calls}"
+    call = fake.set_payload_calls[0]
+    assert call["payload"] == {"wiki_url": _WIKI_URL}
+    assert call["collection_name"] == config.QDRANT_COLLECTION
+    assert _object_id_of(call["points"]) == "src-1"
+    assert embeds == []
+    assert fake.upserted_points == []
+    assert fake.deleted == []
+
+
+def test_backfill_v3_to_v4_stamps_marker_on_unscoped_run(monkeypatch, tmp_path):
+    """#1413 AC3: after an unscoped backfill the marker is stamped to 4."""
+    _indexer, fake, _, state_file = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects={"src-1": _source_obj()}
+    )
+    _indexer.reindex()
+    assert len(fake.set_payload_calls) == 1
+    assert json.loads(state_file.read_text())["_payload_schema_version"] == 4
+
+
+def test_backfill_v3_to_v4_scoped_run_does_not_stamp_marker(monkeypatch, tmp_path):
+    """#1413 AC3: reindex(space_id=...) backfills its space but leaves the marker at 3."""
+    _indexer, fake, embeds, state_file = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects={"src-1": _source_obj()}
+    )
+    _indexer.reindex(space_id="sp-1")
+    assert len(fake.set_payload_calls) == 1
+    assert embeds == []
+    assert json.loads(state_file.read_text())["_payload_schema_version"] == 3
+
+
+def test_backfill_v3_to_v4_skips_non_source_objects(monkeypatch, tmp_path):
+    """#1413 AC3: an unchanged non-source object gets no set_payload and no re-embed."""
+    _indexer, fake, embeds, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects={"ent-1": _entity_obj()}
+    )
+    _indexer.reindex()
+    assert fake.set_payload_calls == []
+    assert embeds == []
+    assert fake.upserted_points == []
+
+
+def test_backfill_v3_to_v4_skips_source_without_wiki_url(monkeypatch, tmp_path):
+    """Edge: an unchanged wiki_source with no wiki_url (remember/file shape) has nothing to backfill."""
+    _indexer, fake, embeds, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects={"src-1": _source_obj(url=None)}
+    )
+    _indexer.reindex()
+    assert fake.set_payload_calls == []
+    assert embeds == []
+    assert fake.upserted_points == []
+
+
+def test_backfill_v3_to_v4_mixed_corpus_touches_only_url_sources(monkeypatch, tmp_path):
+    """Edge: entity + URL source + URL-less source: one set_payload, for the URL source only."""
+    objects = {
+        "ent-1": _entity_obj(),
+        "src-1": _source_obj("src-1"),
+        "src-2": _source_obj("src-2", url=None),
+    }
+    _indexer, fake, embeds, _ = _backfill_env(monkeypatch, tmp_path, stored=3, objects=objects)
+    _indexer.reindex()
+    assert [_object_id_of(c["points"]) for c in fake.set_payload_calls] == ["src-1"]
+    assert embeds == []
+
+
+def test_backfill_v3_to_v4_payload_is_credential_scrubbed(monkeypatch, tmp_path):
+    """#1413 D3: the backfilled wiki_url is the scrub_credentials form."""
+    from anytype_llm_wiki.wiki.util import scrub_credentials
+
+    raw = "https://user:secret@host.example/p?token=abc"
+    _indexer, fake, _, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects={"src-1": _source_obj(url=raw)}
+    )
+    _indexer.reindex()
+    assert [c["payload"] for c in fake.set_payload_calls] == [
+        {"wiki_url": scrub_credentials(raw)}
+    ]
+
+
+@pytest.mark.parametrize("stored", [None, 1, 2])
+def test_stored_v2_or_lower_still_does_full_reembed(monkeypatch, tmp_path, stored):
+    """#1413 D1: stored <= 2 (or missing) -> full re-embed of every object; marker -> 4."""
+    _indexer, fake, embeds, state_file = _backfill_env(
+        monkeypatch, tmp_path, stored=stored,
+        objects={"src-1": _source_obj(), "ent-1": _entity_obj()},
+    )
+    stats = _indexer.reindex()
+    assert stats["objects_indexed"] == 2
+    assert len(embeds) == 2
+    assert fake.upserted_points
+    assert json.loads(state_file.read_text())["_payload_schema_version"] == 4
+
+
+def test_stored_v4_keeps_incremental_skip_and_no_set_payload(monkeypatch, tmp_path):
+    """#1413 AC3: stored == code (4) -> unchanged objects skipped, no backfill, no embed."""
+    _indexer, fake, embeds, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=4,
+        objects={"src-1": _source_obj(), "ent-1": _entity_obj()},
+    )
+    stats = _indexer.reindex()
+    assert stats["objects_indexed"] == 0
+    assert fake.set_payload_calls == []
+    assert embeds == []
