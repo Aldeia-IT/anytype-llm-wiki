@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`semantic_search` hits carry `wiki_url` (Aldeia-IT/aldeia-box#1413).** A hit from a
+  `wiki_source` ingested from a URL now includes `wiki_url`, the source URL with credentials
+  scrubbed; every other hit is unchanged (the key is absent, and `source_type`/`domain_tags`
+  stay filters only). The chunk payload stores `wiki_url`, and the payload schema is bumped
+  to **v4**. An existing v3 index gains the field on the next unscoped reindex through a
+  payload-only backfill (`set_payload` by `object_id`, no re-embed), reported as
+  `payload_backfilled` in the reindex stats; see MIGRATIONS.md. Also fixed: the
+  `wiki_lint` duplicate sweep passed its result limit positionally, so `5` landed on
+  `ingested_after`; it now passes `limit=5`.
 - **Concept contradictions surfaced in `wiki_lint` (#426).** `wiki_lint` now flags
   `wiki_concept` contradictions (severity `critical`) exactly as it already flags
   `wiki_entity` ones; the finding is resolved by setting `wiki_last_reviewed` on the
