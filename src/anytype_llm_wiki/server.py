@@ -63,6 +63,8 @@ def semantic_search(
 
     Returns:
         List of matching chunks with object name, type, heading, text snippet, and score.
+        Hits from sources ingested from a URL also carry ``wiki_url`` (the source URL,
+        credentials scrubbed); the key is absent on every other hit.
     """
     from pydantic import ValidationError as _PydanticValidationError
     from qdrant_client.models import DatetimeRange as _DatetimeRange

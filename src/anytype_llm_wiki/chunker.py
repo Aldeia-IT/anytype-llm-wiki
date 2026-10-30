@@ -2,7 +2,7 @@
 
 import re
 
-from .wiki.util import strip_control_chars
+from .wiki.util import scrub_credentials, strip_control_chars
 
 
 MAX_CHUNK_CHARS = 1500  # ~375 tokens, well within bge-m3's 8192 token limit
@@ -24,10 +24,67 @@ WIKI_PROPERTY_HEADING = {
 }
 
 
+def extract_payload_metadata(obj: dict) -> dict:
+    """Extract the optional per-object payload metadata from an Anytype object.
+
+    One property parser shared by ``chunk_object`` (stamps the result on every
+    chunk) and the ``indexer`` payload-only backfill (Aldeia-IT/aldeia-box#1413).
+
+    Args:
+        obj: Anytype object as returned by GET (``properties`` list of dicts).
+
+    Returns:
+        A dict holding only the keys that are present and non-empty:
+        ``last_modified_date`` (str, the ``date`` of that property),
+        ``source_type`` (the ``wiki_source_type`` select name),
+        ``domain_tags`` (list of ``wiki_domain_tags`` multi_select names) and
+        ``wiki_url`` (the ``wiki_url`` url property, credential-scrubbed with
+        ``scrub_credentials``; non-string or empty values are dropped).
+        Malformed properties are skipped, never raised on.
+    """
+    metadata: dict = {}
+    seen_date = False
+    for prop in obj.get("properties", []) or []:
+        if not isinstance(prop, dict):
+            continue
+        k = prop.get("key")
+        if k == "last_modified_date":
+            # Same read shape as indexer._get_last_modified; the first one
+            # wins, and a None date stamps nothing.
+            if not seen_date:
+                seen_date = True
+                if prop.get("date") is not None:
+                    metadata["last_modified_date"] = prop.get("date")
+        elif k == "wiki_source_type":
+            # select/multi_select hydrate with `name` inline on the GET
+            # response — no id->name resolution at read time (#336).
+            sel = prop.get("select")
+            if isinstance(sel, dict) and sel.get("name") is not None:
+                metadata["source_type"] = sel.get("name")
+        elif k == "wiki_domain_tags":
+            multi = prop.get("multi_select")
+            if isinstance(multi, list):
+                tags = [
+                    t["name"] for t in multi
+                    if isinstance(t, dict) and t.get("name")
+                ]
+                if tags:
+                    metadata["domain_tags"] = tags
+                else:
+                    metadata.pop("domain_tags", None)
+        elif k == "wiki_url":
+            url = prop.get("url")
+            if isinstance(url, str) and url.strip():
+                metadata["wiki_url"] = scrub_credentials(url.strip())
+    return metadata
+
+
 def chunk_object(obj: dict) -> list[dict]:
     """Split an Anytype object into chunks with metadata.
 
-    Each chunk gets: object_id, space_id, object_name, type_key, heading, text.
+    Each chunk gets: object_id, space_id, object_name, type_key, heading, text,
+    plus the optional keys from ``extract_payload_metadata`` (last_modified_date,
+    source_type, domain_tags, wiki_url) when the object carries them.
 
     When a markdown body is present it is the sole source of chunks. When the
     body is empty/absent, allowlisted wiki text properties are embedded instead
@@ -38,36 +95,6 @@ def chunk_object(obj: dict) -> list[dict]:
     object_name = obj.get("name", "")
     type_key = obj.get("type", {}).get("key", "unknown")
 
-    # Extract the optional date payload field (same read shape as
-    # indexer._get_last_modified). Injected into every chunk below; omitted from
-    # the chunk dict entirely when the property is absent.
-    last_modified_date = None
-    for prop in obj.get("properties", []):
-        if isinstance(prop, dict) and prop.get("key") == "last_modified_date":
-            last_modified_date = prop.get("date")
-            break
-
-    # Extract source_type (wiki_source_type select) and domain_tags
-    # (wiki_domain_tags multi_select). Both hydrate with `name` inline on the
-    # GET response — no id->name resolution at read time (prereq-verification).
-    source_type: str | None = None
-    domain_tags: list[str] = []
-    for prop in obj.get("properties", []):
-        if not isinstance(prop, dict):
-            continue
-        k = prop.get("key")
-        if k == "wiki_source_type":
-            sel = prop.get("select")
-            if isinstance(sel, dict):
-                source_type = sel.get("name")
-        elif k == "wiki_domain_tags":
-            multi = prop.get("multi_select")
-            if isinstance(multi, list):
-                domain_tags = [
-                    t["name"] for t in multi
-                    if isinstance(t, dict) and t.get("name")
-                ]
-
     markdown = obj.get("markdown", "") or ""
     chunks = (
         _chunk_body(markdown, object_id, space_id, object_name, type_key)
@@ -75,15 +102,11 @@ def chunk_object(obj: dict) -> list[dict]:
         else _chunk_properties(obj, object_id, space_id, object_name, type_key)
     )
 
-    if last_modified_date is not None:
-        for chunk in chunks:
-            chunk["last_modified_date"] = last_modified_date
-    if source_type is not None:
-        for chunk in chunks:
-            chunk["source_type"] = source_type
-    if domain_tags:
-        for chunk in chunks:
-            chunk["domain_tags"] = domain_tags
+    # Optional payload metadata (date, source_type, domain_tags, wiki_url):
+    # stamped on every chunk, each key omitted entirely when absent.
+    metadata = extract_payload_metadata(obj)
+    for chunk in chunks:
+        chunk.update(metadata)
 
     return chunks
 
