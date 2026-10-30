@@ -2,7 +2,7 @@
 
 import re
 
-from .wiki.util import scrub_credentials, strip_control_chars
+from .wiki.util import scrub_url_secrets, strip_control_chars
 
 
 MAX_CHUNK_CHARS = 1500  # ~375 tokens, well within bge-m3's 8192 token limit
@@ -38,8 +38,10 @@ def extract_payload_metadata(obj: dict) -> dict:
         ``last_modified_date`` (str, the ``date`` of that property),
         ``source_type`` (the ``wiki_source_type`` select name),
         ``domain_tags`` (list of ``wiki_domain_tags`` multi_select names) and
-        ``wiki_url`` (the ``wiki_url`` url property, credential-scrubbed with
-        ``scrub_credentials``; non-string or empty values are dropped).
+        ``wiki_url`` (the ``wiki_url`` url property, passed through
+        ``scrub_url_secrets``: userinfo and secret-looking query parameters
+        removed, the rest of the link kept; non-string or empty values are
+        dropped).
         Malformed properties are skipped, never raised on.
     """
     metadata: dict = {}
@@ -75,7 +77,7 @@ def extract_payload_metadata(obj: dict) -> dict:
         elif k == "wiki_url":
             url = prop.get("url")
             if isinstance(url, str) and url.strip():
-                metadata["wiki_url"] = scrub_credentials(url.strip())
+                metadata["wiki_url"] = scrub_url_secrets(url.strip())
     return metadata
 
 

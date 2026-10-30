@@ -31,7 +31,7 @@ from .. import indexer
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .query import _parse_relation_elements, _fetch_cached
 from .remember import _resolve_select_tag
-from .util import normalize_title, scrub_credentials, strip_control_chars
+from .util import normalize_title, object_type_key, scrub_credentials, strip_control_chars
 from ..anytype_client import AnytypeReadClient
 from .wiki_client import WikiClient
 
@@ -82,11 +82,8 @@ _NEEDS_REVIEW = "needs-review"
 # ---------------------------------------------------------------------------
 
 
-def _type_of(obj: dict) -> str:
-    t = obj.get("type")
-    if isinstance(t, dict):
-        return t.get("key", "")
-    return t or ""
+# Shared with indexer._backfill_wiki_url (Aldeia-IT/aldeia-box#1413).
+_type_of = object_type_key
 
 
 # Generic/stopword tokens that, as the *sole* distinctive content of a shorter

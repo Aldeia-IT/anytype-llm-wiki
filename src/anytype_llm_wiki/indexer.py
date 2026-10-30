@@ -8,13 +8,22 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+import httpx
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from . import config
 from .anytype_client import get_object, list_objects, list_spaces
 from .chunker import chunk_object, extract_payload_metadata
 from .embedder import embed, embed_query
+from .wiki.util import object_type_key
 
 # The newest payload-schema version whose migration needed a full re-embed
 # (v3: source_type/domain_tags). Later versions add payload-only fields that
@@ -137,17 +146,11 @@ def semantic_search_core(
 
     Returns a list of result dicts built by ``build_search_hit``: object_name,
     object_id, type, heading, text, score, plus ``wiki_url`` only on hits from
-    sources ingested from a URL (absent otherwise). The Qdrant client is built via the module-level ``_qdrant()`` factory
-    and the collection name is read from ``config.QDRANT_COLLECTION`` so tests can
-    monkeypatch both.
+    sources ingested from a URL (absent otherwise). The Qdrant client is built
+    via the module-level ``_qdrant()`` factory and the collection name is read
+    from ``config.QDRANT_COLLECTION`` so tests can monkeypatch both.
     """
-    from qdrant_client.models import (
-        DatetimeRange,
-        FieldCondition,
-        Filter,
-        MatchAny,
-        MatchValue,
-    )
+    from qdrant_client.models import DatetimeRange, MatchAny
 
     vector = embed_query(query)
     client = _qdrant()
@@ -281,6 +284,8 @@ def reindex(space_id: str | None = None) -> dict:
                 "objects_indexed": 0,
                 "objects_removed": 0,
                 "chunks": 0,
+                "payload_backfilled": 0,
+                "payload_backfill_errors": 0,
                 "skipped": True,
                 "reason": "reindex_in_progress",
             }
@@ -314,6 +319,7 @@ def _run_reindex(space_id: str | None = None) -> dict:
     stats = {
         "spaces": 0, "objects_checked": 0, "objects_indexed": 0,
         "objects_removed": 0, "chunks": 0, "payload_backfilled": 0,
+        "payload_backfill_errors": 0,
     }
 
     for space in spaces:
@@ -331,8 +337,15 @@ def _run_reindex(space_id: str | None = None) -> dict:
             last_mod = _get_last_modified(obj_summary) or "unknown"
             if not force_full and space_state.get(oid) == last_mod:
                 # unchanged
-                if backfill_wiki_url and _backfill_wiki_url(client, sid, obj_summary):
-                    stats["payload_backfilled"] += 1
+                if backfill_wiki_url:
+                    try:
+                        if _backfill_wiki_url(client, sid, obj_summary):
+                            stats["payload_backfilled"] += 1
+                    except (httpx.HTTPError, LookupError):
+                        # One failed fetch (object deleted since the list, a
+                        # transient 5xx) must not abort the reindex. Count it;
+                        # the marker stays unstamped so the next run retries.
+                        stats["payload_backfill_errors"] += 1
                 continue
 
             # Fetch full object with markdown
@@ -383,7 +396,9 @@ def _run_reindex(space_id: str | None = None) -> dict:
     # scoped run would backfill only that one space then permanently strand
     # every other space on the old payload (force_full would never trigger
     # for them again). A scoped reindex still backfills its named space.
-    if space_id is None:
+    # A run whose wiki_url backfill hit fetch errors leaves the marker too, so
+    # the next unscoped run retries the backfill.
+    if space_id is None and stats["payload_backfill_errors"] == 0:
         state["_payload_schema_version"] = config.PAYLOAD_SCHEMA_VERSION
     _save_state(state)
     return stats
@@ -392,10 +407,10 @@ def _run_reindex(space_id: str | None = None) -> dict:
 def _backfill_wiki_url(client: QdrantClient, space_id: str, obj_summary: dict) -> bool:
     """Set ``wiki_url`` on an unchanged wiki_source's points, payload only (v3 -> v4).
 
-    Only ``wiki_source`` objects are fetched: the list summary's ``type.key``
-    decides when present; otherwise the full object is fetched and its type
-    checked. The url is read with the chunker's ``extract_payload_metadata``
-    (credential-scrubbed), and written with ``set_payload`` filtered on
+    Only ``wiki_source`` objects are fetched: the list summary's type (a
+    ``type.key`` dict or a plain string) decides when present; otherwise the
+    full object is fetched and its type checked. The url is read with the
+    chunker's ``extract_payload_metadata`` (``scrub_url_secrets``), and written with ``set_payload`` filtered on
     ``object_id``: no embed, upsert or delete, and the index state is untouched.
 
     Args:
@@ -407,13 +422,11 @@ def _backfill_wiki_url(client: QdrantClient, space_id: str, obj_summary: dict) -
         True when a payload was set, False when the object is not a wiki_source
         or carries no ``wiki_url``.
     """
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
-
-    summary_type = (obj_summary.get("type") or {}).get("key")
-    if summary_type is not None and summary_type != _WIKI_SOURCE_TYPE:
+    summary_type = object_type_key(obj_summary)
+    if summary_type and summary_type != _WIKI_SOURCE_TYPE:
         return False
     obj = get_object(space_id, obj_summary["id"])
-    if (obj.get("type") or {}).get("key") != _WIKI_SOURCE_TYPE:
+    if object_type_key(obj) != _WIKI_SOURCE_TYPE:
         return False
     wiki_url = extract_payload_metadata(obj).get("wiki_url")
     if not wiki_url:
@@ -421,9 +434,7 @@ def _backfill_wiki_url(client: QdrantClient, space_id: str, obj_summary: dict) -
     client.set_payload(
         collection_name=config.QDRANT_COLLECTION,
         payload={"wiki_url": wiki_url},
-        points=Filter(
-            must=[FieldCondition(key="object_id", match=MatchValue(value=obj_summary["id"]))]
-        ),
+        points=_object_id_filter(obj_summary["id"]),
     )
     return True
 
@@ -464,13 +475,21 @@ def reembed_object(space_id: str, object_id: str, obj: dict) -> dict:
     return {"object_id": object_id, "chunks": len(points)}
 
 
+def _object_id_filter(object_id: str) -> Filter:
+    """Return the Qdrant filter that selects every point of one object.
+
+    Args:
+        object_id: the Anytype object id stored in the ``object_id`` payload.
+
+    Returns:
+        ``Filter(must=[FieldCondition(object_id == object_id)])``.
+    """
+    return Filter(must=[FieldCondition(key="object_id", match=MatchValue(value=object_id))])
+
+
 def _delete_object_vectors(client: QdrantClient, object_id: str) -> None:
     """Delete all vectors belonging to an object."""
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
-
     client.delete(
         collection_name=config.QDRANT_COLLECTION,
-        points_selector=Filter(
-            must=[FieldCondition(key="object_id", match=MatchValue(value=object_id))]
-        ),
+        points_selector=_object_id_filter(object_id),
     )

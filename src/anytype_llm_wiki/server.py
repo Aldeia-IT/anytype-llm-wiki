@@ -64,7 +64,8 @@ def semantic_search(
     Returns:
         List of matching chunks with object name, type, heading, text snippet, and score.
         Hits from sources ingested from a URL also carry ``wiki_url`` (the source URL,
-        credentials scrubbed); the key is absent on every other hit.
+        without userinfo or secret-looking query parameters); the key is absent on every
+        other hit.
     """
     from pydantic import ValidationError as _PydanticValidationError
     from qdrant_client.models import DatetimeRange as _DatetimeRange
@@ -116,7 +117,9 @@ def reindex_anytype(space_id: str | None = None) -> dict:
         space_id: Optional space ID to reindex. If omitted, reindexes all spaces.
 
     Returns:
-        Stats: spaces checked, objects indexed, chunks created, objects removed.
+        Stats: spaces checked, objects indexed, chunks created, objects removed,
+        plus ``payload_backfilled`` / ``payload_backfill_errors`` (the one-off
+        wiki_url payload backfill of a schema v3 index).
     """
     return reindex(space_id=space_id)
 
