@@ -149,7 +149,10 @@ tool without `space_id`, or let the scheduled reindex run.
 From a stored v3 index, that run backfills `wiki_url` **payload-only**: each unchanged
 `wiki_source` that has a `wiki_url` gets a `set_payload` on its points (filtered by
 `object_id`), with no embedding, upsert or delete. The count is reported as
-`payload_backfilled`. The marker is stamped only by an unscoped run; the scoped
+`payload_backfilled`. An object whose fetch fails (deleted since the listing, a transient
+HTTP error) is counted in `payload_backfill_errors` and skipped; such a run does not stamp
+the marker, so the next unscoped run retries. The stored `wiki_url` has its userinfo and
+secret-looking query parameters removed; the rest of the link is kept. The marker is stamped only by an unscoped run; the scoped
 auto-reindex after `wiki_ingest`/`wiki_remember` repeats the cheap backfill for its
 space until then. An index still at v2 or lower gets the full re-embed as before, which
 writes `wiki_url` too.

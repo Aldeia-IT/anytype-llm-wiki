@@ -685,11 +685,17 @@ class TestChunkCarriesWikiUrl:
         assert chunks
         assert all("wiki_url" not in c for c in chunks)
 
-    def test_chunk_wiki_url_is_credential_scrubbed(self):
-        """D3: a wiki_url with userinfo/query secrets is stored in scrubbed form."""
-        from anytype_llm_wiki.wiki.util import scrub_credentials
-
-        raw = "https://user:secret@host.example/p?token=abc"
+    @pytest.mark.parametrize("raw, expected", [
+        ("https://www.youtube.com/watch?v=abc123", "https://www.youtube.com/watch?v=abc123"),
+        (
+            "https://pt.wikipedia.org/wiki/Mestre_Bimba#Vida",
+            "https://pt.wikipedia.org/wiki/Mestre_Bimba#Vida",
+        ),
+        ("https://u:p@h.org/x?token=abc&id=3", "https://h.org/x?id=3"),
+        ("https://h.org/s?API_KEY=zz9&q=x", "https://h.org/s?q=x"),
+    ])
+    def test_chunk_wiki_url_is_secret_scrubbed(self, raw, expected):
+        """D3 (revised): userinfo and secret query params are removed; the link still opens."""
         obj = _make_wiki_obj(
             properties=[
                 {"key": "wiki_excerpt", "text": "Text."},
@@ -699,11 +705,7 @@ class TestChunkCarriesWikiUrl:
         )
         chunks = chunk_object(obj)
         assert chunks
-        for c in chunks:
-            assert c.get("wiki_url") == scrub_credentials(raw), (
-                f"wiki_url must equal scrub_credentials(raw); got {c.get('wiki_url')!r}"
-            )
-            assert "secret" not in c["wiki_url"] and "token=abc" not in c["wiki_url"]
+        assert [c.get("wiki_url") for c in chunks] == [expected] * len(chunks)
 
     def test_chunk_wiki_url_does_not_disturb_other_keys(self):
         """AC2: adding wiki_url leaves the six base keys and their values unchanged."""
@@ -719,4 +721,4 @@ class TestChunkCarriesWikiUrl:
         assert len(a) == len(b) and a
         for ca, cb in zip(a, b):
             assert {k: v for k, v in cb.items() if k != "wiki_url"} == ca
-            assert "wiki_url" in cb  # red now: the key is not produced
+            assert "wiki_url" in cb

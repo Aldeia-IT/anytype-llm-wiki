@@ -5,40 +5,18 @@ check_services fixture skips every test when live services are unreachable.
 All collaborators here are faked; nothing talks to Qdrant or Ollama.
 """
 
+import pytest
+
 from anytype_llm_wiki import config
-
-
-class _FakePoint:
-    def __init__(self, payload, score=0.9):
-        self.payload = payload
-        self.score = score
-
-
-class _FakeQdrant:
-    def __init__(self, points):
-        self._points = points
-
-    def query_points(self, collection_name, query, query_filter=None, limit=10, with_payload=True):
-        class _Result:
-            pass
-
-        _Result.points = self._points
-        return _Result()
-
-
-def _payload(**extra):
-    payload = {
-        "object_id": "src-1", "space_id": "sp-1", "object_name": "S",
-        "type_key": "wiki_source", "heading": "Excerpt", "text": "Body text.",
-    }
-    payload.update(extra)
-    return payload
+from tests.test_indexer import FakeQdrantClientWithSearch, _FakePoint
+from tests.test_indexer import _source_payload as _payload
 
 
 def _patch_backend(monkeypatch, points):
     import anytype_llm_wiki.indexer as _indexer
 
-    monkeypatch.setattr(_indexer, "_qdrant", lambda: _FakeQdrant(points))
+    fake = FakeQdrantClientWithSearch(mock_results=points)
+    monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
     monkeypatch.setattr(_indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
 
 
@@ -72,6 +50,36 @@ def test_server_semantic_search_hits_do_not_expose_source_type(monkeypatch):
     from anytype_llm_wiki.server import semantic_search
 
     hit = semantic_search(query="q", types=["wiki_source"])[0]
-    assert hit.get("wiki_url") == "https://example.org/page"  # red now: proves the hit was read
+    assert hit.get("wiki_url") == "https://example.org/page"
     assert "source_type" not in hit
     assert "domain_tags" not in hit
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.youtube.com/watch?v=abc123",
+    "https://pt.wikipedia.org/wiki/Mestre_Bimba#Vida",
+])
+def test_server_semantic_search_wiki_url_keeps_query_and_fragment(monkeypatch, url):
+    """#1413 D3 (revised), end to end: Anytype object -> chunk -> payload -> hit keeps the
+    link openable (query parameter and fragment survive unchanged)."""
+    import anytype_llm_wiki.indexer as _indexer
+    from anytype_llm_wiki.chunker import chunk_object
+    from anytype_llm_wiki.server import semantic_search
+
+    obj = {
+        "id": "src-1", "space_id": "sp-1", "name": "S",
+        "type": {"key": "wiki_source"}, "markdown": "",
+        "properties": [
+            {"key": "wiki_excerpt", "text": "Some text."},
+            {"key": "wiki_url", "format": "url", "url": url},
+        ],
+    }
+    chunks = chunk_object(obj)
+    assert [c.get("wiki_url") for c in chunks] == [url] * len(chunks)
+    payloads = [_indexer._chunk_to_payload(c) for c in chunks]
+    assert [p.get("wiki_url") for p in payloads] == [url] * len(payloads)
+    _patch_backend(monkeypatch, [_FakePoint(p) for p in payloads])
+
+    hits = semantic_search(query="q", types=["wiki_source"])
+    assert hits
+    assert [h.get("wiki_url") for h in hits] == [url] * len(hits)

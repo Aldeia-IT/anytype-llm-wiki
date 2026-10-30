@@ -31,6 +31,7 @@ New tests added for v1 (issue #323) — type+date metadata filter:
 """
 
 import json
+import httpx
 import pytest
 
 from anytype_llm_wiki.indexer import reindex, _load_state, _save_state, _ensure_collection, _qdrant
@@ -862,6 +863,9 @@ class TestReindexLock:
         assert stats.get("skipped") is True, f"expected skip while lock held; got {stats}"
         assert stats.get("reason") == "reindex_in_progress"
         assert stats["objects_indexed"] == 0
+        # #1413 CR5: same stats shape as a normal run.
+        assert stats["payload_backfilled"] == 0
+        assert stats["payload_backfill_errors"] == 0
 
     def test_reindex_runs_when_lock_free(self, tmp_path, monkeypatch):
         """With a free lock, reindex() acquires it and runs normally (no skip flag)."""
@@ -1293,13 +1297,12 @@ def test_wiki_url_flows_from_anytype_object_to_payload():
     assert all(p.get("wiki_url") == _WIKI_URL for p in payloads)
 
 
-def test_payload_wiki_url_is_credential_scrubbed():
-    """#1413 D3: a credential-bearing wiki_url reaches the payload in scrubbed form."""
+def test_payload_wiki_url_is_secret_scrubbed():
+    """#1413 D3 (revised): userinfo and secret params leave the payload; the rest stays."""
     import anytype_llm_wiki.indexer as _indexer
     from anytype_llm_wiki.chunker import chunk_object
-    from anytype_llm_wiki.wiki.util import scrub_credentials
 
-    raw = "https://user:secret@host.example/p?token=abc"
+    raw = "https://user:secret@host.example/p?token=abc&id=3#part"
     obj = {
         "id": "src-1", "space_id": "sp-1", "name": "S",
         "type": {"key": "wiki_source"}, "markdown": "",
@@ -1311,7 +1314,7 @@ def test_payload_wiki_url_is_credential_scrubbed():
     payloads = [_indexer._chunk_to_payload(c) for c in chunk_object(obj)]
     assert payloads
     for p in payloads:
-        assert p.get("wiki_url") == scrub_credentials(raw)
+        assert p.get("wiki_url") == "https://host.example/p?id=3#part"
 
 
 def test_semantic_search_core_returns_wiki_url_for_url_source(monkeypatch):
@@ -1377,7 +1380,7 @@ def test_semantic_search_core_hits_never_expose_source_type_or_domain_tags(monke
         wiki_url=_WIKI_URL, source_type="document", domain_tags=["ai"],
     )
     hits = _search(monkeypatch, [_FakePoint(payload)])
-    assert hits[0].get("wiki_url") == _WIKI_URL  # red now: proves the hit was read
+    assert hits[0].get("wiki_url") == _WIKI_URL
     assert "source_type" not in hits[0]
     assert "domain_tags" not in hits[0]
 
@@ -1385,11 +1388,26 @@ def test_semantic_search_core_hits_never_expose_source_type_or_domain_tags(monke
 # --- v3 -> v4 payload-only backfill (AC3 / D1) ------------------------------
 
 
-def _backfill_env(monkeypatch, tmp_path, *, stored, objects, code_version=4):
-    """Wire reindex() against fakes. ``objects`` is {oid: full object dict}."""
+def _backfill_env(
+    monkeypatch, tmp_path, *, stored, objects, code_version=4,
+    summary_type="dict", changed=(), get_errors=None,
+):
+    """Wire reindex() against fakes. ``objects`` is {oid: full object dict}.
+
+    ``summary_type`` shapes the list summary's ``type``: "dict" (``{"key": ...}``),
+    "str" (the bare key) or None (no ``type`` key). Objects in ``changed`` have a stale
+    state entry, so they take the full path. ``get_errors`` maps an oid to the exception
+    ``get_object`` raises for it. Every ``get_object`` oid is recorded in
+    ``fake.get_object_calls``.
+    """
     import anytype_llm_wiki.indexer as _indexer
 
-    state = {"sp-1": {oid: _LAST_MOD for oid in objects}}
+    state = {
+        "sp-1": {
+            oid: ("2025-01-01T00:00:00Z" if oid in changed else _LAST_MOD)
+            for oid in objects
+        }
+    }
     if stored is not None:
         state["_payload_schema_version"] = stored
     state_file = tmp_path / "state.json"
@@ -1399,21 +1417,34 @@ def _backfill_env(monkeypatch, tmp_path, *, stored, objects, code_version=4):
     monkeypatch.setattr(config, "PAYLOAD_SCHEMA_VERSION", code_version)
 
     fake = FakeQdrantClientWithSearch()
+    fake.get_object_calls = []
     embed_calls: list = []
+    get_errors = get_errors or {}
+
+    def _summary(oid, obj):
+        summary = {
+            "id": oid,
+            "properties": [{"key": "last_modified_date", "date": _LAST_MOD}],
+        }
+        if summary_type == "dict":
+            summary["type"] = obj["type"]
+        elif summary_type == "str":
+            summary["type"] = obj["type"]["key"]
+        return summary
+
+    def _get_object(sid, oid):
+        fake.get_object_calls.append(oid)
+        if oid in get_errors:
+            raise get_errors[oid]
+        return objects[oid]
+
     monkeypatch.setattr(_indexer, "_qdrant", lambda: fake)
     monkeypatch.setattr(_indexer, "list_spaces", lambda: [{"id": "sp-1"}])
     monkeypatch.setattr(
         _indexer, "list_objects",
-        lambda sid: [
-            {
-                "id": oid,
-                "type": obj["type"],
-                "properties": [{"key": "last_modified_date", "date": _LAST_MOD}],
-            }
-            for oid, obj in objects.items()
-        ],
+        lambda sid: [_summary(oid, obj) for oid, obj in objects.items()],
     )
-    monkeypatch.setattr(_indexer, "get_object", lambda sid, oid: objects[oid])
+    monkeypatch.setattr(_indexer, "get_object", _get_object)
 
     def _embed(texts):
         embed_calls.append(list(texts))
@@ -1493,11 +1524,13 @@ def test_backfill_v3_to_v4_scoped_run_does_not_stamp_marker(monkeypatch, tmp_pat
 
 
 def test_backfill_v3_to_v4_skips_non_source_objects(monkeypatch, tmp_path):
-    """#1413 AC3: an unchanged non-source object gets no set_payload and no re-embed."""
+    """#1413 AC3: an unchanged non-source object gets no set_payload and no re-embed;
+    the summary's type.key decides, so it is never fetched."""
     _indexer, fake, embeds, _ = _backfill_env(
         monkeypatch, tmp_path, stored=3, objects={"ent-1": _entity_obj()}
     )
     _indexer.reindex()
+    assert fake.get_object_calls == []
     assert fake.set_payload_calls == []
     assert embeds == []
     assert fake.upserted_points == []
@@ -1522,23 +1555,81 @@ def test_backfill_v3_to_v4_mixed_corpus_touches_only_url_sources(monkeypatch, tm
         "src-2": _source_obj("src-2", url=None),
     }
     _indexer, fake, embeds, _ = _backfill_env(monkeypatch, tmp_path, stored=3, objects=objects)
-    _indexer.reindex()
+    stats = _indexer.reindex()
     assert [_object_id_of(c["points"]) for c in fake.set_payload_calls] == ["src-1"]
     assert embeds == []
+    assert stats["payload_backfilled"] == 1
+    assert stats["payload_backfill_errors"] == 0
 
 
-def test_backfill_v3_to_v4_payload_is_credential_scrubbed(monkeypatch, tmp_path):
-    """#1413 D3: the backfilled wiki_url is the scrub_credentials form."""
-    from anytype_llm_wiki.wiki.util import scrub_credentials
-
-    raw = "https://user:secret@host.example/p?token=abc"
+def test_backfill_v3_to_v4_payload_is_secret_scrubbed(monkeypatch, tmp_path):
+    """#1413 D3 (revised): the backfilled wiki_url loses userinfo and secret params only."""
+    raw = "https://user:secret@host.example/p?token=abc&id=3"
     _indexer, fake, _, _ = _backfill_env(
         monkeypatch, tmp_path, stored=3, objects={"src-1": _source_obj(url=raw)}
     )
     _indexer.reindex()
     assert [c["payload"] for c in fake.set_payload_calls] == [
-        {"wiki_url": scrub_credentials(raw)}
+        {"wiki_url": "https://host.example/p?id=3"}
     ]
+
+
+@pytest.mark.parametrize("summary_type", [None, "str"])
+def test_backfill_v3_to_v4_summary_type_fallbacks(monkeypatch, tmp_path, summary_type):
+    """#1413 D1/CR2: a summary with no type, or a plain-string type, still backfills the
+    source and skips the entity; a missing type fetches the object to decide."""
+    objects = {"ent-1": _entity_obj(), "src-1": _source_obj()}
+    _indexer, fake, embeds, state_file = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects=objects, summary_type=summary_type,
+    )
+    stats = _indexer.reindex()
+    assert [_object_id_of(c["points"]) for c in fake.set_payload_calls] == ["src-1"]
+    assert stats["payload_backfilled"] == 1
+    assert embeds == []
+    expected_fetches = ["ent-1", "src-1"] if summary_type is None else ["src-1"]
+    assert fake.get_object_calls == expected_fetches
+    assert json.loads(state_file.read_text())["_payload_schema_version"] == 4
+
+
+def test_backfill_v3_to_v4_changed_source_takes_full_path(monkeypatch, tmp_path):
+    """#1413 D1: a changed wiki_source in a stored-3 run is re-embedded with wiki_url in
+    its upserted payload and gets no set_payload."""
+    _indexer, fake, embeds, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects={"src-1": _source_obj()}, changed={"src-1"},
+    )
+    stats = _indexer.reindex()
+    assert fake.set_payload_calls == []
+    assert stats["objects_indexed"] == 1
+    assert stats["payload_backfilled"] == 0
+    assert len(embeds) == 1
+    assert fake.upserted_points
+    assert all(p.payload.get("wiki_url") == _WIKI_URL for p in fake.upserted_points)
+
+
+@pytest.mark.parametrize("error", [
+    httpx.HTTPStatusError(
+        "404", request=httpx.Request("GET", "http://anytype.test/o"),
+        response=httpx.Response(404, request=httpx.Request("GET", "http://anytype.test/o")),
+    ),
+    httpx.ConnectError("down"),
+    KeyError("object"),
+])
+def test_backfill_v3_to_v4_fetch_error_is_counted_and_not_stamped(monkeypatch, tmp_path, error):
+    """#1413 CR3: a failed backfill fetch does not abort the reindex. It is counted, the
+    other objects are still backfilled, the state is saved, and the marker stays at 3."""
+    objects = {"src-1": _source_obj("src-1"), "src-2": _source_obj("src-2")}
+    _indexer, fake, embeds, state_file = _backfill_env(
+        monkeypatch, tmp_path, stored=3, objects=objects, summary_type=None,
+        get_errors={"src-1": error},
+    )
+    stats = _indexer.reindex()
+    assert stats["payload_backfill_errors"] == 1
+    assert stats["payload_backfilled"] == 1
+    assert [_object_id_of(c["points"]) for c in fake.set_payload_calls] == ["src-2"]
+    assert embeds == []
+    saved = json.loads(state_file.read_text())
+    assert saved["_payload_schema_version"] == 3
+    assert set(saved["sp-1"]) == {"src-1", "src-2"}
 
 
 @pytest.mark.parametrize("stored", [None, 1, 2])
@@ -1552,6 +1643,10 @@ def test_stored_v2_or_lower_still_does_full_reembed(monkeypatch, tmp_path, store
     assert stats["objects_indexed"] == 2
     assert len(embeds) == 2
     assert fake.upserted_points
+    source_payloads = [p.payload for p in fake.upserted_points if p.payload["object_id"] == "src-1"]
+    assert source_payloads
+    assert all(p.get("wiki_url") == _WIKI_URL for p in source_payloads)
+    assert fake.set_payload_calls == []
     assert json.loads(state_file.read_text())["_payload_schema_version"] == 4
 
 
@@ -1563,5 +1658,7 @@ def test_stored_v4_keeps_incremental_skip_and_no_set_payload(monkeypatch, tmp_pa
     )
     stats = _indexer.reindex()
     assert stats["objects_indexed"] == 0
+    assert stats["payload_backfilled"] == 0
     assert fake.set_payload_calls == []
+    assert fake.get_object_calls == []
     assert embeds == []

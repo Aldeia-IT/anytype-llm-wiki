@@ -1611,9 +1611,13 @@ class TestDuplicateSweep:
         """#1413 D4: the dedup sweep passes limit=5 by keyword and never sets ingested_after.
 
         The old call passed 5 positionally, which landed on ``ingested_after`` of the
-        real semantic_search_core (5 is not a datetime). The fake mirrors the real
-        signature so a positional 5 is caught instead of hidden.
+        real semantic_search_core (5 is not a datetime). The fake binds every call to
+        the real signature, so a positional 5 is caught and the test follows any
+        change to that signature.
         """
+        import inspect
+
+        import anytype_llm_wiki.indexer as _idx_mod
         entity_a = _make_entity("obj-lim-a", name="Entity A Lim", relations=[], backlinks=[])
         entity_b = _make_entity("obj-lim-b", name="Entity B Lim", relations=[], backlinks=[])
         get_side_effect, register = _standard_mocks(objects=[entity_a, entity_b])
@@ -1622,15 +1626,14 @@ class TestDuplicateSweep:
 
         captured = []
 
-        def fake_core(query, space_id=None, types=None, ingested_after=None,
-                      ingested_before=None, source_type=None, domain_tags=None, limit=10):
-            captured.append({
-                "types": types, "ingested_after": ingested_after,
-                "ingested_before": ingested_before, "limit": limit,
-            })
+        real_signature = inspect.signature(_idx_mod.semantic_search_core)
+
+        def fake_core(*args, **kwargs):
+            bound = real_signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            captured.append(dict(bound.arguments))
             return []
 
-        import anytype_llm_wiki.indexer as _idx_mod
         monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_core)
 
         respx.get().mock(side_effect=get_side_effect)
