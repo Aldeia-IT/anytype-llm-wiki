@@ -614,7 +614,7 @@ def wiki_lint(
                     q = (desc_prop.get("text") if desc_prop else "") or o.get("name", "")
                     try:
                         cands = indexer.semantic_search_core(
-                            q, space_id, list(_DEDUP_TYPES), 5
+                            q, space_id, list(_DEDUP_TYPES), limit=5
                         )
                     except Exception as exc:  # noqa: BLE001 — sweep is best-effort
                         report["warnings"].append(
