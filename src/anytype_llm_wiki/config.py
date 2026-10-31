@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+from .textfold import fold
+
 # Load .env if present (for local development / testing)
 _env_file = Path(__file__).resolve().parent.parent.parent / ".env"
 if _env_file.exists():
@@ -38,3 +40,26 @@ INDEX_STATE_FILE = INDEX_STATE_DIR / "state.json"
 # ingested from a URL (payload-only set_payload backfill from v3, no re-embed;
 # Aldeia-IT/aldeia-box#1413).
 PAYLOAD_SCHEMA_VERSION = 4
+
+
+def _parse_title_words(raw: str | None) -> tuple[str, ...] | None:
+    """Parse the ``NAME_TIER_TITLE_WORDS`` override (Aldeia-IT/aldeia-box#327 D13).
+
+    Args:
+        raw: the env value: comma-separated title words, or ``None`` when unset.
+
+    Returns:
+        ``None`` when unset (the name tier then uses its built-in list), else the
+        words folded (accents dropped, casefolded) and trimmed, empty entries
+        dropped. A set but empty value gives ``()``: no title words at all.
+    """
+    if raw is None:
+        return None
+    words = (fold(part).strip() for part in raw.split(","))
+    return tuple(word for word in words if word)
+
+
+# Leading title words the name tier strips from names and queries ("Mestre
+# Pastinha" matches "Pastinha"). None = the built-in list in indexer.py. The
+# tier reads this attribute at call time.
+NAME_TIER_TITLE_WORDS = _parse_title_words(os.environ.get("NAME_TIER_TITLE_WORDS"))
