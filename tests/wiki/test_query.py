@@ -3684,10 +3684,10 @@ def test_wiki_query_tier2_calls_hybrid(monkeypatch):
     Uses a real list response with schema marker + wiki_entity objects so Tier-2
     fires, then asserts hybrid_search_core is called and semantic_search_core is NOT.
     """
-    import respx as _respx
     import httpx as _httpx
-    import anytype_llm_wiki.wiki.query as query_mod
+
     import anytype_llm_wiki.indexer as _idx_mod
+    import anytype_llm_wiki.wiki.query as query_mod
 
     called = {}
     # >= threshold objects so Tier-2 fires (threshold patched to 1)

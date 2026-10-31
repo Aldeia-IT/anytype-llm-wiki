@@ -70,7 +70,7 @@ original `domain_hint` for pre-#336 objects is recoverable nowhere, so existing 
 are NOT retroactively tagged. Only objects created/updated after the upgrade carry
 `domain_tags`; `wiki_source` objects are stamped `source_type` on next ingest/remember.
 
-## Retrieval: name-aware hybrid search (#327)
+## Retrieval: name-aware hybrid search (Aldeia-IT/aldeia-box#327)
 
 `indexer.hybrid_search_core` (behind the `semantic_search` MCP tool and `wiki_query`
 Tier-2; `wiki_lint` stays on `semantic_search_core`) runs the dense query first, outside

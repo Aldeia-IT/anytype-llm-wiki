@@ -383,7 +383,7 @@ class FakeQdrantClientWithSearch:
     (records which fields were indexed), upsert, delete, get_collections,
     create_collection.  Never emits UserWarning.
 
-    Extended for #327: scroll() returns all upserted points (single page).
+    Extended for Aldeia-IT/aldeia-box#327: scroll() returns all upserted points (single page).
     """
 
     def __init__(self, mock_results=None):
@@ -442,7 +442,7 @@ class FakeQdrantClientWithSearch:
                with_payload=True, with_vectors=False):
         """Single page: return all upserted points, next_offset=None.
 
-        Required by _build_bm25_index (spec §11.1 / SG-7).
+        Required by _build_bm25_index (Aldeia-IT/aldeia-box#327 D3).
         """
         return list(self.upserted_points), None
 
@@ -1161,7 +1161,7 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
         captured_calls.append({"types": types, "query": query})
         return []
 
-    # #327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # Aldeia-IT/aldeia-box#327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
     # switch); retarget this #336 OD-B seam test to the new module-qualified
     # symbol. The OD-B logic under test (server.py's effective_types) is
     # unchanged — only the callee name is.
@@ -1217,7 +1217,7 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
         captured_calls.append({"types": types, "source_type": source_type})
         return []
 
-    # #327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # Aldeia-IT/aldeia-box#327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
     # switch); retarget this #336 OD-B seam test to the new module-qualified
     # symbol. The guard under test (`if types is None and not source_type`) is
     # unchanged.
@@ -1271,7 +1271,7 @@ class _FakePoint:
     def __init__(self, payload, score=0.9, point_id=None):
         self.payload = payload
         self.score = score
-        # The hybrid path keys RRF fusion on the Qdrant point id (#327).
+        # The hybrid path keys RRF fusion on the Qdrant point id (Aldeia-IT/aldeia-box#327).
         self.id = point_id if point_id is not None else f"fp-{next(_FAKE_POINT_IDS)}"
 
 
@@ -1687,7 +1687,7 @@ def test_stored_v4_keeps_incremental_skip_and_no_set_payload(monkeypatch, tmp_pa
     assert fake.get_object_calls == []
     assert embeds == []
 # ===========================================================================
-# #327 — Hybrid Dense+Sparse Fusion (BM25 + RRF)
+# Aldeia-IT/aldeia-box#327 — Hybrid Dense+Sparse Fusion (BM25 + RRF)
 # Tests FAIL until the implementation exists.  Import all new symbols INSIDE
 # test bodies so the file collects cleanly before any code is written.
 # ===========================================================================
@@ -1784,6 +1784,7 @@ def test_dense_search_with_ids_filter_equals_semantic_search_core(monkeypatch):
     guarding the #336 OD-B / #323 nested-filter contract on the dense leg of hybrid.
     """
     from qdrant_client.models import FieldCondition
+
     import anytype_llm_wiki.indexer as ix
     from anytype_llm_wiki import config as _config
 
@@ -1796,7 +1797,7 @@ def test_dense_search_with_ids_filter_equals_semantic_search_core(monkeypatch):
             class _Col:
                 name = _config.QDRANT_COLLECTION
             class _Result:
-                collections = [_Col()]
+                collections = (_Col(),)
             return _Result()
 
         def query_points(self, collection_name, query, query_filter=None,
@@ -1804,7 +1805,7 @@ def test_dense_search_with_ids_filter_equals_semantic_search_core(monkeypatch):
             self.calls.append(query_filter)
 
             class _Res:
-                points = []
+                points = ()
             return _Res()
 
         def scroll(self, collection_name, limit=1000, offset=None,
@@ -1815,13 +1816,13 @@ def test_dense_search_with_ids_filter_equals_semantic_search_core(monkeypatch):
     monkeypatch.setattr(ix, "_qdrant", lambda: cap)
     monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * _config.EMBED_DIMS)
 
-    common_kwargs = dict(
-        query="test",
-        space_id="sp-42",
-        types=["wiki_entity", "wiki_concept"],
-        source_type=["document"],
-        domain_tags=["ai"],
-    )
+    common_kwargs = {
+        "query": "test",
+        "space_id": "sp-42",
+        "types": ["wiki_entity", "wiki_concept"],
+        "source_type": ["document"],
+        "domain_tags": ["ai"],
+    }
 
     # Call semantic_search_core → captures filter[0]
     ix.semantic_search_core(**common_kwargs)
