@@ -29,7 +29,18 @@ NAMED_GROUPS = (
     "capoeira-name", "capoeira-diacritic", "capoeira-context", "capoeira-shared",
     "fleet-exact", "fleet-partial",
 )
-RANK_ONE_SLACK = 2  # bar 1: at least (n - 2) of n at rank 1
+GROUPS = (*NAMED_GROUPS, "control", "control-word")
+# The AC-EVAL2 case table. Exact counts per group; capoeira-shared needs at least the
+# eight listed names, each as a bare case and as a "(context)" case (``right_id`` set).
+EXACT_COUNTS = {
+    "capoeira-name": 22, "capoeira-diacritic": 4, "capoeira-context": 2,
+    "fleet-exact": 10, "fleet-partial": 5, "control-word": 3,
+}
+MIN_SHARED_BARE = 8
+MIN_SHARED_CONTEXT = 8
+MIN_CONTROL_PER_SPACE = 5
+BAR_ONE_GROUPS = ("capoeira-name", "capoeira-diacritic", "capoeira-context")
+BAR_ONE_RANK_ONE_MIN = 26  # bar 1: 28 of 28 in the top 10, at least 26 at rank 1
 
 
 def load_frozen_fixture(path):
@@ -42,7 +53,9 @@ def load_frozen_fixture(path):
         The parsed fixture dict (``frozen``, ``cases``).
 
     Raises:
-        ValueError: the fixture is not frozen or a case lacks a required key.
+        ValueError: the fixture is not frozen; a case lacks a required key or has an
+            unknown ``group``; a named case has no ``expected_ids``; a shared case has
+            fewer than two; or a ``right_id`` is not one of the case's ``expected_ids``.
     """
     data = json.loads(Path(path).read_text())
     if data.get("frozen") is not True:
@@ -54,7 +67,58 @@ def load_frozen_fixture(path):
         missing = {"id", "group", "query", "space_id", "types", "expected_ids"} - set(case)
         if missing:
             raise ValueError(f"case {case.get('id')!r} lacks keys {sorted(missing)}")
+        _check_case(case)
     return data
+
+
+def _check_case(case):
+    """Reject a case a bar would otherwise pass vacuously (helper of the loader)."""
+    cid, group, expected = case["id"], case["group"], case["expected_ids"]
+    if group not in GROUPS:
+        raise ValueError(f"case {cid!r} has unknown group {group!r}; known: {list(GROUPS)}")
+    if group in NAMED_GROUPS and not expected:
+        raise ValueError(f"case {cid!r} has no expected_ids: curate them before freezing")
+    if group == "capoeira-shared" and len(set(expected)) < 2:
+        raise ValueError(f"shared case {cid!r} needs two or more expected_ids")
+    if "right_id" in case and case["right_id"] not in expected:
+        raise ValueError(f"case {cid!r}: right_id must be one of its expected_ids")
+
+
+def count_failures(cases):
+    """Check the case counts of the AC-EVAL2 table; return the violations (empty if none).
+
+    Args:
+        cases: fixture cases.
+
+    Returns:
+        Human-readable messages, one per group whose count is off, so that a short or
+        mislabelled fixture fails the gate instead of passing a bar with zero cases.
+    """
+    failures = []
+    by_group: dict[str, list] = {}
+    for case in cases:
+        by_group.setdefault(case["group"], []).append(case)
+    for group, count in EXACT_COUNTS.items():
+        found = len(by_group.get(group, []))
+        if found != count:
+            failures.append(f"counts: {group} has {found} cases, the spec needs {count}")
+    shared = by_group.get("capoeira-shared", [])
+    bare = sum(1 for c in shared if "right_id" not in c)
+    if bare < MIN_SHARED_BARE or len(shared) - bare < MIN_SHARED_CONTEXT:
+        failures.append(
+            f"counts: capoeira-shared has {bare} bare and {len(shared) - bare} context "
+            f"cases, the spec needs at least {MIN_SHARED_BARE} and {MIN_SHARED_CONTEXT}"
+        )
+    controls: dict[str, int] = {}
+    for case in by_group.get("control", []):
+        controls[case["space_id"]] = controls.get(case["space_id"], 0) + 1
+    for space in sorted({c["space_id"] for c in cases}):
+        if controls.get(space, 0) < MIN_CONTROL_PER_SPACE:
+            failures.append(
+                f"counts: space {space} has {controls.get(space, 0)} control cases, "
+                f"the spec needs at least {MIN_CONTROL_PER_SPACE}"
+            )
+    return failures
 
 
 def object_ranks(hits):
@@ -93,7 +157,7 @@ def _shared_ok(case, hits):
 
 
 def evaluate(cases, hybrid_search, dense_search):
-    """Apply the five pass bars; return ``(failures, per_case)``.
+    """Check the case counts, apply the five pass bars; return ``(failures, per_case)``.
 
     Args:
         cases: fixture cases.
@@ -104,7 +168,7 @@ def evaluate(cases, hybrid_search, dense_search):
         ``failures``: human-readable bar violations (empty when every bar holds);
         ``per_case``: ``{case id: {"group", "hybrid_rank", "dense_rank"}}``.
     """
-    failures, per_case = [], {}
+    failures, per_case = count_failures(cases), {}
     by_group: dict[str, list] = {}
     for case in cases:
         hybrid, dense = hybrid_search(case), dense_search(case)
@@ -118,12 +182,12 @@ def evaluate(cases, hybrid_search, dense_search):
     # Bar 1: capoeira name, diacritic and context cases.
     named = [
         per_case[c["id"]]["hybrid_rank"]
-        for g in ("capoeira-name", "capoeira-diacritic", "capoeira-context")
+        for g in BAR_ONE_GROUPS
         for c, _, _ in by_group.get(g, [])
     ]
     if any(rank > TOP_K for rank in named):
         failures.append(f"bar 1: {sum(r > TOP_K for r in named)} of {len(named)} not in top {TOP_K}")
-    if sum(rank == 1 for rank in named) < len(named) - RANK_ONE_SLACK:
+    if sum(rank == 1 for rank in named) < BAR_ONE_RANK_ONE_MIN:
         failures.append(f"bar 1: only {sum(r == 1 for r in named)} of {len(named)} at rank 1")
 
     # Bar 2: shared names.
@@ -222,17 +286,112 @@ def test_example_fixture_is_an_unfrozen_template_with_the_documented_schema():
     assert "<" in json.dumps(data)  # placeholders only
 
 
+def _case(cid, group, space, expected, **extra):
+    return {"id": cid, "group": group, "query": "q", "space_id": space, "types": [],
+            "expected_ids": expected, **extra}
+
+
+def _full_cases():
+    """A fixture with exactly the AC-EVAL2 case table (two spaces: cap and fleet)."""
+    cases = []
+    for group in BAR_ONE_GROUPS:
+        cases += [_case(f"{group}-{i}", group, "cap", ["t"])
+                  for i in range(EXACT_COUNTS[group])]
+    for i in range(MIN_SHARED_BARE):
+        cases.append(_case(f"shared-{i}", "capoeira-shared", "cap", ["t", "u"]))
+        cases.append(_case(f"shared-{i}-ctx", "capoeira-shared", "cap", ["t", "u"],
+                           right_id="t"))
+    for group in ("fleet-exact", "fleet-partial"):
+        cases += [_case(f"{group}-{i}", group, "fleet", ["t"])
+                  for i in range(EXACT_COUNTS[group])]
+    for space in ("cap", "fleet"):
+        cases += [_case(f"control-{space}-{i}", "control", space, [])
+                  for i in range(MIN_CONTROL_PER_SPACE)]
+    cases += [_case(f"word-{i}", "control-word", s, []) for i, s in
+              enumerate(("cap", "cap", "fleet"))]
+    return cases
+
+
+def _clean_hybrid(case):
+    return [_hit(oid) for oid in (case["expected_ids"] or ["x"])]
+
+
+def _dense_x(case):
+    return [_hit("x")]
+
+
+def _frozen(tmp_path, cases):
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps({"frozen": True, "cases": cases}))
+    return path
+
+
 def test_bar_three_flags_a_fleet_case_worse_than_dense():
-    cases = [{"id": "f1", "group": "fleet-exact", "query": "q", "space_id": "s",
-              "types": [], "expected_ids": ["t"]}]
-    failures, _ = evaluate(
-        cases, lambda c: [_hit("x"), _hit("t")], lambda c: [_hit("t")])
-    assert any("bar 3" in f for f in failures)
+    def hybrid(case):
+        if case["id"] == "fleet-exact-0":
+            return [_hit("x"), _hit("t")]
+        return _clean_hybrid(case)
+
+    failures, _ = evaluate(_full_cases(), hybrid, lambda c: [_hit("t")])
+    assert "bar 3: fleet case fleet-exact-0 ranks worse than dense" in failures
 
 
 def test_bars_pass_for_a_clean_run():
-    cases = [{"id": "n1", "group": "capoeira-name", "query": "q", "space_id": "s",
-              "types": [], "expected_ids": ["t"]}]
-    failures, per_case = evaluate(cases, lambda c: [_hit("t")], lambda c: [_hit("x")])
-    assert per_case["n1"] == {"group": "capoeira-name", "hybrid_rank": 1, "dense_rank": 11}
+    failures, per_case = evaluate(_full_cases(), _clean_hybrid, _dense_x)
+    assert per_case["capoeira-name-0"] == {
+        "group": "capoeira-name", "hybrid_rank": 1, "dense_rank": 11}
     assert failures == []
+
+
+def test_bar_one_needs_26_named_cases_at_rank_one():
+    def hybrid(case):
+        if case["id"] in {"capoeira-name-0", "capoeira-name-1", "capoeira-name-2"}:
+            return [_hit("y"), _hit("t")]
+        return _clean_hybrid(case)
+
+    failures, _ = evaluate(_full_cases(), hybrid, _dense_x)
+    assert "bar 1: only 25 of 28 at rank 1" in failures
+
+
+def test_a_missing_group_fails_the_counts_instead_of_passing_vacuously():
+    cases = [c for c in _full_cases() if c["group"] != "fleet-partial"]
+    failures, _ = evaluate(cases, _clean_hybrid, _dense_x)
+    assert "counts: fleet-partial has 0 cases, the spec needs 5" in failures
+
+
+def test_too_few_controls_in_a_space_fail_the_counts():
+    cases = [c for c in _full_cases() if c["id"] != "control-fleet-0"]
+    failures, _ = evaluate(cases, _clean_hybrid, _dense_x)
+    assert any(f.startswith("counts: space fleet has 4 control cases") for f in failures)
+
+
+def test_unknown_group_is_rejected(tmp_path):
+    cases = _full_cases()
+    cases[0]["group"] = "capoeira_name"
+    with pytest.raises(ValueError, match="unknown group 'capoeira_name'"):
+        load_frozen_fixture(_frozen(tmp_path, cases))
+
+
+def test_named_case_without_expected_ids_is_rejected(tmp_path):
+    cases = _full_cases()
+    cases[0]["expected_ids"] = []
+    with pytest.raises(ValueError, match="no expected_ids"):
+        load_frozen_fixture(_frozen(tmp_path, cases))
+
+
+def test_shared_case_with_one_expected_id_is_rejected(tmp_path):
+    cases = [c if c["id"] != "shared-0" else {**c, "expected_ids": ["t"]}
+             for c in _full_cases()]
+    with pytest.raises(ValueError, match="two or more"):
+        load_frozen_fixture(_frozen(tmp_path, cases))
+
+
+def test_unpicked_right_id_is_rejected(tmp_path):
+    cases = [c if c["id"] != "shared-0-ctx" else {**c, "right_id": None}
+             for c in _full_cases()]
+    with pytest.raises(ValueError, match="right_id must be one of"):
+        load_frozen_fixture(_frozen(tmp_path, cases))
+
+
+def test_full_frozen_fixture_loads(tmp_path):
+    assert len(load_frozen_fixture(_frozen(tmp_path, _full_cases()))["cases"]) == 72
