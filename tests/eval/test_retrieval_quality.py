@@ -30,14 +30,13 @@ NAMED_GROUPS = (
     "fleet-exact", "fleet-partial",
 )
 GROUPS = (*NAMED_GROUPS, "control", "control-word")
-# The AC-EVAL2 case table. Exact counts per group; capoeira-shared needs at least the
-# eight listed names, each as a bare case and as a "(context)" case (``right_id`` set).
+# The AC-EVAL2 case table (amended by D-327-E (a): capoeira-shared is 10 bare names,
+# no "(context)" variants). Exact counts per group; controls are per space.
 EXACT_COUNTS = {
     "capoeira-name": 22, "capoeira-diacritic": 4, "capoeira-context": 2,
-    "fleet-exact": 10, "fleet-partial": 5, "control-word": 3,
+    "capoeira-shared": 10, "fleet-exact": 10, "fleet-partial": 5, "control-word": 3,
 }
-MIN_SHARED_BARE = 8
-MIN_SHARED_CONTEXT = 8
+BAR_TWO_IGNORED_TYPE = "wiki_source"  # bar 2: pages about the person don't count against it
 MIN_CONTROL_PER_SPACE = 5
 BAR_ONE_GROUPS = ("capoeira-name", "capoeira-diacritic", "capoeira-context")
 BAR_ONE_RANK_ONE_MIN = 26  # bar 1: 28 of 28 in the top 10, at least 26 at rank 1
@@ -54,8 +53,8 @@ def load_frozen_fixture(path):
 
     Raises:
         ValueError: the fixture is not frozen; a case lacks a required key or has an
-            unknown ``group``; a named case has no ``expected_ids``; a shared case has
-            fewer than two; or a ``right_id`` is not one of the case's ``expected_ids``.
+            unknown ``group``; a named case has no ``expected_ids``; or a shared case
+            has fewer than two.
     """
     data = json.loads(Path(path).read_text())
     if data.get("frozen") is not True:
@@ -80,8 +79,6 @@ def _check_case(case):
         raise ValueError(f"case {cid!r} has no expected_ids: curate them before freezing")
     if group == "capoeira-shared" and len(set(expected)) < 2:
         raise ValueError(f"shared case {cid!r} needs two or more expected_ids")
-    if "right_id" in case and case["right_id"] not in expected:
-        raise ValueError(f"case {cid!r}: right_id must be one of its expected_ids")
 
 
 def count_failures(cases):
@@ -102,13 +99,6 @@ def count_failures(cases):
         found = len(by_group.get(group, []))
         if found != count:
             failures.append(f"counts: {group} has {found} cases, the spec needs {count}")
-    shared = by_group.get("capoeira-shared", [])
-    bare = sum(1 for c in shared if "right_id" not in c)
-    if bare < MIN_SHARED_BARE or len(shared) - bare < MIN_SHARED_CONTEXT:
-        failures.append(
-            f"counts: capoeira-shared has {bare} bare and {len(shared) - bare} context "
-            f"cases, the spec needs at least {MIN_SHARED_BARE} and {MIN_SHARED_CONTEXT}"
-        )
     controls: dict[str, int] = {}
     for case in by_group.get("control", []):
         controls[case["space_id"]] = controls.get(case["space_id"], 0) + 1
@@ -141,19 +131,19 @@ def first_rank(expected_ids, hits):
 
 
 def _shared_ok(case, hits):
-    """Bar 2: every expected object's first chunk precedes every non-expected chunk."""
+    """Bar 2: every expected object's first chunk is in the top 10, ahead of every chunk
+    of a non-expected object; non-expected ``wiki_source`` chunks are ignored (D-327-E).
+    """
     expected = set(case["expected_ids"])
-    ids = [h["object_id"] for h in hits[:TOP_K]]
+    top = hits[:TOP_K]
+    ids = [h["object_id"] for h in top]
     if not expected <= set(ids):
         return False
     last_expected_first = max(ids.index(oid) for oid in expected)
-    if any(oid not in expected for oid in ids[: last_expected_first + 1]):
-        return False
-    right = case.get("right_id")
-    if right:
-        order = [oid for oid in object_ranks(hits) if oid in expected]
-        return bool(order) and order[0] == right
-    return True
+    return not any(
+        h["object_id"] not in expected and h.get("type_key") != BAR_TWO_IGNORED_TYPE
+        for h in top[: last_expected_first + 1]
+    )
 
 
 def evaluate(cases, hybrid_search, dense_search):
@@ -262,8 +252,8 @@ def test_hybrid_name_aware_retrieval_quality(frozen_fixture):
 # ---------------------------------------------------------------------------
 
 
-def _hit(oid, score=0.5):
-    return {"object_id": oid, "score": score}
+def _hit(oid, score=0.5, type_key="wiki_entity"):
+    return {"object_id": oid, "score": score, "type_key": type_key}
 
 
 def test_unfrozen_fixture_is_rejected(tmp_path):
@@ -282,7 +272,7 @@ def test_example_fixture_is_an_unfrozen_template_with_the_documented_schema():
             "fleet-exact", "fleet-partial", "control", "control-word"} <= groups
     for case in data["cases"]:
         assert {"id", "group", "query", "space_id", "types", "expected_ids"} <= set(case)
-    assert any("right_id" in c for c in data["cases"])
+    assert not any("right_id" in c for c in data["cases"])  # D-327-E: bare names only
     assert "<" in json.dumps(data)  # placeholders only
 
 
@@ -297,10 +287,8 @@ def _full_cases():
     for group in BAR_ONE_GROUPS:
         cases += [_case(f"{group}-{i}", group, "cap", ["t"])
                   for i in range(EXACT_COUNTS[group])]
-    for i in range(MIN_SHARED_BARE):
-        cases.append(_case(f"shared-{i}", "capoeira-shared", "cap", ["t", "u"]))
-        cases.append(_case(f"shared-{i}-ctx", "capoeira-shared", "cap", ["t", "u"],
-                           right_id="t"))
+    cases += [_case(f"shared-{i}", "capoeira-shared", "cap", ["t", "u"])
+              for i in range(EXACT_COUNTS["capoeira-shared"])]
     for group in ("fleet-exact", "fleet-partial"):
         cases += [_case(f"{group}-{i}", group, "fleet", ["t"])
                   for i in range(EXACT_COUNTS[group])]
@@ -386,12 +374,19 @@ def test_shared_case_with_one_expected_id_is_rejected(tmp_path):
         load_frozen_fixture(_frozen(tmp_path, cases))
 
 
-def test_unpicked_right_id_is_rejected(tmp_path):
-    cases = [c if c["id"] != "shared-0-ctx" else {**c, "right_id": None}
-             for c in _full_cases()]
-    with pytest.raises(ValueError, match="right_id must be one of"):
-        load_frozen_fixture(_frozen(tmp_path, cases))
-
-
 def test_full_frozen_fixture_loads(tmp_path):
-    assert len(load_frozen_fixture(_frozen(tmp_path, _full_cases()))["cases"]) == 72
+    assert len(load_frozen_fixture(_frozen(tmp_path, _full_cases()))["cases"]) == 66
+
+
+def test_bar_two_ignores_a_non_expected_source_page_ahead_of_the_entities():
+    case = _case("s", "capoeira-shared", "cap", ["t", "u"])
+    page = _hit("page", type_key="wiki_source")
+    assert _shared_ok(case, [_hit("t"), page, _hit("u"), _hit("x")])
+    assert not _shared_ok(case, [_hit("t"), _hit("x"), _hit("u")])  # another entity
+    assert not _shared_ok(case, [_hit("t"), page])  # an expected object is missing
+
+
+def test_shared_count_is_exactly_ten_bare_names():
+    cases = [c for c in _full_cases() if c["id"] != "shared-0"]
+    failures, _ = evaluate(cases, _clean_hybrid, _dense_x)
+    assert "counts: capoeira-shared has 9 cases, the spec needs 10" in failures

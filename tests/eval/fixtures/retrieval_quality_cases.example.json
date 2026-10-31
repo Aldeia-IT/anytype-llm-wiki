@@ -28,21 +28,12 @@
       "expected_ids": ["<object-id>"]
     },
     {
-      "id": "capoeira-shared-01-bare",
+      "id": "capoeira-shared-01",
       "group": "capoeira-shared",
-      "query": "<shared apelido>",
+      "query": "<shared apelido, bare>",
       "space_id": "<capoeira-space-id>",
       "types": ["wiki_entity", "wiki_source"],
       "expected_ids": ["<object-id-a>", "<object-id-b>"]
-    },
-    {
-      "id": "capoeira-shared-01-context",
-      "group": "capoeira-shared",
-      "query": "<shared apelido> (<context of a>)",
-      "space_id": "<capoeira-space-id>",
-      "types": ["wiki_entity", "wiki_source"],
-      "expected_ids": ["<object-id-a>", "<object-id-b>"],
-      "right_id": "<object-id-a>"
     },
     {
       "id": "fleet-exact-01",
