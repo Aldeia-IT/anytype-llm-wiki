@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 # published _SpaceIndex unlocked (it is assigned only when fully built).
 _bm25_indexes: "dict[str, _SpaceIndex]" = {}
 _bm25_built_versions: dict[str, int] = {}
+# Spaces whose last build scrolled zero chunks with no prior index, at that
+# version: fresh without an index, so an empty or unknown space_id does not
+# re-scroll under the build lock on every query (AC-H8 keeps the index absent).
+_bm25_empty_versions: dict[str, int] = {}
 _bm25_build_lock = threading.Lock()
 _BM25_VERSIONS_KEY = "_bm25_corpus_versions"
 
@@ -58,7 +62,8 @@ _TIER_OFFSETS = {1: 2.0, 2: 1.0, 0: 0.0}
 _FIRST_CHUNK_BONUS = 0.5
 
 # D12 tokenizer: fold, tokens of [a-z0-9] joined by - _ . ', parts of joined
-# tokens, stopwords dropped (English and Portuguese). No stemming.
+# tokens, stopwords dropped (English and Portuguese). No stemming. Words both
+# languages share ("a", "as") are listed once, under English.
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-_.'][a-z0-9]+)*")
 _TOKEN_JOINER_RE = re.compile(r"[-_.']")
 _STOPWORDS = frozenset((
@@ -68,7 +73,7 @@ _STOPWORDS = frozenset((
     "the", "this", "to", "was", "what", "when", "where", "which", "who", "why",
     "with", "we", "you", "our", "about",
     # Portuguese
-    "a", "o", "as", "os", "e", "de", "da", "do", "das", "dos", "em", "no", "na",
+    "o", "os", "e", "de", "da", "do", "das", "dos", "em", "no", "na",
     "nos", "nas", "um", "uma", "uns", "umas", "para", "por", "com", "que", "se",
     "ao", "aos", "sua", "seu", "suas", "seus", "ou", "mais", "como", "foi", "era",
 ))
@@ -179,8 +184,8 @@ def build_search_hit(payload: dict | None, score: float) -> dict:
     """Build one search hit dict from a Qdrant point's payload and score.
 
     The single hit shape shared by every Qdrant search path (today
-    ``semantic_search_core``; PR anytype-llm-wiki#59 adopts it too), so the
-    hit keys never drift between callers.
+    ``semantic_search_core`` and ``hybrid_search_core``), so the hit keys
+    never drift between callers.
 
     Args:
         payload: the point payload (``with_payload=True``); ``None`` is treated
@@ -287,7 +292,7 @@ def _build_search_filter(
 
     Extracted VERBATIM from ``semantic_search_core`` so ``semantic_search_core``
     and ``_dense_search_with_ids`` share one filter implementation and can never
-    drift (spec §5.4). Returns ``None`` for a bare call exactly as the inline code
+    drift (Aldeia-IT/aldeia-box#327 D1). Returns ``None`` for a bare call exactly as the inline code
     did, preserving the AC-H-REG1 ``query_filter is None`` contract.
     """
     from qdrant_client.models import (
@@ -445,15 +450,38 @@ def strip_name(text: str) -> str:
     return _strip_title(_split_name(text)[0], _title_words())
 
 
+def _keys_of(base: str, paren: str, titles: tuple[str, ...]) -> set[str]:
+    """The D13 keys of a split name: its stripped base and, if any, its stripped parenthetical."""
+    keys = {_strip_title(base, titles)}
+    if paren:
+        keys.add(_strip_title(paren, titles))
+    keys.discard("")
+    return keys
+
+
+def name_keys(name: str) -> set[str]:
+    """Return the name-tier keys of an object name (D13).
+
+    The key of the name without its trailing ``(...)`` context and, when the
+    name has one, the key of the parenthetical itself; each with one leading
+    title word removed (``config.NAME_TIER_TITLE_WORDS``, read at call time).
+    A query whose ``strip_name`` key is in this set is a tier-1 match.
+    "Cobra Mansa (FICA)" gives ``{"cobra mansa", "fica"}``.
+
+    Args:
+        name: an object name.
+
+    Returns:
+        The set of keys; empty when the name has no letters or digits.
+    """
+    return _keys_of(*_split_name(name), _title_words())
+
+
 def _name_tier(entry: "_NameEntry", query_key: str, query_tokens: set[str],
                titles: tuple[str, ...]) -> int:
     """Return 1 (key equality), 2 (every query token in the name) or 0 (D13)."""
-    if query_key:
-        keys = {_strip_title(entry.base, titles)}
-        if entry.paren:
-            keys.add(_strip_title(entry.paren, titles))
-        if query_key in keys:
-            return 1
+    if query_key and query_key in _keys_of(entry.base, entry.paren, titles):
+        return 1
     if query_tokens and query_tokens <= entry.tokens:
         return 2
     return 0
@@ -566,11 +594,16 @@ def _ensure_bm25_fresh(space_id: str) -> None:
     the version its index was built against. The check runs unlocked; a build
     takes ``_bm25_build_lock`` and re-checks inside, so concurrent first queries
     build once. The version is read before the scroll and recorded after the
-    build, so a bump during a build triggers a rebuild on the next query.
+    build, so a bump during a build triggers a rebuild on the next query. A
+    space whose build scrolled nothing (and had no prior index) is recorded in
+    ``_bm25_empty_versions`` and counts as fresh at that version, so it is not
+    re-scrolled on every query.
     """
 
     def is_fresh(version: int) -> bool:
-        return space_id in _bm25_indexes and _bm25_built_versions.get(space_id) == version
+        if space_id in _bm25_indexes:
+            return _bm25_built_versions.get(space_id) == version
+        return _bm25_empty_versions.get(space_id) == version
 
     if is_fresh(_read_bm25_corpus_version(space_id)):
         return
@@ -580,6 +613,10 @@ def _ensure_bm25_fresh(space_id: str) -> None:
             return
         _build_bm25_index(_qdrant(), space_id)  # may raise; caller falls back (D9)
         _bm25_built_versions[space_id] = version
+        if space_id in _bm25_indexes:
+            _bm25_empty_versions.pop(space_id, None)
+        else:
+            _bm25_empty_versions[space_id] = version
 
 
 def _bm25_search(idx: _SpaceIndex, query: str, depth: int) -> tuple[list[float], list[int]]:
@@ -737,7 +774,7 @@ def hybrid_search_core(
     domain_tags: list[str] | None = None,
     limit: int = 10,
 ) -> list[dict]:
-    """Name-aware hybrid search: dense plus per-space BM25, RRF, name tier (#327).
+    """Name-aware hybrid search: dense, per-space BM25, RRF, name tier (Aldeia-IT/aldeia-box#327).
 
     Same signature and hit shape as ``semantic_search_core``. The dense query
     runs first and outside any ``try``, so a Qdrant outage propagates (D9). For a

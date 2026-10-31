@@ -90,21 +90,28 @@ def _filter_matches(query_filter, payload):
 class FakeHybridQdrant:
     """Fake Qdrant: ``scroll`` (honours scroll_filter) and ``query_points`` (dense)."""
 
-    def __init__(self, points, dense_ids=(), dense_error=None, on_scroll=None):
+    def __init__(self, points, dense_ids=(), dense_error=None, on_scroll=None,
+                 page_size=None):
         self.points = list(points)
         self.dense_ids = list(dense_ids)
         self.dense_error = dense_error
         self.on_scroll = on_scroll
+        self.page_size = page_size  # None: one page; else min(limit, page_size) per page
         self.scroll_calls = []
         self.query_calls = []
 
     def scroll(self, collection_name, scroll_filter=None, limit=1000, offset=None,
                with_payload=True, with_vectors=False):
-        self.scroll_calls.append({"filter": scroll_filter, "limit": limit})
+        self.scroll_calls.append({"filter": scroll_filter, "limit": limit, "offset": offset})
         if self.on_scroll is not None:
             self.on_scroll()
         chosen = [p for p in self.points if _filter_matches(scroll_filter, p.payload)]
-        return chosen, None
+        if self.page_size is None:
+            return chosen, None
+        start = 0 if offset is None else int(offset.removeprefix("page-"))
+        end = start + min(limit, self.page_size)
+        # An opaque string offset, as Qdrant returns a point id: a caller must pass it back.
+        return chosen[start:end], (f"page-{end}" if end < len(chosen) else None)
 
     def query_points(self, collection_name, query, query_filter=None, limit=10,
                      with_payload=True):
@@ -155,12 +162,9 @@ def ix(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
     monkeypatch.setattr(indexer, "embed_query", lambda q: [0.1] * config.EMBED_DIMS)
-    # raising=False: these exist only after the implementation; the pre-change global
-    # index is also reset so a red run fails on behaviour, not on leaked state.
-    monkeypatch.setattr(indexer, "_bm25_indexes", {}, raising=False)
-    monkeypatch.setattr(indexer, "_bm25_built_versions", {}, raising=False)
-    monkeypatch.setattr(indexer, "_bm25_index", None, raising=False)
-    monkeypatch.setattr(indexer, "_bm25_built_version", -1, raising=False)
+    monkeypatch.setattr(indexer, "_bm25_indexes", {})
+    monkeypatch.setattr(indexer, "_bm25_built_versions", {})
+    monkeypatch.setattr(indexer, "_bm25_empty_versions", {})
     return indexer
 
 
@@ -583,11 +587,10 @@ def _two_space_points():
 
 
 def _reset_index_state(ix, monkeypatch):
-    """Forget every built BM25 index (new per-space maps and the pre-change global)."""
-    monkeypatch.setattr(ix, "_bm25_indexes", {}, raising=False)
-    monkeypatch.setattr(ix, "_bm25_built_versions", {}, raising=False)
-    monkeypatch.setattr(ix, "_bm25_index", None, raising=False)
-    monkeypatch.setattr(ix, "_bm25_built_version", -1, raising=False)
+    """Forget every built BM25 index and every recorded build version."""
+    monkeypatch.setattr(ix, "_bm25_indexes", {})
+    monkeypatch.setattr(ix, "_bm25_built_versions", {})
+    monkeypatch.setattr(ix, "_bm25_empty_versions", {})
 
 
 def _order_alone(ix, monkeypatch, points, space):
@@ -867,6 +870,30 @@ def test_ac_h8_cold_empty_space_stays_absent_and_answers_dense_only(ix, monkeypa
     assert fake.query_calls  # the dense call still ran
 
 
+def test_ir3_cold_empty_space_is_not_rescrolled_until_its_version_changes(ix, monkeypatch):
+    fake = _install(ix, monkeypatch, FakeHybridQdrant([], dense_ids=[]))
+    _set_versions({"empty-space": 1})
+    _search(ix, "anything", space="empty-space")
+    _search(ix, "anything", space="empty-space")
+    assert _scroll_spaces(fake) == ["empty-space"]  # known empty at version 1: no re-scroll
+    assert "empty-space" not in ix._bm25_indexes
+    fake.points = [_point("p1", "o1", "Alpha", "body", space="empty-space")]
+    _set_versions({"empty-space": 2})
+    assert _oids(_search(ix, "Alpha", space="empty-space")) == ["o1"]
+    assert _scroll_spaces(fake) == ["empty-space", "empty-space"]
+    assert "empty-space" in ix._bm25_indexes
+    assert "empty-space" not in ix._bm25_empty_versions
+
+
+def test_ir2_build_reads_every_scroll_page_and_passes_the_offset_back(ix, monkeypatch):
+    pts = [_point(f"p{i}", f"o{i}", f"Name{i}", f"text {i}") for i in range(7)]
+    fake = _install(ix, monkeypatch, FakeHybridQdrant(pts, page_size=3))
+    ix._ensure_bm25_fresh(SPACE)
+    assert ix._bm25_indexes[SPACE].point_ids == [f"p{i}" for i in range(7)]
+    assert [c["offset"] for c in fake.scroll_calls] == [None, "page-3", "page-6"]
+    assert _oids(_search(ix, "Name6"))[0] == "o6"  # a third-page object is searchable
+
+
 def test_ac_h9_rebuilds_a_space_only_when_its_version_differs(ix, monkeypatch):
     pts = [_point("p1", "o1", "Alpha", "body text")] + _fillers(3)
     fake = _install(ix, monkeypatch, FakeHybridQdrant(pts))
@@ -1118,3 +1145,18 @@ def test_ac_dep_rank_bm25_declared_and_locked():
     root = Path(__file__).resolve().parent.parent
     assert "rank-bm25" in (root / "pyproject.toml").read_text()
     assert 'name = "rank-bm25"' in (root / "uv.lock").read_text()
+
+
+# ---------------------------------------------------------------------------
+# name_keys: the public D13 key derivation the curation script shares
+# ---------------------------------------------------------------------------
+
+
+def test_name_keys_returns_the_stripped_base_and_parenthetical(ix, monkeypatch):
+    monkeypatch.setattr(config, "NAME_TIER_TITLE_WORDS", None)
+    assert ix.name_keys("Mestre Cobra Mansa (FICA)") == {"cobra mansa", "fica"}
+    assert ix.name_keys("Mestra Janja") == {"janja"}
+    assert ix.name_keys("(Salvador)") == {"salvador"}
+    assert ix.name_keys("!!!") == set()
+    monkeypatch.setattr(config, "NAME_TIER_TITLE_WORDS", ["doutor"])
+    assert ix.name_keys("Doutor Mestre Bimba") == {"mestre bimba"}  # read at call time
