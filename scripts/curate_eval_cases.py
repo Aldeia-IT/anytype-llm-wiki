@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Propose expected object IDs for the AC-EVAL2 retrieval eval (Aldeia-IT/aldeia-box#327).
 
 READ-ONLY: the only Qdrant calls are ``scroll`` and ``semantic_search_core`` (a query).
@@ -6,56 +5,52 @@ It never writes to the wiki, to Qdrant or to the index state file; its single ou
 the ``--output`` JSON file. It prints only a one-line summary (no config values, no
 secrets, no chunk text).
 
-A human reviews the proposals once, edits ``expected_ids``, sets ``"frozen": true`` and
-keeps the file outside the repo; the eval test errors on an unfrozen fixture.
+The script decides nothing. Every case comes out with ``expected_ids: []``: no rule of
+the code under test defines the expected IDs (spec AC-EVAL2). A human reviews the labelled
+``proposals`` once, copies the IDs of the objects the name really denotes into
+``expected_ids`` (and picks ``right_id`` for each "(context)" case), sets
+``"frozen": true`` and keeps the file outside the repo. The eval test errors on an
+unfrozen fixture, and on a frozen one whose named cases still have no ``expected_ids``.
 
 Usage:
     uv run python scripts/curate_eval_cases.py --targets targets.json --output proposals.json
 
 ``targets.json`` is ``{"cases": [...]}`` (or a bare list). Each target has ``id``,
 ``group``, ``query``, ``space_id`` and ``types``; ``shared: true`` marks a name that
-several objects share (the script then adds a "(context)" case per member).
+several objects share. For a shared target the script adds one "(context)" case per
+key-equality candidate, with that candidate as ``right_id_proposal``; the human keeps,
+drops or adds these cases.
 
 Proposal sources per case (an object may carry several, in ``sources``):
-  key_equality     the D13 name key of the object equals the query key (``strip_name``)
+  key_equality     the query's D13 key (``strip_name``) is one of the object's
+                   ``indexer.name_keys``
   name_token       every query token (``_tokenize`` of the query key) is in the name tokens
   dense_top20      the top 20 of ``semantic_search_core`` for the query
   name_bm25_top20  the top 20 of a BM25 over object names only
 
 Output: ``{"frozen": false, "cases": [...]}``; each case keeps the target fields plus
-``expected_ids`` (the key_equality proposals, for the human to edit), ``proposals``
-(``object_id``, ``name``, ``type``, ``sources``), ``dense_top_ids`` and, for shared
-members, ``right_id``.
+``expected_ids`` (always ``[]``, for the human to fill), ``proposals`` (``object_id``,
+``name``, ``type``, ``sources``), ``dense_top_ids`` and, for a "(context)" case,
+``right_id: null`` with ``right_id_proposal`` (the candidate the context was taken from).
 """
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
 PROPOSAL_DEPTH = 20
 DENSE_TOP_IDS = 10
-_PAREN_RE = re.compile(r"\(([^()]*)\)\s*$")
-
-
-def _name_helpers():
-    """Return ``(strip_name, tokenize)`` from the indexer (D12 and D13 live there)."""
-    from anytype_llm_wiki import indexer
-
-    strip = getattr(indexer, "strip_name", None) or getattr(indexer, "_strip_name", None)
-    tokenize = getattr(indexer, "_tokenize", None)
-    if strip is None or tokenize is None:
-        raise SystemExit(
-            "indexer lacks strip_name/_tokenize (spec D12, D13): implement them first"
-        )
-    return strip, tokenize
 
 
 def scroll_objects(client, space_id):
-    """Scroll one space and return ``{object_id: {name, type, headings}}`` (read-only)."""
-    from anytype_llm_wiki import config
+    """Scroll one space and return ``{object_id: {name, type, headings}}`` (read-only).
+
+    Follows Qdrant's ``next_page_offset`` until it is ``None``.
+    """
     from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    from anytype_llm_wiki import config
 
     flt = Filter(must=[FieldCondition(key="space_id", match=MatchValue(value=space_id))])
     objects, offset = {}, None
@@ -76,18 +71,16 @@ def scroll_objects(client, space_id):
             return objects
 
 
-def _name_keys(name, strip):
-    keys = {strip(name)}
-    match = _PAREN_RE.search(name)
-    if match:
-        keys.add(strip(match.group(1)))
-    keys.discard("")
-    return keys
+def propose(case, objects, dense_hits):
+    """Build the labelled proposal list for one case; ``objects`` is the space's table.
 
-
-def propose(case, objects, dense_hits, strip, tokenize):
-    """Build the proposal list for one case; ``objects`` is the space's object table."""
+    Returns:
+        ``[{object_id, name, type, sources}]``, candidates only (nothing is decided).
+    """
     from rank_bm25 import BM25Okapi
+
+    from anytype_llm_wiki.indexer import _tokenize as tokenize
+    from anytype_llm_wiki.indexer import name_keys, strip_name
 
     types = set(case.get("types") or [])
     eligible = {
@@ -99,10 +92,10 @@ def propose(case, objects, dense_hits, strip, tokenize):
         if oid in eligible and source not in sources.setdefault(oid, []):
             sources[oid].append(source)
 
-    query_key = strip(case["query"])
+    query_key = strip_name(case["query"])
     query_tokens = set(tokenize(query_key))
     for oid, obj in eligible.items():
-        if query_key and query_key in _name_keys(obj["name"], strip):
+        if query_key and query_key in name_keys(obj["name"]):
             add(oid, "key_equality")
         if query_tokens and query_tokens <= set(tokenize(obj["name"])):
             add(oid, "name_token")
@@ -125,17 +118,19 @@ def propose(case, objects, dense_hits, strip, tokenize):
 
 def context_phrase(obj):
     """Context for a shared-name member: its name's parenthetical, else its first heading."""
-    match = _PAREN_RE.search(obj["name"])
+    from anytype_llm_wiki.indexer import _TRAILING_PAREN_RE
+
+    match = _TRAILING_PAREN_RE.search(obj["name"])
     if match and match.group(1).strip():
         return match.group(1).strip()
     return next((h for h in obj["headings"] if h.strip()), "")
 
 
-def build_case(case, objects, dense_hits, strip, tokenize):
-    proposals = propose(case, objects, dense_hits, strip, tokenize)
+def build_case(case, objects, dense_hits):
+    """One output case: the target fields, an empty ``expected_ids`` and the proposals."""
     out = {k: case[k] for k in ("id", "group", "query", "space_id", "types")}
-    out["expected_ids"] = [p["object_id"] for p in proposals if "key_equality" in p["sources"]]
-    out["proposals"] = proposals
+    out["expected_ids"] = []  # the human fills this in; nothing is pre-decided
+    out["proposals"] = propose(case, objects, dense_hits)
     out["dense_top_ids"] = [h["object_id"] for h in dense_hits[:DENSE_TOP_IDS]]
     return out
 
@@ -148,27 +143,29 @@ def curate(targets, client, search):
         client: Qdrant client (only ``scroll`` is called).
         search: ``f(query, space_id, types, limit) -> hits`` (``semantic_search_core``).
     """
-    strip, tokenize = _name_helpers()
     tables: dict[str, dict] = {}
     cases = []
     for target in targets:
         space = target["space_id"]
-        objects = tables.setdefault(space, scroll_objects(client, space))
+        if space not in tables:
+            tables[space] = scroll_objects(client, space)
+        objects = tables[space]
         dense = search(target["query"], space, target.get("types"), PROPOSAL_DEPTH)
-        base = build_case(target, objects, dense, strip, tokenize)
+        base = build_case(target, objects, dense)
         cases.append(base)
         if not target.get("shared"):
             continue
-        for index, oid in enumerate(base["expected_ids"], start=1):
-            phrase = context_phrase(objects[oid])
+        members = [p for p in base["proposals"] if "key_equality" in p["sources"]]
+        for index, member in enumerate(members, start=1):
+            phrase = context_phrase(objects[member["object_id"]])
             if not phrase:
                 continue
             query = f"{target['query']} ({phrase})"
             variant = {**target, "id": f"{target['id']}-context-{index}", "query": query}
             dense_variant = search(query, space, target.get("types"), PROPOSAL_DEPTH)
-            case = build_case(variant, objects, dense_variant, strip, tokenize)
-            case["expected_ids"] = list(base["expected_ids"])
-            case["right_id"] = oid
+            case = build_case(variant, objects, dense_variant)
+            case["right_id"] = None  # the human picks it; see right_id_proposal
+            case["right_id_proposal"] = member
             cases.append(case)
     return {"frozen": False, "generated_by": "scripts/curate_eval_cases.py", "cases": cases}
 

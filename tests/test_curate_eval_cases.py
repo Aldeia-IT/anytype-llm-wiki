@@ -34,7 +34,7 @@ def script():
 
 @pytest.fixture
 def wired(monkeypatch, tmp_path):
-    import anytype_llm_wiki.indexer as indexer
+    from anytype_llm_wiki import indexer
 
     monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
@@ -80,7 +80,7 @@ def test_proposals_are_labelled_with_source_name_and_type(script, wired, tmp_pat
     assert "dense_top20" in by_id["oB"]["sources"]
     assert "name_bm25_top20" in by_id["oA"]["sources"]
     assert "oS" not in by_id  # a wiki_source is outside the case's types
-    assert case["expected_ids"] == ["oA"]
+    assert case["expected_ids"] == []  # proposals only: the human decides (AC-EVAL2)
     assert case["dense_top_ids"] == ["oB", "oA"]
 
 
@@ -90,11 +90,35 @@ def test_shared_names_get_a_context_case_per_member(script, wired, tmp_path):
     script.main(["--targets", str(_write_targets(tmp_path, targets)), "--output", str(out)])
     cases = {c["id"]: c for c in json.loads(out.read_text())["cases"]}
     bare = cases["cm"]
-    assert set(bare["expected_ids"]) == {"oC1", "oC2"}
+    assert bare["expected_ids"] == []
+    assert {p["object_id"] for p in bare["proposals"] if "key_equality" in p["sources"]} == {
+        "oC1", "oC2"}
     contexts = [c for cid, c in cases.items() if cid.startswith("cm-context")]
-    assert {c["right_id"] for c in contexts} == {"oC1", "oC2"}
-    assert {c["query"] for c in contexts} == {"Cobra Mansa (FICA)", "Cobra Mansa (Bahia)"}
-    assert all(set(c["expected_ids"]) == {"oC1", "oC2"} for c in contexts)
+    assert {c["right_id_proposal"]["object_id"] for c in contexts} == {"oC1", "oC2"}
+    assert all(c["right_id"] is None and c["expected_ids"] == [] for c in contexts)
+    by_member = {c["right_id_proposal"]["object_id"]: c for c in contexts}
+    assert by_member["oC1"]["query"] == "Cobra Mansa (FICA)"
+    assert by_member["oC2"]["query"] == "Cobra Mansa (Bahia)"
+    assert by_member["oC1"]["right_id_proposal"]["name"] == "Cobra Mansa (FICA)"
+    assert by_member["oC1"]["right_id_proposal"]["type"] == "wiki_entity"
+    assert "key_equality" in by_member["oC1"]["right_id_proposal"]["sources"]
+
+
+def test_each_space_is_scrolled_once_for_many_targets(script, wired, tmp_path):
+    out = tmp_path / "out.json"
+    targets = [_target(id="t1"), _target(id="t2", query="Cobra Mansa")]
+    script.main(["--targets", str(_write_targets(tmp_path, targets)), "--output", str(out)])
+    assert len(wired.scroll_calls) == 1
+    assert len(json.loads(out.read_text())["cases"]) == 2
+
+
+def test_scroll_objects_reads_every_page_and_passes_the_offset_back(script, wired):
+    wired.page_size = 2
+    objects = script.scroll_objects(wired, SPACE)
+    assert {"oA", "oB", "oC1", "oC2", "oS"} <= set(objects)
+    assert len(objects) == 9  # five named objects and four fillers, over five pages
+    assert [c["offset"] for c in wired.scroll_calls] == [
+        None, "page-2", "page-4", "page-6", "page-8"]
 
 
 def test_script_is_read_only_and_prints_nothing_secret(script, wired, monkeypatch,
