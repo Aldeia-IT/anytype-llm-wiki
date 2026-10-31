@@ -139,6 +139,24 @@ It scans entity/concept relation arrays, strips any id that points at a
 lost — the "cited by" view is still available via Anytype backlinks. Fresh spaces
 (no prior file-back history) need no action.
 
+### Payload schema v4: `wiki_url` backfill, no re-embed
+
+`semantic_search` hits from sources ingested from a URL now carry `wiki_url`
+(Aldeia-IT/aldeia-box#1413). The Qdrant payload schema moves from v3 to **v4**.
+No action is needed beyond the regular unscoped reindex: call the `reindex_anytype`
+tool without `space_id`, or let the scheduled reindex run.
+
+From a stored v3 index, that run backfills `wiki_url` **payload-only**: each unchanged
+`wiki_source` that has a `wiki_url` gets a `set_payload` on its points (filtered by
+`object_id`), with no embedding, upsert or delete. The count is reported as
+`payload_backfilled`. An object whose fetch fails (deleted since the listing, a transient
+HTTP error) is counted in `payload_backfill_errors` and skipped; such a run does not stamp
+the marker, so the next unscoped run retries. The stored `wiki_url` has its userinfo and
+secret-looking query parameters removed; the rest of the link is kept. The marker is stamped only by an unscoped run; the scoped
+auto-reindex after `wiki_ingest`/`wiki_remember` repeats the cheap backfill for its
+space until then. An index still at v2 or lower gets the full re-embed as before, which
+writes `wiki_url` too.
+
 ## Future versions
 
 Migration notes for v0.4.0 and later releases will be appended to this file as

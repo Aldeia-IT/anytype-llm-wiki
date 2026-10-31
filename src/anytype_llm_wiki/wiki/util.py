@@ -19,7 +19,7 @@ import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote_plus, urlparse, urlsplit, urlunparse, urlunsplit
 
 from . import config
 
@@ -202,6 +202,95 @@ def scrub_credentials(url: str) -> str:
         "",   # fragment
     ))
     return scrubbed
+
+
+# ---------------------------------------------------------------------------
+# scrub_url_secrets — narrow scrub that keeps a stored link working
+# ---------------------------------------------------------------------------
+
+# Query-parameter name parts that mark a secret (Aldeia-IT/aldeia-box#1413).
+# A name matches when, lowercased, it equals one of these or one of its parts
+# (split on non-alphanumerics and camelCase) does: "api_key", "X-Amz-Signature",
+# "sessionToken" and "apikey" match; "v", "id", "page", "q" and "keyword" do not.
+SECRET_QUERY_PARAM_PARTS = frozenset({
+    "token", "key", "secret", "password", "passwd", "pwd", "pass",
+    "sig", "signature", "auth", "authorization", "credential", "credentials",
+    "jwt", "apikey", "accesstoken", "clientsecret",
+})
+
+_PARAM_NAME_PART_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+
+
+def _is_secret_param_name(name: str) -> bool:
+    """Return True when a query-parameter name looks like it carries a secret.
+
+    Args:
+        name: the raw (still percent-encoded) parameter name.
+
+    Returns:
+        True when the whole lowercased name, or any of its parts, is in
+        ``SECRET_QUERY_PARAM_PARTS``.
+    """
+    decoded = unquote_plus(name)
+    if decoded.lower() in SECRET_QUERY_PARAM_PARTS:
+        return True
+    parts = (p.lower() for p in _PARAM_NAME_PART_RE.findall(decoded))
+    return any(p in SECRET_QUERY_PARAM_PARTS for p in parts)
+
+
+def scrub_url_secrets(url: str) -> str:
+    """Return ``url`` without userinfo and secret-looking query parameters.
+
+    A narrow scrub for a URL that is stored to be opened again (the
+    ``wiki_url`` search payload, Aldeia-IT/aldeia-box#1413), unlike
+    ``scrub_credentials``, which drops the whole query string and fragment.
+    It removes ``user:pass@`` and every query parameter whose name looks
+    secret (see ``SECRET_QUERY_PARAM_PARTS``, case-insensitive). Scheme, host,
+    port, path, the other parameters (original order and encoding) and the
+    fragment are kept exactly; a URL with nothing to remove is returned as is.
+
+    Args:
+        url: the URL to scrub. A non-string is converted with ``str``.
+
+    Returns:
+        The scrubbed URL. Falls back to the raw input when parsing fails.
+    """
+    if not isinstance(url, str):
+        return str(url)
+    # Scheme-less "user:pass@host/path": urlsplit would read the authority as a
+    # path, so strip the leading userinfo here and scrub the rest.
+    if "://" not in url:
+        first_slash = url.find("/")
+        authority = url if first_slash == -1 else url[:first_slash]
+        if "@" in authority:
+            return scrub_url_secrets(url[url.find("@") + 1:])
+    try:
+        parts = urlsplit(url)
+    except (ValueError, TypeError):
+        return url
+
+    netloc = parts.netloc.rsplit("@", 1)[1] if "@" in parts.netloc else parts.netloc
+    params = parts.query.split("&") if parts.query else []
+    kept = [p for p in params if not _is_secret_param_name(p.split("=", 1)[0])]
+    if netloc == parts.netloc and len(kept) == len(params):
+        return url
+    return urlunsplit((parts.scheme, netloc, parts.path, "&".join(kept), parts.fragment))
+
+
+def object_type_key(obj: dict) -> str:
+    """Return an Anytype object's type key, for a dict or a plain-string ``type``.
+
+    Args:
+        obj: an Anytype object or list summary.
+
+    Returns:
+        ``type.key`` when ``type`` is a dict, the string itself when it is a
+        string, and "" when it is missing or empty.
+    """
+    t = obj.get("type")
+    if isinstance(t, dict):
+        return t.get("key", "") or ""
+    return t or ""
 
 
 # ---------------------------------------------------------------------------

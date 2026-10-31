@@ -31,8 +31,10 @@ INDEX_STATE_DIR = Path(os.environ.get(
 ))
 INDEX_STATE_FILE = INDEX_STATE_DIR / "state.json"
 
-# Qdrant chunk-payload schema version. Bumping this forces a one-time full
-# re-embed on the next reindex (see indexer.reindex migration logic). v1 = the
-# 6-field payload; v2 adds last_modified_date; v3 adds source_type and
-# domain_tags.
-PAYLOAD_SCHEMA_VERSION = 3
+# Qdrant chunk-payload schema version. Bumping this forces a one-time backfill
+# on the next unscoped reindex (see indexer._run_reindex migration logic). v1 =
+# the 6-field payload; v2 adds last_modified_date; v3 adds source_type and
+# domain_tags (v2 and v3 force a full re-embed); v4 adds wiki_url on sources
+# ingested from a URL (payload-only set_payload backfill from v3, no re-embed;
+# Aldeia-IT/aldeia-box#1413).
+PAYLOAD_SCHEMA_VERSION = 4

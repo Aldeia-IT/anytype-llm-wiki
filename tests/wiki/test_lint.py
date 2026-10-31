@@ -1607,6 +1607,48 @@ class TestDuplicateSweep:
         )
 
     @respx.mock
+    def test_duplicate_sweep_calls_core_with_limit_keyword(self, monkeypatch):
+        """#1413 D4: the dedup sweep passes limit=5 by keyword and never sets ingested_after.
+
+        The old call passed 5 positionally, which landed on ``ingested_after`` of the
+        real semantic_search_core (5 is not a datetime). The fake binds every call to
+        the real signature, so a positional 5 is caught and the test follows any
+        change to that signature.
+        """
+        import inspect
+
+        import anytype_llm_wiki.indexer as _idx_mod
+        entity_a = _make_entity("obj-lim-a", name="Entity A Lim", relations=[], backlinks=[])
+        entity_b = _make_entity("obj-lim-b", name="Entity B Lim", relations=[], backlinks=[])
+        get_side_effect, register = _standard_mocks(objects=[entity_a, entity_b])
+        register(entity_a)
+        register(entity_b)
+
+        captured = []
+
+        real_signature = inspect.signature(_idx_mod.semantic_search_core)
+
+        def fake_core(*args, **kwargs):
+            bound = real_signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            captured.append(dict(bound.arguments))
+            return []
+
+        monkeypatch.setattr(_idx_mod, "semantic_search_core", fake_core)
+
+        respx.get().mock(side_effect=get_side_effect)
+        respx.post().mock(return_value=httpx.Response(201, json={"object": {"id": "log-001", "name": "lint"}}))
+
+        from anytype_llm_wiki.wiki.lint import wiki_lint
+        wiki_lint(space_id=FAKE_SPACE_ID, include_duplicates=True)
+
+        assert captured, "dedup sweep must call semantic_search_core"
+        for call_args in captured:
+            assert call_args["limit"] == 5, f"limit must be 5; got {call_args}"
+            assert call_args["ingested_after"] is None, f"ingested_after must stay unset; got {call_args}"
+            assert call_args["ingested_before"] is None
+
+    @respx.mock
     def test_title_duplicate_cross_kind_identical(self, monkeypatch):
         """Title-based pass flags an entity and a concept that share a normalized
         title — the cross-kind twin that type-scoped resolution never merges."""

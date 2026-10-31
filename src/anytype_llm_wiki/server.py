@@ -1,17 +1,12 @@
 """MCP server exposing semantic search, reindex, and wiki bootstrap tools."""
 
 import sys
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from fastmcp import FastMCP
 
+from . import __version__ as _VERSION
 from .indexer import reindex, semantic_search_core
 from .wiki.bootstrap import wiki_bootstrap as _wiki_bootstrap
-
-try:
-    _VERSION = _pkg_version("anytype-llm-wiki")
-except PackageNotFoundError:  # running from a source tree without install metadata
-    _VERSION = "0.2.0"
 
 # Report the package version over MCP (serverInfo.version) instead of falling
 # back to FastMCP's own version.
@@ -63,6 +58,9 @@ def semantic_search(
 
     Returns:
         List of matching chunks with object name, type, heading, text snippet, and score.
+        Hits from sources ingested from a URL also carry ``wiki_url`` (the source URL,
+        without userinfo or secret-looking query parameters); the key is absent on every
+        other hit.
     """
     from pydantic import ValidationError as _PydanticValidationError
     from qdrant_client.models import DatetimeRange as _DatetimeRange
@@ -114,7 +112,9 @@ def reindex_anytype(space_id: str | None = None) -> dict:
         space_id: Optional space ID to reindex. If omitted, reindexes all spaces.
 
     Returns:
-        Stats: spaces checked, objects indexed, chunks created, objects removed.
+        Stats: spaces checked, objects indexed, chunks created, objects removed,
+        plus ``payload_backfilled`` / ``payload_backfill_errors`` (the one-off
+        wiki_url payload backfill of a schema v3 index).
     """
     return reindex(space_id=space_id)
 

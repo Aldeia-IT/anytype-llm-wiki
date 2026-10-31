@@ -17,7 +17,14 @@ from pathlib import Path
 
 import httpx
 
+from .. import __version__
 from . import config
+
+# Descriptive User-Agent sent on every fetch hop. Wikimedia's bot policy (and
+# other sites) reject the default ``python-httpx/x.y`` with a 403.
+USER_AGENT = (
+    f"anytype-llm-wiki/{__version__} (+https://github.com/Aldeia-IT/anytype-llm-wiki)"
+)
 
 _ALLOWED_SCHEMES = {"http", "https"}
 _DEFAULT_ALLOWED_PORTS = {None, 80, 443}
@@ -141,7 +148,9 @@ def _fetch_remote(url_str: str) -> str:
     timeout = httpx.Timeout(connect=5, read=15, write=5, pool=5)
     current = httpx.URL(url_str)
 
-    with httpx.Client(follow_redirects=False, timeout=timeout) as client:
+    with httpx.Client(
+        follow_redirects=False, timeout=timeout, headers={"User-Agent": USER_AGENT}
+    ) as client:
         for _hop in range(_MAX_REDIRECTS + 1):
             _assert_url_safe(current)
             with client.stream("GET", current) as resp:

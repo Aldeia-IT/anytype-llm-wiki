@@ -31,7 +31,7 @@ from .. import indexer
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .query import _parse_relation_elements, _fetch_cached
 from .remember import _resolve_select_tag
-from .util import normalize_title, scrub_credentials, strip_control_chars
+from .util import normalize_title, object_type_key, scrub_credentials, strip_control_chars
 from ..anytype_client import AnytypeReadClient
 from .wiki_client import WikiClient
 
@@ -82,11 +82,8 @@ _NEEDS_REVIEW = "needs-review"
 # ---------------------------------------------------------------------------
 
 
-def _type_of(obj: dict) -> str:
-    t = obj.get("type")
-    if isinstance(t, dict):
-        return t.get("key", "")
-    return t or ""
+# Shared with indexer._backfill_wiki_url (Aldeia-IT/aldeia-box#1413).
+_type_of = object_type_key
 
 
 # Generic/stopword tokens that, as the *sole* distinctive content of a shorter
@@ -614,7 +611,7 @@ def wiki_lint(
                     q = (desc_prop.get("text") if desc_prop else "") or o.get("name", "")
                     try:
                         cands = indexer.semantic_search_core(
-                            q, space_id, list(_DEDUP_TYPES), 5
+                            q, space_id, list(_DEDUP_TYPES), limit=5
                         )
                     except Exception as exc:  # noqa: BLE001 — sweep is best-effort
                         report["warnings"].append(

@@ -265,3 +265,50 @@ class TestMaxBytesLimit:
         assert len(result) < len(large_html), (
             "Expected fetch result to be truncated when WIKI_FETCH_MAX_BYTES is exceeded"
         )
+
+
+class TestFetchUserAgent:
+    """Aldeia-IT/aldeia-box#1413: every fetch hop sends a descriptive User-Agent.
+
+    Wikimedia's bot policy answers the default ``python-httpx/x.y`` with a 403.
+    """
+
+    @respx.mock
+    def test_user_agent_sent_on_every_hop_including_redirects(self, monkeypatch):
+        import socket
+        from importlib.metadata import version
+
+        from anytype_llm_wiki.wiki import fetch as fetch_mod
+
+        # Resolve every host to a public address so no real DNS lookup happens.
+        monkeypatch.setattr(
+            fetch_mod.socket,
+            "getaddrinfo",
+            lambda host, *a, **k: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
+            ],
+        )
+        first = respx.get("https://en.wikipedia.org/wiki/Capoeira_old").mock(
+            return_value=httpx.Response(
+                301, headers={"Location": "https://en.wikipedia.org/wiki/Capoeira"}
+            )
+        )
+        second = respx.get("https://en.wikipedia.org/wiki/Capoeira").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<html><body><h1>Capoeira</h1><p>Body.</p></body></html>",
+            )
+        )
+
+        result = fetch_mod.fetch_url("https://en.wikipedia.org/wiki/Capoeira_old")
+
+        assert "Capoeira" in result
+        expected = (
+            f"anytype-llm-wiki/{version('anytype-llm-wiki')} "
+            "(+https://github.com/Aldeia-IT/anytype-llm-wiki)"
+        )
+        assert fetch_mod.USER_AGENT == expected
+        for route in (first, second):
+            assert route.call_count == 1
+            assert route.calls.last.request.headers["User-Agent"] == expected

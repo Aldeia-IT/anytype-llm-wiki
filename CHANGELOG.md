@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`semantic_search` hits carry `wiki_url` (Aldeia-IT/aldeia-box#1413).** A hit from a
+  `wiki_source` ingested from a URL now includes `wiki_url`, a working link to the source:
+  userinfo (`user:pass@`) and secret-looking query parameters (`token`, `key`, `api_key`,
+  `X-Amz-Signature`, ...) are removed, the rest of the URL (other parameters, fragment) is
+  kept. Every other hit is unchanged (the key is absent, and `source_type`/`domain_tags`
+  stay filters only). The chunk payload stores `wiki_url`, and the payload schema is bumped
+  to **v4**. An existing v3 index gains the field on the next unscoped reindex through a
+  payload-only backfill (`set_payload` by `object_id`, no re-embed), reported as
+  `payload_backfilled` in the reindex stats; see MIGRATIONS.md.
 - **Concept contradictions surfaced in `wiki_lint` (#426).** `wiki_lint` now flags
   `wiki_concept` contradictions (severity `critical`) exactly as it already flags
   `wiki_entity` ones; the finding is resolved by setting `wiki_last_reviewed` on the
@@ -28,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detected and cross-linked via `wiki_contradictions` (candidates drawn from `wiki_related`,
   comparable text from `wiki_definition`; mixed-kind peers read their own type's text key).
   Concept contradictions are now surfaced by `wiki_lint` (#426, above).
+
+### Fixed
+
+- **`wiki_lint` duplicate sweep result limit (Aldeia-IT/aldeia-box#1413).** The sweep
+  passed its limit positionally, so `5` landed on `ingested_after`; it now passes
+  `limit=5`.
+- **`wiki_ingest` URL fetches send a descriptive User-Agent (Aldeia-IT/aldeia-box#1413).**
+  Every fetch hop, redirects included, sends
+  `anytype-llm-wiki/<version> (+https://github.com/Aldeia-IT/anytype-llm-wiki)` instead of
+  httpx's default `python-httpx/x.y`, which Wikimedia's bot policy answers with a 403.
+  The version comes from the installed package metadata (`anytype_llm_wiki.__version__`).
 
 ## [0.8.0] - 2026-06-14
 

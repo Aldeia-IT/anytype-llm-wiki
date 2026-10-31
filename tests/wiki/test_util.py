@@ -428,3 +428,40 @@ class TestCredentialScrubbing:
         assert "SEKRET" not in result, f"query secret leaked; got: {result!r}"
         assert "api_key" not in result, f"query param leaked; got: {result!r}"
         assert "host" in result, f"host not preserved; got: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# scrub_url_secrets: narrow scrub for the stored wiki_url (Aldeia-IT/aldeia-box#1413)
+# ---------------------------------------------------------------------------
+
+
+class TestScrubUrlSecrets:
+    @pytest.mark.parametrize("raw, expected", [
+        ("https://www.youtube.com/watch?v=abc123", "https://www.youtube.com/watch?v=abc123"),
+        (
+            "https://pt.wikipedia.org/wiki/Mestre_Bimba#Vida",
+            "https://pt.wikipedia.org/wiki/Mestre_Bimba#Vida",
+        ),
+        ("https://u:p@h.org/x?token=abc&id=3", "https://h.org/x?id=3"),
+        ("https://h.org/s?API_KEY=zz9&q=x", "https://h.org/s?q=x"),
+        (
+            "https://b.example/o?X-Amz-Signature=s1&X-Amz-Credential=c1&X-Amz-Date=d&page=2",
+            "https://b.example/o?X-Amz-Date=d&page=2",
+        ),
+        (
+            "https://h.org/a?sessionToken=t1&apikey=k1&Password=p1&sig=s2&keyword=capoeira",
+            "https://h.org/a?keyword=capoeira",
+        ),
+        ("https://h.org:8443/p?q=%C3%A9+a&auth=x&id=2#frag", "https://h.org:8443/p?q=%C3%A9+a&id=2#frag"),
+        ("https://h.org/p?access_token=t1", "https://h.org/p"),
+        ("u:p@h.org/a?x=1", "h.org/a?x=1"),
+    ])
+    def test_scrub_url_secrets(self, raw, expected):
+        from anytype_llm_wiki.wiki.util import scrub_url_secrets
+
+        assert scrub_url_secrets(raw) == expected
+
+    def test_non_string_is_stringified(self):
+        from anytype_llm_wiki.wiki.util import scrub_url_secrets
+
+        assert scrub_url_secrets(None) == "None"

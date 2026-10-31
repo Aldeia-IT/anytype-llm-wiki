@@ -39,6 +39,7 @@ from .extraction import _DETERMINISTIC_OPTS, _is_model_not_pulled, sanitize_name
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .util import (
     _parse_relation_elements,
+    object_type_key,
     scrub_credentials,
     strip_control_chars,
 )
@@ -254,11 +255,8 @@ def _safe_name(question: str) -> str:
     return strip_control_chars(question or "")[:_NAME_MAX_CHARS]
 
 
-def _type_of(obj: dict) -> str:
-    t = obj.get("type")
-    if isinstance(t, dict):
-        return t.get("key", "")
-    return t or ""
+# Shared with indexer._backfill_wiki_url (Aldeia-IT/aldeia-box#1413).
+_type_of = object_type_key
 
 
 def _parse_iso(s: str) -> datetime | None:
