@@ -31,3 +31,8 @@ abs-*
 !/.aldeia/context/
 !/.aldeia/devops.md
 !/.aldeia/README.md
+
+# Real AC-EVAL2 fixtures and results hold space IDs, object IDs and fleet names: never
+# commit them; only the placeholder template is tracked (Aldeia-IT/aldeia-box#327).
+tests/eval/fixtures/*.json
+!tests/eval/fixtures/*.example.json
