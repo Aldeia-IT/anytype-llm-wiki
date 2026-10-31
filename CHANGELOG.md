@@ -18,17 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to **v4**. An existing v3 index gains the field on the next unscoped reindex through a
   payload-only backfill (`set_payload` by `object_id`, no re-embed), reported as
   `payload_backfilled` in the reindex stats; see MIGRATIONS.md.
-- **Hybrid dense + lexical (BM25) retrieval with RRF fusion (Aldeia-IT/aldeia-box#327).** Retrieval now
-  fuses the dense (bge-m3 cosine) signal with a lexical **BM25** signal via app-level
-  **Reciprocal Rank Fusion (k=60)** in the shared `hybrid_search_core`, surfacing exact
-  names and technical keywords that dense embeddings alone miss. The `semantic_search`
-  MCP tool and `wiki_query` Tier-2 both route through it; no tool signature or API
-  change. The BM25 index is built lazily in-memory from a Qdrant scroll and invalidated
-  across processes by a monotonic `bm25_corpus_version` stamp in the index state file
-  (the cron reindexes in a separate interpreter and only bumps the stamp; the long-lived
-  server rebuilds on the next query). BM25 failures degrade gracefully to dense-only; a
-  Qdrant outage on the dense path propagates. Adds one dependency, `rank-bm25`
-  (Apache-2.0, numpy-only). No Qdrant schema change and no `PAYLOAD_SCHEMA_VERSION` bump.
+- **Name-aware hybrid retrieval (Aldeia-IT/aldeia-box#327).** `semantic_search` and
+  `wiki_query` Tier-2 now go through `hybrid_search_core`: for a call with a `space_id`,
+  the dense (bge-m3) list is fused by Reciprocal Rank Fusion (k=60) with an in-memory
+  **BM25** list over each chunk's object name (counted twice), heading and full text,
+  tokenized accent- and case-insensitively with English and Portuguese stopwords. A
+  **name tier** then ranks objects whose name matches the query first (exact name key,
+  then every query word in the name), ignoring a trailing `(context)` and one leading
+  title word (new env var `NAME_TIER_TITLE_WORDS`, built-in `mestre`, `professor`, ...);
+  an exact-name object neither list returned still enters. The hit `score` now follows
+  the result order (tier offset plus RRF): opaque, higher is better, not comparable
+  across calls. Calls without `space_id` stay dense-only. One BM25 index per space, built
+  lazily and rebuilt when a reindex or re-embed bumps that space's version in the state
+  file (`_bm25_corpus_versions`). BM25-side failures fall back to dense-only; a Qdrant
+  outage on the dense call propagates. Adds `rank-bm25` (Apache-2.0, numpy only). No
+  Qdrant schema change and no `PAYLOAD_SCHEMA_VERSION` bump. `wiki_lint` stays dense.
 - **Concept contradictions surfaced in `wiki_lint` (#426).** `wiki_lint` now flags
   `wiki_concept` contradictions (severity `critical`) exactly as it already flags
   `wiki_entity` ones; the finding is resolved by setting `wiki_last_reviewed` on the

@@ -70,21 +70,32 @@ original `domain_hint` for pre-#336 objects is recoverable nowhere, so existing 
 are NOT retroactively tagged. Only objects created/updated after the upgrade carry
 `domain_tags`; `wiki_source` objects are stamped `source_type` on next ingest/remember.
 
-## Retrieval: hybrid dense + lexical (BM25) fusion (#327)
+## Retrieval: name-aware hybrid search (#327)
 
-Retrieval is **hybrid**: the dense (bge-m3 cosine) signal is fused with a lexical
-**BM25** signal via app-level **Reciprocal Rank Fusion (RRF, k=60)** in
-`indexer.hybrid_search_core` (the shared core behind the `semantic_search` MCP tool
-and `wiki_query` Tier-2). The dense path is unchanged (`_dense_search_with_ids`
-reuses `semantic_search_core`'s filter construction via the extracted
-`_build_search_filter`). The BM25 index is a **lazy, in-memory** `_BM25Index` built
-on the first hybrid query after a corpus change or process restart by scrolling
-Qdrant. Cross-process freshness is signalled by a monotonic `bm25_corpus_version`
-integer stamped into the index state file on every reindex/reembed; the long-lived
-server reads it on each query and rebuilds when it changes (the cron reindexes in a
-separate interpreter and only bumps the stamp). BM25 failures degrade gracefully to
-dense-only; a Qdrant outage on the dense path propagates. `rank-bm25` (Apache-2.0,
-numpy-only) is the only new dependency.
+`indexer.hybrid_search_core` (behind the `semantic_search` MCP tool and `wiki_query`
+Tier-2; `wiki_lint` stays on `semantic_search_core`) runs the dense query first, outside
+any `try` (a Qdrant outage propagates). For a scoped call it then fuses the dense list
+with the space's **BM25** list by RRF (k=60, keyed on the Qdrant point id, depth
+`max(limit * 2, 50)`), applies the **name tier** and scores
+`tier_offset (2.0 exact name / 1.0 all words / 0) + first-chunk bonus (0.5) + RRF`, so
+the score is monotone with the output order. Non-dense chunks pass the
+`types`/`source_type`/`domain_tags` gate in code and are dropped under any date filter.
+Unscoped calls (falsy `space_id`) are dense-only.
+
+- **Index:** one `_SpaceIndex` per space in `_bm25_indexes`, built lazily from a Qdrant
+  scroll filtered on `space_id` (per-space IDF), under `_bm25_build_lock` (FastMCP runs
+  sync tools in a thread pool). It keeps per chunk the point id, a hit payload
+  (`text[:500]`, `wiki_url`), `source_type`, `domain_tags`, and a per-object name table.
+- **Freshness:** `state.json` key `_bm25_corpus_versions` (`{space_id: int}`), bumped by
+  `_run_reindex` for each space it indexed, removed or backfilled in, and by
+  `reembed_object` under `_reindex_lock()`. A server rebuilds a space when its on-disk
+  version differs from the one it built against.
+- **Tokenizer (`_tokenize`):** NFKD fold + casefold, `[a-z0-9]+` joined by `-_.'` (whole
+  token plus parts), EN + PT stopwords, no stemming. **Name key (`strip_name`):** fold,
+  drop a trailing `(...)`, normalise, drop one leading title word
+  (`config.NAME_TIER_TITLE_WORDS`, read at call time; `None` = built-in list).
+- Any BM25-side failure (including a missing `rank-bm25`) gives the dense list with
+  cosine scores and one WARN `bm25_fallback`.
 
 ## Configuration (environment variables)
 
