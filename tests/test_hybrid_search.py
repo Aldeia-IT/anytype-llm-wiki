@@ -24,9 +24,9 @@ import pytest
 
 from anytype_llm_wiki import config
 from tests.test_indexer import (
+    _LAST_MOD,
     FakeQdrantClientWithSearch,
     _entity_obj,
-    _LAST_MOD,
     _source_obj,
 )
 
@@ -150,7 +150,7 @@ def _read_versions():
 @pytest.fixture
 def ix(monkeypatch, tmp_path):
     """The indexer module with an isolated state file and cleared per-space BM25 state."""
-    import anytype_llm_wiki.indexer as indexer
+    from anytype_llm_wiki import indexer
 
     monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
@@ -398,6 +398,7 @@ def _title_scenario(ix, monkeypatch, object_name, query):
     pts = [_point(f"d{i}", f"dec{i}", f"Notes {i}", (query + " ") * 6) for i in range(3)]
     pts.append(_point("tgt", "target", object_name, "bio"))
     pts += _fillers(5)
+    _reset_index_state(ix, monkeypatch)  # each scenario is a new corpus at version 0
     _install(ix, monkeypatch, FakeHybridQdrant(pts, dense_ids=["d0", "d1", "d2", "tgt"]))
     return _search(ix, query)
 
@@ -535,8 +536,8 @@ def test_ac_score_mono_bands_and_offsets(ix, monkeypatch):
 
 def test_ac_score_mono_tier2_object_cap_keeps_tier_one_object(ix, monkeypatch):
     """AC-SCORE-MONO: Tier-2's object cap keeps a tier-1 object over higher-RRF untiered ones."""
-    from anytype_llm_wiki.wiki import query as q
     from anytype_llm_wiki.wiki import config as wiki_config
+    from anytype_llm_wiki.wiki import query as q
 
     pts = [_point(f"d{i}", f"dec{i}", f"Notes {i}", "pastinha " * 8) for i in range(4)]
     pts.append(_point("t", "target", "Mestre Pastinha", "bio"))
@@ -931,7 +932,7 @@ def test_ac_h9_concurrent_first_queries_build_once(ix, monkeypatch):
 
 def _reindex_env(monkeypatch, tmp_path, *, state, objects, stored=4):
     """Wire reindex() over spaces. ``objects`` is {space: {oid: object dict}}."""
-    import anytype_llm_wiki.indexer as indexer
+    from anytype_llm_wiki import indexer
 
     state = dict(state)
     state["_payload_schema_version"] = stored
@@ -1013,7 +1014,7 @@ def test_ac_h10_reindex_bumps_the_space_it_backfilled(monkeypatch, tmp_path):
 
 
 def _reembed_env(monkeypatch, tmp_path):
-    import anytype_llm_wiki.indexer as indexer
+    from anytype_llm_wiki import indexer
 
     monkeypatch.setattr(config, "INDEX_STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(config, "INDEX_STATE_DIR", tmp_path)
@@ -1101,7 +1102,7 @@ def test_ac_h11_wiki_lint_still_uses_the_dense_core():
 
 
 def test_ac_h11_server_semantic_search_forwards_arguments_to_hybrid(monkeypatch):
-    import anytype_llm_wiki.indexer as indexer
+    from anytype_llm_wiki import indexer
     from anytype_llm_wiki.server import semantic_search
 
     seen = {}

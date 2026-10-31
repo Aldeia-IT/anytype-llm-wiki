@@ -36,11 +36,19 @@ def semantic_search(
     domain_tags: list[str] | None = None,
     limit: int = 10,
 ) -> list[dict]:
-    """Search Anytype objects by semantic similarity.
+    """Search Anytype objects: meaning plus keywords, with name matches first.
+
+    A call with ``space_id`` is hybrid: semantic similarity fused with keyword
+    (BM25) matching over object name, heading and text, and objects whose name
+    matches the query rank first (exact name first, then names containing every
+    query word; a leading title such as "Mestre" and a trailing "(context)" are
+    ignored for the match, accents and case too). Pass ``space_id`` for name
+    lookups: a call without it is semantic-only.
 
     Args:
-        query: Natural language search query.
-        space_id: Optional space ID to filter results.
+        query: Natural language search query, or a name to look up.
+        space_id: Optional space ID to filter results. Required for keyword
+            matching and name lookups.
         types: Optional list of type keys to filter (e.g. ["page", "note"]).
             When omitted (and no source_type filter is given), results default to
             the non-source wiki types — wiki_source excerpts are excluded from
@@ -59,6 +67,8 @@ def semantic_search(
 
     Returns:
         List of matching chunks with object name, type, heading, text snippet, and score.
+        Chunks are ordered best first; ``score`` follows that order, higher is better,
+        and is not comparable across calls.
         Hits from sources ingested from a URL also carry ``wiki_url`` (the source URL,
         without userinfo or secret-looking query parameters); the key is absent on every
         other hit.
