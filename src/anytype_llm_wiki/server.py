@@ -1,17 +1,12 @@
 """MCP server exposing semantic search, reindex, and wiki bootstrap tools."""
 
 import sys
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from fastmcp import FastMCP
 
+from . import __version__ as _VERSION
 from .indexer import reindex, semantic_search_core
 from .wiki.bootstrap import wiki_bootstrap as _wiki_bootstrap
-
-try:
-    _VERSION = _pkg_version("anytype-llm-wiki")
-except PackageNotFoundError:  # running from a source tree without install metadata
-    _VERSION = "0.2.0"
 
 # Report the package version over MCP (serverInfo.version) instead of falling
 # back to FastMCP's own version.

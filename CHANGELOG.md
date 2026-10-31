@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`wiki_lint` duplicate sweep result limit (Aldeia-IT/aldeia-box#1413).** The sweep
   passed its limit positionally, so `5` landed on `ingested_after`; it now passes
   `limit=5`.
+- **`wiki_ingest` URL fetches send a descriptive User-Agent (Aldeia-IT/aldeia-box#1413).**
+  Every fetch hop, redirects included, sends
+  `anytype-llm-wiki/<version> (+https://github.com/Aldeia-IT/anytype-llm-wiki)` instead of
+  httpx's default `python-httpx/x.y`, which Wikimedia's bot policy answers with a 403.
+  The version comes from the installed package metadata (`anytype_llm_wiki.__version__`).
 
 ## [0.8.0] - 2026-06-14
 
