@@ -1,6 +1,8 @@
 {
   "frozen": false,
   "note": "Template only: placeholder IDs. The real, frozen fixture lives in the aldeia-work ticket folder and is passed by path in WIKI_EVAL_FIXTURE. Never commit real object IDs, space IDs or fleet names here (Aldeia-IT/aldeia-box#327).",
+  "ignore_ids_note": "Optional. Object IDs dropped from both the dense and the hybrid result lists before every bar is scored: objects deleted from a space but still in the Qdrant index (Aldeia-IT/aldeia-box#1425). The results output records, per case, which of them appeared (ignored_ids_seen).",
+  "ignore_ids": ["<deleted-but-indexed-object-id>"],
   "cases": [
     {
       "id": "capoeira-name-01",

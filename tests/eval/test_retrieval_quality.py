@@ -62,6 +62,9 @@ def load_frozen_fixture(path):
             "eval fixture is not frozen: review the curated proposals, then set "
             '"frozen": true. The fixture is never edited to fit results.'
         )
+    ignore = data.get("ignore_ids", [])
+    if not isinstance(ignore, list) or not all(isinstance(i, str) and i for i in ignore):
+        raise ValueError("ignore_ids must be a list of object id strings")
     for case in data.get("cases", []):
         missing = {"id", "group", "query", "space_id", "types", "expected_ids"} - set(case)
         if missing:
@@ -146,27 +149,41 @@ def _shared_ok(case, hits):
     )
 
 
-def evaluate(cases, hybrid_search, dense_search):
+def evaluate(cases, hybrid_search, dense_search, ignore_ids=()):
     """Check the case counts, apply the five pass bars; return ``(failures, per_case)``.
 
     Args:
         cases: fixture cases.
         hybrid_search: ``f(case) -> list[hit]`` (``server.semantic_search``, limit 10).
         dense_search: ``f(case) -> list[hit]`` (``semantic_search_core``, limit 10).
+        ignore_ids: object ids dropped from both result lists before any bar is scored
+            (the fixture's ``ignore_ids``: objects deleted from the space but still in
+            the index, aldeia-box#1425).
 
     Returns:
         ``failures``: human-readable bar violations (empty when every bar holds);
-        ``per_case``: ``{case id: {"group", "hybrid_rank", "dense_rank"}}``.
+        ``per_case``: ``{case id: {"group", "hybrid_rank", "dense_rank"}}``, plus
+        ``"ignored_ids_seen": {"hybrid": [...], "dense": [...]}`` on a case where an
+        ignored id appeared in either raw list.
     """
     failures, per_case = count_failures(cases), {}
+    ignore = set(ignore_ids)
     by_group: dict[str, list] = {}
     for case in cases:
-        hybrid, dense = hybrid_search(case), dense_search(case)
+        raw_hybrid, raw_dense = hybrid_search(case), dense_search(case)
+        hybrid = [h for h in raw_hybrid if h["object_id"] not in ignore]
+        dense = [h for h in raw_dense if h["object_id"] not in ignore]
         per_case[case["id"]] = {
             "group": case["group"],
             "hybrid_rank": first_rank(case["expected_ids"], hybrid),
             "dense_rank": first_rank(case["expected_ids"], dense),
         }
+        seen = {
+            side: sorted({h["object_id"] for h in raw if h["object_id"] in ignore})
+            for side, raw in (("hybrid", raw_hybrid), ("dense", raw_dense))
+        }
+        if seen["hybrid"] or seen["dense"]:
+            per_case[case["id"]]["ignored_ids_seen"] = seen
         by_group.setdefault(case["group"], []).append((case, hybrid, dense))
 
     # Bar 1: capoeira name, diacritic and context cases.
@@ -240,7 +257,8 @@ def test_hybrid_name_aware_retrieval_quality(frozen_fixture):
         return indexer.semantic_search_core(
             query=case["query"], space_id=case["space_id"], types=case["types"], limit=TOP_K)
 
-    failures, per_case = evaluate(frozen_fixture["cases"], hybrid, dense)
+    failures, per_case = evaluate(
+        frozen_fixture["cases"], hybrid, dense, frozen_fixture.get("ignore_ids", []))
     results_path = os.environ.get("WIKI_EVAL_RESULTS")
     if results_path:
         Path(results_path).write_text(json.dumps(per_case, indent=2, ensure_ascii=False))
@@ -390,3 +408,32 @@ def test_shared_count_is_exactly_ten_bare_names():
     cases = [c for c in _full_cases() if c["id"] != "shared-0"]
     failures, _ = evaluate(cases, _clean_hybrid, _dense_x)
     assert "counts: capoeira-shared has 9 cases, the spec needs 10" in failures
+
+
+def test_ignored_ids_are_dropped_before_scoring_and_reported():
+    def dense(case):
+        return [_hit("gone"), _hit("x")] if case["id"] == "control-cap-0" else _dense_x(case)
+
+    def hybrid(case):
+        # The stale object outranks the expected entity on one named case.
+        if case["id"] == "capoeira-name-0":
+            return [_hit("gone"), _hit("t")]
+        return _clean_hybrid(case)
+
+    failures, per_case = evaluate(_full_cases(), hybrid, dense)
+    assert any("control-cap-0" in f for f in failures)  # without ignore_ids: dense top-1 lost
+    assert per_case["capoeira-name-0"]["hybrid_rank"] == 2
+
+    failures, per_case = evaluate(_full_cases(), hybrid, dense, ignore_ids=["gone"])
+    assert failures == []
+    assert per_case["capoeira-name-0"]["hybrid_rank"] == 1
+    assert per_case["capoeira-name-0"]["ignored_ids_seen"] == {"hybrid": ["gone"], "dense": []}
+    assert per_case["control-cap-0"]["ignored_ids_seen"] == {"hybrid": [], "dense": ["gone"]}
+    assert "ignored_ids_seen" not in per_case["capoeira-name-1"]
+
+
+def test_ignore_ids_must_be_a_list_of_strings(tmp_path):
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps({"frozen": True, "ignore_ids": "gone", "cases": _full_cases()}))
+    with pytest.raises(ValueError, match="ignore_ids"):
+        load_frozen_fixture(path)
