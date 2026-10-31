@@ -84,24 +84,17 @@ def test_proposals_are_labelled_with_source_name_and_type(script, wired, tmp_pat
     assert case["dense_top_ids"] == ["oB", "oA"]
 
 
-def test_shared_names_get_a_context_case_per_member(script, wired, tmp_path):
+def test_shared_name_is_one_bare_case_listing_every_same_name_entity(script, wired, tmp_path):
     out = tmp_path / "out.json"
-    targets = [_target(id="cm", query="Cobra Mansa", shared=True)]
+    targets = [_target(id="cm", group="capoeira-shared", query="Cobra Mansa")]
     script.main(["--targets", str(_write_targets(tmp_path, targets)), "--output", str(out)])
-    cases = {c["id"]: c for c in json.loads(out.read_text())["cases"]}
-    bare = cases["cm"]
-    assert bare["expected_ids"] == []
-    assert {p["object_id"] for p in bare["proposals"] if "key_equality" in p["sources"]} == {
+    cases = json.loads(out.read_text())["cases"]
+    assert [c["id"] for c in cases] == ["cm"]  # no "(context)" variants (D-327-E)
+    case = cases[0]
+    assert case["query"] == "Cobra Mansa" and case["expected_ids"] == []
+    assert "right_id" not in case and "right_id_proposal" not in case
+    assert {p["object_id"] for p in case["proposals"] if "key_equality" in p["sources"]} == {
         "oC1", "oC2"}
-    contexts = [c for cid, c in cases.items() if cid.startswith("cm-context")]
-    assert {c["right_id_proposal"]["object_id"] for c in contexts} == {"oC1", "oC2"}
-    assert all(c["right_id"] is None and c["expected_ids"] == [] for c in contexts)
-    by_member = {c["right_id_proposal"]["object_id"]: c for c in contexts}
-    assert by_member["oC1"]["query"] == "Cobra Mansa (FICA)"
-    assert by_member["oC2"]["query"] == "Cobra Mansa (Bahia)"
-    assert by_member["oC1"]["right_id_proposal"]["name"] == "Cobra Mansa (FICA)"
-    assert by_member["oC1"]["right_id_proposal"]["type"] == "wiki_entity"
-    assert "key_equality" in by_member["oC1"]["right_id_proposal"]["sources"]
 
 
 def test_each_space_is_scrolled_once_for_many_targets(script, wired, tmp_path):

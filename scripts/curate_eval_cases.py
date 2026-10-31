@@ -8,18 +8,15 @@ secrets, no chunk text).
 The script decides nothing. Every case comes out with ``expected_ids: []``: no rule of
 the code under test defines the expected IDs (spec AC-EVAL2). A human reviews the labelled
 ``proposals`` once, copies the IDs of the objects the name really denotes into
-``expected_ids`` (and picks ``right_id`` for each "(context)" case), sets
-``"frozen": true`` and keeps the file outside the repo. The eval test errors on an
+``expected_ids``, sets ``"frozen": true`` and keeps the file outside the repo. The eval test errors on an
 unfrozen fixture, and on a frozen one whose named cases still have no ``expected_ids``.
 
 Usage:
     uv run python scripts/curate_eval_cases.py --targets targets.json --output proposals.json
 
 ``targets.json`` is ``{"cases": [...]}`` (or a bare list). Each target has ``id``,
-``group``, ``query``, ``space_id`` and ``types``; ``shared: true`` marks a name that
-several objects share. For a shared target the script adds one "(context)" case per
-key-equality candidate, with that candidate as ``right_id_proposal``; the human keeps,
-drops or adds these cases.
+``group``, ``query``, ``space_id`` and ``types``. One target gives one case: a
+capoeira-shared target is a bare name only, with no "(context)" variants (D-327-E (a)).
 
 Proposal sources per case (an object may carry several, in ``sources``):
   key_equality     the query's D13 key (``strip_name``) is one of the object's
@@ -30,8 +27,7 @@ Proposal sources per case (an object may carry several, in ``sources``):
 
 Output: ``{"frozen": false, "cases": [...]}``; each case keeps the target fields plus
 ``expected_ids`` (always ``[]``, for the human to fill), ``proposals`` (``object_id``,
-``name``, ``type``, ``sources``), ``dense_top_ids`` and, for a "(context)" case,
-``right_id: null`` with ``right_id_proposal`` (the candidate the context was taken from).
+``name``, ``type``, ``sources``) and ``dense_top_ids``.
 """
 
 import argparse
@@ -44,7 +40,7 @@ DENSE_TOP_IDS = 10
 
 
 def scroll_objects(client, space_id):
-    """Scroll one space and return ``{object_id: {name, type, headings}}`` (read-only).
+    """Scroll one space and return ``{object_id: {name, type}}`` (read-only).
 
     Follows Qdrant's ``next_page_offset`` until it is ``None``.
     """
@@ -61,12 +57,9 @@ def scroll_objects(client, space_id):
         )
         for point in points:
             p = point.payload or {}
-            entry = objects.setdefault(p.get("object_id", ""), {
+            objects.setdefault(p.get("object_id", ""), {
                 "name": p.get("object_name", ""), "type": p.get("type_key", ""),
-                "headings": [],
             })
-            if p.get("heading"):
-                entry["headings"].append(p["heading"])
         if offset is None:
             return objects
 
@@ -116,16 +109,6 @@ def propose(case, objects, dense_hits):
     ]
 
 
-def context_phrase(obj):
-    """Context for a shared-name member: its name's parenthetical, else its first heading."""
-    from anytype_llm_wiki.indexer import _TRAILING_PAREN_RE
-
-    match = _TRAILING_PAREN_RE.search(obj["name"])
-    if match and match.group(1).strip():
-        return match.group(1).strip()
-    return next((h for h in obj["headings"] if h.strip()), "")
-
-
 def build_case(case, objects, dense_hits):
     """One output case: the target fields, an empty ``expected_ids`` and the proposals."""
     out = {k: case[k] for k in ("id", "group", "query", "space_id", "types")}
@@ -151,22 +134,7 @@ def curate(targets, client, search):
             tables[space] = scroll_objects(client, space)
         objects = tables[space]
         dense = search(target["query"], space, target.get("types"), PROPOSAL_DEPTH)
-        base = build_case(target, objects, dense)
-        cases.append(base)
-        if not target.get("shared"):
-            continue
-        members = [p for p in base["proposals"] if "key_equality" in p["sources"]]
-        for index, member in enumerate(members, start=1):
-            phrase = context_phrase(objects[member["object_id"]])
-            if not phrase:
-                continue
-            query = f"{target['query']} ({phrase})"
-            variant = {**target, "id": f"{target['id']}-context-{index}", "query": query}
-            dense_variant = search(query, space, target.get("types"), PROPOSAL_DEPTH)
-            case = build_case(variant, objects, dense_variant)
-            case["right_id"] = None  # the human picks it; see right_id_proposal
-            case["right_id_proposal"] = member
-            cases.append(case)
+        cases.append(build_case(target, objects, dense))
     return {"frozen": False, "generated_by": "scripts/curate_eval_cases.py", "cases": cases}
 
 
