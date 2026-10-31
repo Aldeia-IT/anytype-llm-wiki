@@ -30,6 +30,7 @@ New tests added for v1 (issue #323) — type+date metadata filter:
 - AC-F12 test_reembed_writes_last_modified_date
 """
 
+import itertools
 import json
 import httpx
 import pytest
@@ -1263,10 +1264,15 @@ _BASE_CHUNK = {
 _BASE_HIT_KEYS = {"object_name", "object_id", "type", "heading", "text", "score"}
 
 
+_FAKE_POINT_IDS = itertools.count(1)
+
+
 class _FakePoint:
-    def __init__(self, payload, score=0.9):
+    def __init__(self, payload, score=0.9, point_id=None):
         self.payload = payload
         self.score = score
+        # The hybrid path keys RRF fusion on the Qdrant point id (#327).
+        self.id = point_id if point_id is not None else f"fp-{next(_FAKE_POINT_IDS)}"
 
 
 def _source_payload(**extra):
@@ -1680,7 +1686,6 @@ def test_stored_v4_keeps_incremental_skip_and_no_set_payload(monkeypatch, tmp_pa
     assert fake.set_payload_calls == []
     assert fake.get_object_calls == []
     assert embeds == []
-=======
 # ===========================================================================
 # #327 — Hybrid Dense+Sparse Fusion (BM25 + RRF)
 # Tests FAIL until the implementation exists.  Import all new symbols INSIDE
@@ -2356,4 +2361,3 @@ def test_bm25_cross_space_exclusion(monkeypatch):
     assert "obj_target" in result_ids or "obj_dense_a" in result_ids, (
         "CSO-1: at least one sp_A chunk must be present in results"
     )
->>>>>>> 957fdf2 (test(#327): failing tests for hybrid dense+sparse BM25+RRF fusion)
