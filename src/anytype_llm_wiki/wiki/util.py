@@ -204,7 +204,9 @@ def scrub_credentials(url: str) -> str:
     return scrubbed
 
 
-_TEXT_URL_RE = re.compile(r"https?://\S+")
+# A URL in prose ends at whitespace or a closing delimiter of the markup around
+# it: markdown link ``)``/``]``, autolink ``>``, or a quote.
+_TEXT_URL_RE = re.compile(r"""https?://[^\s)\]>"']+""")
 
 
 def scrub_text_urls(text: str) -> str:
