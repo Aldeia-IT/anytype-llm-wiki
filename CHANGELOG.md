@@ -53,6 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparable text from `wiki_definition`; mixed-kind peers read their own type's text key).
   Concept contradictions are now surfaced by `wiki_lint` (#426, above).
 
+### Changed
+
+- **`wiki_remember` names the primary subject after `subject_hint` (Aldeia-IT/aldeia-box#1426).**
+  The hint used to apply only when extraction returned nothing, so hinted calls created
+  objects named after slugs or labels the model found in the text. Now the hint always names
+  the primary subject (kind from `kind`, facts = the whole `knowledge`). Extracted subjects
+  that are the hinted subject under another spelling (case, accents, slug form) fold into it;
+  the others are created and linked to it with a `related` relation, unless the caller's
+  `relations` already link the pair. Extracted names that look like identifiers (snake_case
+  labels, lowercase kebab slugs of 3+ segments, URL-likes, file names or paths) are refused
+  with the warning `name_policy_rejected: identifier_like: <name>`, with or without a hint;
+  the hint itself is never refused. The new public `extraction.is_identifier_like_name`
+  holds the rule (`sanitize_name` and `wiki_ingest` are unchanged). The new setting
+  `WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES` (comma-separated space IDs, default empty) turns the
+  refusal off for spaces where such names are legitimate.
+
 ### Fixed
 
 - **`wiki_lint` duplicate sweep result limit (Aldeia-IT/aldeia-box#1413).** The sweep
