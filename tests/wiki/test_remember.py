@@ -3706,3 +3706,361 @@ class TestAgentSourceNoNoteIsChunkable:
             f"(so source_type=['agent'] filter is not inert). "
             f"Excerpt written: {captured_excerpt['value']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Aldeia-IT/aldeia-box#1426 — subject_hint names the primary subject;
+# identifier-like extracted names are refused (per-space opt-out, D5).
+# ---------------------------------------------------------------------------
+
+_HINT_ACM = "Associação de Capoeira Mestre Bimba"
+
+
+def _ent(name, facts="Some fact."):
+    return {"name": name, "kind": "entity", "facts": facts}
+
+
+def _con(name, facts="Some definition."):
+    return {"name": name, "kind": "concept", "facts": facts}
+
+
+def _run_remember_capturing(monkeypatch, tmp_path, subjects, **kwargs):
+    """Run wiki_remember with a stubbed extractor and a fake Anytype API.
+
+    Every search is empty, so each surviving subject is created. Returns
+    ``(result, creates, rel_names)``: the wiki_entity/wiki_concept create
+    payloads in order, and the relations handed to the relation writer as
+    ``(from_name, to_name, label)`` tuples.
+    """
+    _patch_decision_ok(monkeypatch, tmp_path)
+    mock_extract = MagicMock(return_value=_canned_extract_result(subjects))
+    mock_lock = MagicMock()
+    mock_lock.return_value.__enter__ = MagicMock(return_value=None)
+    mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr("anytype_llm_wiki.wiki.remember.extract", mock_extract, raising=False)
+    monkeypatch.setattr("anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False)
+
+    rel_calls: list = []
+
+    def fake_write_rels(client, space_id, rels, kind_by_id):
+        rel_calls.extend(rels)
+        return len(rels), []
+
+    monkeypatch.setattr(
+        "anytype_llm_wiki.wiki.remember._write_bidirectional_relations",
+        fake_write_rels, raising=False,
+    )
+
+    create_payloads: list = []
+    name_by_id: dict = {}
+
+    def capture_post(request, **kw):
+        payload = json.loads(request.content)
+        create_payloads.append(payload)
+        obj_id = f"obj-{len(create_payloads):03d}"
+        name_by_id[obj_id] = payload.get("name", "")
+        return httpx.Response(201, json=_create_object_response(obj_id, payload.get("name", "")))
+
+    with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+        router.get(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+            return_value=httpx.Response(200, json=_schema_current_response())
+        )
+        router.post(f"/v1/spaces/{FAKE_SPACE_ID}/search").mock(
+            return_value=httpx.Response(200, json=_empty_search_response())
+        )
+        router.post(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(side_effect=capture_post)
+
+        from anytype_llm_wiki.wiki.remember import wiki_remember
+        result = wiki_remember(space_id=FAKE_SPACE_ID, **kwargs)
+
+    creates = [
+        p for p in create_payloads if p.get("type_key") in ("wiki_entity", "wiki_concept")
+    ]
+    rel_names = [
+        (name_by_id.get(a, a), name_by_id.get(b, b), label) for a, b, label in rel_calls
+    ]
+    return result, creates, rel_names
+
+
+def _identifier_warnings(result):
+    return [
+        w for w in result.get("warnings", [])
+        if "name_policy_rejected: identifier_like:" in str(w)
+    ]
+
+
+def _prop_text(payload, key):
+    for prop in payload.get("properties", []):
+        if prop.get("key") == key:
+            return prop.get("text")
+    return None
+
+
+class TestSubjectHintNaming:
+    """Aldeia-IT/aldeia-box#1426 D1/D2 — the hint is the primary subject even
+    when extraction returns subjects; identifier-like extracted names are refused."""
+
+    @pytest.fixture(autouse=True)
+    def _no_allow_list(self, monkeypatch):
+        monkeypatch.delenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", raising=False)
+
+    def test_ac1_hint_wins_over_slug_of_itself(self, monkeypatch, tmp_path):
+        knowledge = "The Associação de Capoeira Mestre Bimba was founded in Salvador."
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path,
+            [_ent("associacao-de-capoeira-mestre-bimba")],
+            knowledge=knowledge, subject_hint=_HINT_ACM,
+        )
+        assert [p["name"] for p in creates] == [_HINT_ACM]
+        assert creates[0]["type_key"] == "wiki_entity"
+        assert _prop_text(creates[0], "wiki_facts") == knowledge
+        assert _identifier_warnings(result) == []
+        assert rels == []
+
+    def test_ac2_hint_wins_over_proper_extracted_name(self, monkeypatch, tmp_path):
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path,
+            [_ent("Mestre Bimba", "Mestre Bimba founded the academy.")],
+            knowledge="Mestre Bimba founded the Associação de Capoeira Mestre Bimba.",
+            subject_hint=_HINT_ACM,
+        )
+        assert [p["name"] for p in creates] == [_HINT_ACM, "Mestre Bimba"]
+        assert rels == [(_HINT_ACM, "Mestre Bimba", "related")]
+
+    @pytest.mark.parametrize(
+        "variant",
+        ["associação de capoeira mestre bimba", "Associacao de Capoeira Mestre Bimba"],
+    )
+    def test_ac3_same_name_folds_into_hint(self, monkeypatch, tmp_path, variant):
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path, [_ent(variant)],
+            knowledge="The academy teaches Capoeira Regional.", subject_hint=_HINT_ACM,
+        )
+        assert [p["name"] for p in creates] == [_HINT_ACM]
+        assert rels == []
+        assert _identifier_warnings(result) == []
+
+    def test_ac3_snake_slug_of_hint_folds_silently(self, monkeypatch, tmp_path):
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, [_ent("associacao_de_capoeira_mestre_bimba")],
+            knowledge="The academy teaches Capoeira Regional.", subject_hint=_HINT_ACM,
+        )
+        assert [p["name"] for p in creates] == [_HINT_ACM]
+        assert _identifier_warnings(result) == []
+
+    def test_ac4_snake_case_labels_refused(self, monkeypatch, tmp_path):
+        labels = ["backlog_group_conflict", "founding_date_conflict", "name_alias_conflict"]
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, [_con(n) for n in labels],
+            knowledge="Three conflicts were resolved in the backlog.",
+        )
+        assert creates == []
+        warnings = _identifier_warnings(result)
+        assert len(warnings) == 3
+        for label in labels:
+            assert f"name_policy_rejected: identifier_like: {label}" in warnings
+
+    @pytest.mark.parametrize(
+        "url", ["pt.wikipedia.org/wiki/Mestra_Janja", "https://example.org/mestra-janja"]
+    )
+    def test_ac5_url_names_refused(self, monkeypatch, tmp_path, url):
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, [_ent(url), _ent("Mestra Janja")],
+            knowledge="Mestra Janja teaches in São Paulo.",
+        )
+        assert [p["name"] for p in creates] == ["Mestra Janja"]
+        assert _identifier_warnings(result) == [
+            f"name_policy_rejected: identifier_like: {url}"
+        ]
+
+    def test_ac6_refusal_applies_without_hint(self, monkeypatch, tmp_path):
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path,
+            [_ent("Mestre Bimba"), _ent("filhos-de-bimba-escola-de-capoeira")],
+            knowledge="Mestre Bimba's students carry his school forward.",
+        )
+        assert [p["name"] for p in creates] == ["Mestre Bimba"]
+        assert _identifier_warnings(result) == [
+            "name_policy_rejected: identifier_like: filhos-de-bimba-escola-de-capoeira"
+        ]
+        assert rels == []
+
+    def test_ac6_refusal_warning_in_queued_result(self, monkeypatch, tmp_path):
+        """The warning rides on base_warnings, so a queued result carries it too."""
+        _patch_decision_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value=_canned_extract_result(
+                [_ent("Mestre Bimba"), _con("founding_date_conflict")]
+            )),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember._acquire_and_run",
+            MagicMock(return_value=None), raising=False,
+        )
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="Mestre Bimba taught.")
+        assert result.get("queued") == 1, result
+        assert _identifier_warnings(result) == [
+            "name_policy_rejected: identifier_like: founding_date_conflict"
+        ]
+
+    def test_ac6_pending_batch_carries_clean_names(self, monkeypatch, tmp_path):
+        """Filtering happens before the work-log append."""
+        _patch_decision_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember.extract",
+            MagicMock(return_value=_canned_extract_result(
+                [_ent("Mestre Bimba"), _ent("persons/mestre-bimba.md")]
+            )),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "anytype_llm_wiki.wiki.remember._acquire_and_run",
+            MagicMock(return_value=None), raising=False,
+        )
+        begin = MagicMock()
+        monkeypatch.setattr("anytype_llm_wiki.wiki.remember.worklog.begin", begin)
+        with respx.mock(base_url=ANYTYPE_BASE, assert_all_called=False) as router:
+            router.get(f"/v1/spaces/{FAKE_SPACE_ID}/objects").mock(
+                return_value=httpx.Response(200, json=_schema_current_response())
+            )
+            from anytype_llm_wiki.wiki.remember import wiki_remember
+            wiki_remember(
+                space_id=FAKE_SPACE_ID, knowledge="Mestre Bimba taught.",
+                subject_hint="Capoeira Regional",
+            )
+        assert begin.called
+        subjects = begin.call_args.args[1]
+        assert [s["name"] for s in subjects] == ["Capoeira Regional", "Mestre Bimba"]
+        meta = begin.call_args.kwargs["meta"]
+        assert meta["relations"] == [
+            {"from": "Capoeira Regional", "to": "Mestre Bimba", "label": "related"}
+        ]
+
+    def test_ac7_hint_itself_not_filtered(self, monkeypatch, tmp_path):
+        knowledge = "Alias conflicts arise when two records share an apelido."
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, [],
+            knowledge=knowledge, subject_hint="name_alias_conflict",
+        )
+        assert [p["name"] for p in creates] == ["name_alias_conflict"]
+        assert _identifier_warnings(result) == []
+
+    def test_ac7_hint_not_filtered_with_nonempty_extraction(self, monkeypatch, tmp_path):
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path, [_con("Apelido")],
+            knowledge="Alias conflicts arise when two records share an apelido.",
+            subject_hint="name_alias_conflict", kind="concept",
+        )
+        assert [p["name"] for p in creates] == ["name_alias_conflict", "Apelido"]
+        assert _identifier_warnings(result) == []
+        assert rels == [("name_alias_conflict", "Apelido", "related")]
+
+    def test_ac8_hint_kind_concept_with_nonempty_extraction(self, monkeypatch, tmp_path):
+        knowledge = "Capoeira Regional is the style Mestre Bimba created."
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, [_ent("Mestre Bimba")],
+            knowledge=knowledge, subject_hint="Capoeira Regional", kind="concept",
+        )
+        assert creates[0]["name"] == "Capoeira Regional"
+        assert creates[0]["type_key"] == "wiki_concept"
+        assert _prop_text(creates[0], "wiki_definition") == knowledge
+        assert creates[1]["name"] == "Mestre Bimba"
+        assert creates[1]["type_key"] == "wiki_entity"
+
+    def test_ac8_hint_kind_other_is_entity(self, monkeypatch, tmp_path):
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, [_con("Capoeira Regional")],
+            knowledge="Mestre Bimba created Capoeira Regional.",
+            subject_hint="Mestre Bimba", kind="person",
+        )
+        assert creates[0]["name"] == "Mestre Bimba"
+        assert creates[0]["type_key"] == "wiki_entity"
+
+    @pytest.mark.parametrize(
+        "caller_rel",
+        [
+            {"from": _HINT_ACM, "to": "Mestre Bimba", "label": "founded_by"},
+            # Reverse direction and different case still count as the same pair.
+            {"from": "mestre bimba", "to": _HINT_ACM.upper(), "label": "founded"},
+        ],
+    )
+    def test_ac9_caller_relations_not_duplicated(self, monkeypatch, tmp_path, caller_rel):
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path, [_ent("Mestre Bimba"), _ent("Salvador")],
+            knowledge="Mestre Bimba founded the academy in Salvador.",
+            subject_hint=_HINT_ACM, relations=[caller_rel],
+        )
+        assert [p["name"] for p in creates] == [_HINT_ACM, "Mestre Bimba", "Salvador"]
+        # The caller's relation comes first, then only the missing auto link.
+        assert [r[2] for r in rels] == [caller_rel["label"], "related"]
+        assert rels[1] == (_HINT_ACM, "Salvador", "related")
+
+    def test_ac10_no_hint_proper_names_unchanged(self, monkeypatch, tmp_path):
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path, [_ent("Mestre Bimba"), _con("Capoeira Regional")],
+            knowledge="Mestre Bimba created Capoeira Regional.",
+        )
+        assert [p["name"] for p in creates] == ["Mestre Bimba", "Capoeira Regional"]
+        assert _prop_text(creates[0], "wiki_facts") == "Some fact."
+        assert rels == []
+        assert _identifier_warnings(result) == []
+
+
+class TestIdentifierNamesAllowedSpaces:
+    """Aldeia-IT/aldeia-box#1426 D5/AC14 — WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES
+    switches the identifier-like refusal off for listed spaces only."""
+
+    _SUBJECTS = [_con("wiki_query"), _ent("anytype-llm-wiki")]
+
+    def test_unset_refuses(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", raising=False)
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, self._SUBJECTS,
+            knowledge="wiki_query is a tool of anytype-llm-wiki.",
+        )
+        assert creates == []
+        assert sorted(_identifier_warnings(result)) == [
+            "name_policy_rejected: identifier_like: anytype-llm-wiki",
+            "name_policy_rejected: identifier_like: wiki_query",
+        ]
+
+    def test_other_space_listed_refuses(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "some-other-space")
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, self._SUBJECTS,
+            knowledge="wiki_query is a tool of anytype-llm-wiki.",
+        )
+        assert creates == []
+        assert len(_identifier_warnings(result)) == 2
+
+    def test_listed_space_creates_without_warning(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(
+            "WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", f"other-space, {FAKE_SPACE_ID} ,"
+        )
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path, self._SUBJECTS,
+            knowledge="wiki_query is a tool of anytype-llm-wiki.",
+        )
+        assert [p["name"] for p in creates] == ["anytype-llm-wiki", "wiki_query"]
+        assert _identifier_warnings(result) == []
+        assert rels == []
+
+    def test_listed_space_hint_primary_fold_and_links_apply(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", FAKE_SPACE_ID)
+        knowledge = "The Anytype LLM Wiki exposes the wiki_query tool."
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path, self._SUBJECTS,
+            knowledge=knowledge, subject_hint="Anytype LLM Wiki",
+        )
+        # anytype-llm-wiki is the slug of the hint: folded, not created.
+        assert [p["name"] for p in creates] == ["Anytype LLM Wiki", "wiki_query"]
+        assert _prop_text(creates[0], "wiki_facts") == knowledge
+        assert rels == [("Anytype LLM Wiki", "wiki_query", "related")]
+        assert _identifier_warnings(result) == []

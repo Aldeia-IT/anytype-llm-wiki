@@ -1168,3 +1168,101 @@ class TestExtractRequestPayloadUnchangedAfterRefactor:
             f"Regression: model-not-pulled detection must return ollama_model_not_pulled; "
             f"got {result_str!r}"
         )
+
+
+class TestIsIdentifierLikeName:
+    """Aldeia-IT/aldeia-box#1426 AC11 — the public name predicate that remember
+    uses to refuse model-extracted names that are keys, slugs, URLs or paths."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Rule 1: snake_case label.
+            "founding_date_conflict",
+            "backlog_group_conflict",
+            "Mestra_Janja",
+            # Rule 2: lowercase ASCII kebab slug with 3+ segments.
+            "associacao-de-capoeira-mestre-bimba",
+            "centro-de-cultura-fisica-regional",
+            # Rule 3: URL-like.
+            "pt.wikipedia.org/wiki/Mestra_Janja",
+            "https://example.org/x",
+            "www.example.org",
+            # Rule 4: file name or path.
+            "persons/mestre-bimba.md",
+            "notes.yaml",
+            "DATA.JSON",
+            # Surrounding whitespace is stripped before the rules apply.
+            "  founding_date_conflict  ",
+        ],
+    )
+    def test_identifier_like(self, name):
+        from anytype_llm_wiki.wiki.extraction import is_identifier_like_name
+
+        assert is_identifier_like_name(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Mestre Bimba",
+            "Associação de Capoeira Mestre Bimba",
+            "bge-m3",
+            "gpt-4o",
+            "Node.js",
+            "ASP.NET",
+            "capoeira.com",
+            "AC/DC",
+            "Grupo Senzala",
+            "e-mail",
+            "Jean-Luc Picard",
+            "",
+            "   ",
+            None,
+            42,
+        ],
+    )
+    def test_not_identifier_like(self, name):
+        from anytype_llm_wiki.wiki.extraction import is_identifier_like_name
+
+        assert is_identifier_like_name(name) is False
+
+    def test_sanitize_name_does_not_apply_the_rule(self):
+        """AC12 — the predicate is separate: sanitize_name still passes slugs,
+        so query.py and ingest keep their behaviour."""
+        from anytype_llm_wiki.wiki.extraction import sanitize_name
+
+        assert sanitize_name("founding_date_conflict") == "founding_date_conflict"
+        assert sanitize_name("pt.wikipedia.org/wiki/Mestra_Janja") == (
+            "pt.wikipedia.org/wiki/Mestra_Janja"
+        )
+
+
+class TestIdentifierNamesAllowedSpacesConfig:
+    """Aldeia-IT/aldeia-box#1426 D5/AC14 — WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES
+    parsing: comma-separated space IDs, resolved per call, default empty."""
+
+    def test_unset_is_empty(self, monkeypatch):
+        monkeypatch.delenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", raising=False)
+        from anytype_llm_wiki.wiki import config
+        assert config.identifier_names_allowed_spaces() == frozenset()
+
+    def test_empty_string_is_empty(self, monkeypatch):
+        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "")
+        from anytype_llm_wiki.wiki import config
+        assert config.identifier_names_allowed_spaces() == frozenset()
+
+    def test_entries_stripped_and_empties_dropped(self, monkeypatch):
+        monkeypatch.setenv(
+            "WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", " space-a , space-b,, space-c ,"
+        )
+        from anytype_llm_wiki.wiki import config
+        assert config.identifier_names_allowed_spaces() == frozenset(
+            {"space-a", "space-b", "space-c"}
+        )
+
+    def test_resolved_at_call_time(self, monkeypatch):
+        from anytype_llm_wiki.wiki import config
+        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "space-a")
+        assert config.identifier_names_allowed_spaces() == frozenset({"space-a"})
+        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "space-b")
+        assert config.identifier_names_allowed_spaces() == frozenset({"space-b"})
