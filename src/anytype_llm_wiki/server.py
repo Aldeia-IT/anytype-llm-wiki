@@ -164,9 +164,19 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
         space_id: Target Anytype space ID.
         domain_hint: Optional domain tag; must be in the space's taxonomy.
 
+    A URL page with no usable content (empty, under 300 visible chars, a bot
+    challenge or a JavaScript shell) is refused with ``[DATA ERROR]
+    no_usable_content: <reason>`` before anything is written. When extraction
+    degrades, ``warnings`` carries ``extraction_degraded`` and the result carries
+    ``extraction_error`` (``timeout``, ``http_error: …``, ``malformed_json``,
+    ``output_truncated``, ``stream_error: …`` or ``unexpected: …``); a degraded URL
+    ingest writes only the Source and the WikiLog, and re-ingesting the URL later
+    fills it.
+
     Returns:
         An IngestResult dict (source/objects created/updated/skipped, relations,
-        wiki_log_id, warnings, status).
+        wiki_log_id, warnings, status, and ``extraction_error`` when extraction
+        degraded).
     """
     from .wiki.ingest import wiki_ingest as _wiki_ingest
 

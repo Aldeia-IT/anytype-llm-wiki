@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`wiki_ingest` works on real web pages (Aldeia-IT/aldeia-box#1427).**
+  - HTML (URL or local `.html`) is reduced to its main content before markdownify: `script`,
+    `style`, `noscript`, `template`, `svg`, `iframe`, `form`, `nav`, `header`, `footer`,
+    `aside`, ARIA navigation/banner/contentinfo/search and `aria-hidden` elements are removed,
+    and the root is `main`, `article` or `[role=main]`, else `body` (the stripped body is used
+    when the root holds under 25 % of its text). The `wiki_excerpt` now starts at the article.
+  - Extraction calls stream (`"stream": true`), so `WIKI_EXTRACT_TIMEOUT` caps the silence
+    between chunks instead of the whole generation. A streamed error line or a stream without
+    `done: true` is a failed call.
+  - Every extraction-family call sends `num_ctx` (max input + output tokens) and `num_predict`;
+    new `WIKI_EXTRACT_OUTPUT_TOKENS` (default 4096). `WIKI_EXTRACT_MAX_INPUT_TOKENS` now caps the
+    extraction source (3 chars per token, cut at a paragraph); ingest warns
+    `extraction_input_truncated: <kept>/<total> chars`.
+  - A degraded extraction reports its reason: `extract()` returns
+    `extraction_degraded: <reason>` and ingest adds `extraction_error` to its result and logs one
+    warning with the source and elapsed seconds. The bare `extraction_degraded` warning stays.
+  - URL ingest refuses pages with no usable content (`[DATA ERROR] no_usable_content: empty |
+    too_little_text (<n> chars) | challenge_page | js_shell`) before any object is written.
+  - In spaces listed in `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES`, ingest refuses identifier-like
+    names too (`name_policy_rejected: identifier_like: <name>`); other spaces are unchanged.
+  - `scripts/ingest_dry_run.py`: fetch + extraction on real pages, one JSON object per page, no
+    writes.
+
 - **`semantic_search` hits carry `wiki_url` (Aldeia-IT/aldeia-box#1413).** A hit from a
   `wiki_source` ingested from a URL now includes `wiki_url`, a working link to the source:
   userinfo (`user:pass@`) and secret-looking query parameters (`token`, `key`, `api_key`,
@@ -55,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A degraded URL ingest stores only the Source (Aldeia-IT/aldeia-box#1427).** When extraction
+  degrades on a URL, ingest writes the Source and the WikiLog but no heading-derived objects;
+  re-ingesting the URL later fills it. Local files and text keep the heading fallback.
+
 - **`wiki_remember` names the primary subject after `subject_hint` (Aldeia-IT/aldeia-box#1426).**
   The hint used to apply only when extraction returned nothing, so hinted calls created
   objects named after slugs or labels the model found in the text. Now the hint always names
@@ -72,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `config.refuse_identifier_names_spaces()` (`sanitize_name` and `wiki_ingest` are unchanged).
 
 ### Fixed
+
+- **Excerpts no longer cut at the first `#` or `?` (Aldeia-IT/aldeia-box#1427).** The ingest
+  excerpt and the `wiki_remember` agent Source's name and excerpt ran the whole text through a
+  URL scrubber, which dropped everything after a `#` or `?`. Credentials are now scrubbed from
+  each URL inside the text (`util.scrub_text_urls`).
 
 - **`wiki_lint` duplicate sweep result limit (Aldeia-IT/aldeia-box#1413).** The sweep
   passed its limit positionally, so `5` landed on `ingested_after`; it now passes
