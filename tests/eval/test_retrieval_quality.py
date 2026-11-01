@@ -14,6 +14,11 @@ The real fixture (space IDs, object IDs, fleet names) is not committed. The temp
 Entry points (as the consumer calls them): hybrid is ``server.semantic_search(query,
 space_id, types, limit=10)``; dense is ``indexer.semantic_search_core`` with the same
 arguments, computed live in the same run. Ranks are object ranks (a miss is rank 11).
+
+Bars 1, 2, 3 and 5 can fail the run. Bar 4 is report-only (D-327-F): for each
+``control`` (question) case the results record ``bar4_dense_top1_in_hybrid_top3`` and
+a note, and Jan's side-by-side judgment of dense vs hybrid governs the bar.
+``control-word`` cases are out of bar 4; they still count toward the case table.
 """
 
 import json
@@ -24,7 +29,10 @@ import pytest
 
 MISS_RANK = 11
 TOP_K = 10
-TIER_ONE_SCORE = 2.0  # D8: tier_offset for an exact-name match
+BAR_FOUR_NOTE = (
+    "report-only: Jan's side-by-side judgment of dense vs hybrid top 3 governs bar 4 "
+    "(D-327-F); this flag measures agreement with dense, not quality"
+)
 NAMED_GROUPS = (
     "capoeira-name", "capoeira-diacritic", "capoeira-context", "capoeira-shared",
     "fleet-exact", "fleet-partial",
@@ -150,7 +158,7 @@ def _shared_ok(case, hits):
 
 
 def evaluate(cases, hybrid_search, dense_search, ignore_ids=()):
-    """Check the case counts, apply the five pass bars; return ``(failures, per_case)``.
+    """Check the case counts and bars 1, 2, 3, 5; record bar 4; return ``(failures, per_case)``.
 
     Args:
         cases: fixture cases.
@@ -164,7 +172,8 @@ def evaluate(cases, hybrid_search, dense_search, ignore_ids=()):
         ``failures``: human-readable bar violations (empty when every bar holds);
         ``per_case``: ``{case id: {"group", "hybrid_rank", "dense_rank"}}``, plus
         ``"ignored_ids_seen": {"hybrid": [...], "dense": [...]}`` on a case where an
-        ignored id appeared in either raw list.
+        ignored id appeared in either raw list, and ``"bar4_dense_top1_in_hybrid_top3"``
+        with ``"bar4_note"`` on each ``control`` case (report-only, never a failure).
     """
     failures, per_case = count_failures(cases), {}
     ignore = set(ignore_ids)
@@ -214,14 +223,13 @@ def evaluate(cases, hybrid_search, dense_search, ignore_ids=()):
     ):
         failures.append("bar 3: fleet rank sum is not strictly lower than dense")
 
-    # Bar 4: controls keep dense's top-1 object near the top.
+    # Bar 4 (D-327-F): question controls are judged side by side by Jan, so the
+    # dense-agreement check is recorded, never a failure. control-word is out of bar 4.
     for case, hybrid, dense in by_group.get("control", []):
-        if dense and object_ranks(dense)[0] not in object_ranks(hybrid)[:3]:
-            failures.append(f"bar 4: control {case['id']} lost dense top-1 from the first 3")
-    for case, hybrid, dense in by_group.get("control-word", []):
-        untiered = object_ranks([h for h in hybrid if h["score"] < TIER_ONE_SCORE])
-        if dense and object_ranks(dense)[0] not in untiered[:3]:
-            failures.append(f"bar 4: control-word {case['id']} lost dense top-1 from the first 3")
+        if dense:
+            per_case[case["id"]]["bar4_dense_top1_in_hybrid_top3"] = (
+                object_ranks(dense)[0] in object_ranks(hybrid)[:3])
+            per_case[case["id"]]["bar4_note"] = BAR_FOUR_NOTE
 
     # Bar 5: no named case is worse than dense.
     for case in cases:
@@ -246,7 +254,7 @@ def frozen_fixture():
 
 @pytest.mark.live
 def test_hybrid_name_aware_retrieval_quality(frozen_fixture):
-    """AC-EVAL2: the five pass bars hold against dense on the live index (read-only)."""
+    """AC-EVAL2: bars 1, 2, 3, 5 hold against dense on the live index; bar 4 is recorded."""
     from anytype_llm_wiki import indexer, server
 
     def hybrid(case):
@@ -421,11 +429,12 @@ def test_ignored_ids_are_dropped_before_scoring_and_reported():
         return _clean_hybrid(case)
 
     failures, per_case = evaluate(_full_cases(), hybrid, dense)
-    assert any("control-cap-0" in f for f in failures)  # without ignore_ids: dense top-1 lost
+    assert per_case["control-cap-0"]["bar4_dense_top1_in_hybrid_top3"] is False  # stale top-1
     assert per_case["capoeira-name-0"]["hybrid_rank"] == 2
 
     failures, per_case = evaluate(_full_cases(), hybrid, dense, ignore_ids=["gone"])
     assert failures == []
+    assert per_case["control-cap-0"]["bar4_dense_top1_in_hybrid_top3"] is True
     assert per_case["capoeira-name-0"]["hybrid_rank"] == 1
     assert per_case["capoeira-name-0"]["ignored_ids_seen"] == {"hybrid": ["gone"], "dense": []}
     assert per_case["control-cap-0"]["ignored_ids_seen"] == {"hybrid": [], "dense": ["gone"]}
@@ -437,3 +446,19 @@ def test_ignore_ids_must_be_a_list_of_strings(tmp_path):
     path.write_text(json.dumps({"frozen": True, "ignore_ids": "gone", "cases": _full_cases()}))
     with pytest.raises(ValueError, match="ignore_ids"):
         load_frozen_fixture(path)
+
+
+def test_bar_four_is_report_only_for_controls_and_skips_control_words():
+    def hybrid(case):
+        if case["group"] in {"control", "control-word"}:
+            return [_hit("a"), _hit("b"), _hit("c"), _hit("x")]  # dense top-1 at 4th
+        return _clean_hybrid(case)
+
+    failures, per_case = evaluate(_full_cases(), hybrid, _dense_x)
+    assert failures == []  # a bar-4 miss no longer fails the scorer
+    assert per_case["control-cap-0"]["bar4_dense_top1_in_hybrid_top3"] is False
+    assert "side-by-side" in per_case["control-cap-0"]["bar4_note"]
+    assert "bar4_dense_top1_in_hybrid_top3" not in per_case["word-0"]  # out of bar 4
+
+    _, per_case = evaluate(_full_cases(), _clean_hybrid, _dense_x)
+    assert per_case["control-fleet-0"]["bar4_dense_top1_in_hybrid_top3"] is True
