@@ -131,9 +131,14 @@ def _assert_url_safe(url: httpx.URL) -> None:
 
 # Elements that never carry article content: removed before the root is chosen.
 _BOILERPLATE_TAGS = (
-    "script", "style", "noscript", "template", "svg", "iframe", "form",
-    "nav", "header", "footer", "aside",
+    "script", "style", "noscript", "template", "svg", "iframe", "nav", "aside",
 )
+# Page chrome only outside the root: an <article> carries its own <header> (the
+# post title) and <footer> (tags, byline) in the standard WordPress layout.
+_CHROME_OUTSIDE_ROOT_TAGS = ("header", "footer")
+# A <form> is removed unless it wraps the root or holds this share of the body
+# text (ASP.NET WebForms wraps the whole page in <form id="aspnetForm">).
+_FORM_KEEP_TEXT_SHARE = 0.5
 _BOILERPLATE_ROLES = ("navigation", "banner", "contentinfo", "search")
 _MAIN_ROOT_SELECTORS = ("main", "article", "[role=main]")
 # The chosen root must hold at least this share of the stripped body's text;
@@ -166,20 +171,32 @@ def _visible_text(node) -> str:
     return node.get_text(" ", strip=True) if node is not None else ""
 
 
+def _is_inside(el, ancestor) -> bool:
+    """True when ``el`` is a descendant of ``ancestor`` (False if either is None)."""
+    if el is None or ancestor is None:
+        return False
+    return any(parent is ancestor for parent in el.parents)
+
+
 def strip_boilerplate(html: str) -> str:
     """Return the HTML of a page's main content, with the site chrome removed.
 
-    Removes ``script, style, noscript, template, svg, iframe, form, nav, header,
-    footer, aside``, ARIA ``role=navigation|banner|contentinfo|search`` and
-    ``aria-hidden=true`` elements, then picks the first of ``main``, ``article``,
-    ``[role=main]`` as the root (else ``body``). Safety fallback: when the chosen
-    root's visible text is under 25 % of the stripped body's text (a teaser
-    ``<article>``, or a page that keeps its article outside the landmark), the
-    stripped ``body`` is returned instead. No per-site rules.
+    Removes ``script, style, noscript, template, svg, iframe, nav, aside``, ARIA
+    ``role=navigation|banner|contentinfo|search`` and ``aria-hidden=true``
+    elements, then picks the first of ``main``, ``article``, ``[role=main]`` as
+    the root (else ``body``). ``header`` and ``footer`` are removed only outside
+    the root (an article's own header holds its title). A ``form`` is removed
+    unless it wraps the root or holds at least half of the body text (a page
+    wrapped in one form, as ASP.NET WebForms does); search, contact and login
+    forms go. Safety fallback: when the chosen root's visible text is under 25 %
+    of the stripped body's text (a teaser ``<article>``, or a page that keeps
+    its article outside the landmark), the stripped ``body`` is returned
+    instead. No per-site rules.
 
     Known limitation: the share is measured against the body AFTER all
-    removals, so an article a site places inside a ``<header>`` (or ``<nav>``,
-    ``<aside>``…) is removed with it and is not recovered by the fallback.
+    removals, so an article a site places inside a page-level ``<header>`` (or
+    ``<nav>``, ``<aside>``…) outside any landmark is removed with it and is not
+    recovered by the fallback.
 
     :param html: the raw HTML document (or fragment).
     :returns: the HTML string of the chosen root, ready for markdownify.
@@ -200,6 +217,20 @@ def strip_boilerplate(html: str) -> str:
         root = soup.select_one(selector)
         if root is not None:
             break
+
+    for el in soup(list(_CHROME_OUTSIDE_ROOT_TAGS)):
+        if el.decomposed or _is_inside(el, root) or _is_inside(root, el) or el is root:
+            continue
+        el.decompose()
+
+    body_len = len(_visible_text(body))
+    for form in soup("form"):
+        if form.decomposed or form is root or _is_inside(root, form):
+            continue
+        if body_len and len(_visible_text(form)) >= _FORM_KEEP_TEXT_SHARE * body_len:
+            continue
+        form.decompose()
+
     if root is None:
         return str(body)
     body_len = len(_visible_text(body))
@@ -301,12 +332,6 @@ def _looks_like_html(text: str) -> bool:
     return head.startswith("<!doctype html") or head.startswith("<html") or "<body" in head
 
 
-def _fetch_remote(url_str: str) -> str:
-    """Fetch ``url_str`` and return its markdown (main content for HTML)."""
-    text, content_type = _fetch_remote_raw(url_str)
-    return _to_markdown(text, content_type)
-
-
 def _fetch_remote_raw(url_str: str) -> tuple[str, str]:
     """Manual redirect loop with per-hop SSRF validation and a size cap.
 
@@ -370,27 +395,10 @@ def fetch_url(source: str) -> str:
 
     SSRF rejections and unsupported content surface as a ``[DATA ERROR]`` string
     (containing ``ssrf_blocked`` for blocked addresses) rather than raising, so
-    the ingest pipeline can short-circuit on the returned value.
+    the ingest pipeline can short-circuit on the returned value. Delegates to
+    ``fetch_source`` and returns its ``markdown``.
     """
-    scheme = ""
-    try:
-        scheme = httpx.URL(source).scheme
-    except (httpx.InvalidURL, ValueError, TypeError):
-        scheme = ""
-
-    if scheme not in ("http", "https"):
-        # Treat anything that is not an http(s) URL as a local file path. A
-        # stray non-http scheme (file://, ftp://) is rejected as ssrf_blocked.
-        if "://" in source and scheme:
-            return f"[DATA ERROR] ssrf_blocked: scheme not allowed: {scheme}"
-        return _fetch_file(source)
-
-    try:
-        return _fetch_remote(source)
-    except SsrfBlocked as exc:
-        return f"[DATA ERROR] ssrf_blocked: {exc}"
-    except httpx.HTTPError as exc:
-        return f"[DATA ERROR] fetch_failed: {exc}"
+    return fetch_source(source)["markdown"]
 
 
 def _is_http_url(source: str) -> tuple[bool, str]:
@@ -412,7 +420,7 @@ def fetch_source(source: str) -> dict:
     Local files and fetch errors never get a verdict (ingest keeps its
     ``empty_source`` path for files).
     """
-    is_url, _scheme = _is_http_url(source)
+    is_url, scheme = _is_http_url(source)
     out = {
         "markdown": "",
         "raw": None,
@@ -421,7 +429,12 @@ def fetch_source(source: str) -> dict:
         "unusable": None,
     }
     if not is_url:
-        out["markdown"] = fetch_url(source)
+        # Anything that is not an http(s) URL is a local file path. A stray
+        # non-http scheme (file://, ftp://) is rejected as ssrf_blocked.
+        if "://" in source and scheme:
+            out["markdown"] = f"[DATA ERROR] ssrf_blocked: scheme not allowed: {scheme}"
+        else:
+            out["markdown"] = _fetch_file(source)
         return out
     try:
         raw, content_type = _fetch_remote_raw(source)
