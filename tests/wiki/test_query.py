@@ -3762,3 +3762,87 @@ class TestSpaceFileBackDefault:
 
     def test_invalid_value_falls_back_to_the_gate(self, monkeypatch, tmp_path):
         assert self._run(monkeypatch, tmp_path, None, "true")["filed_back"] is True
+
+
+class TestSynthesisOptions:
+    """Aldeia-IT/aldeia-box#1428: the synthesis request sends num_ctx/num_predict.
+
+    Extraction sends num_ctx = max input + output tokens. Synthesis must send the
+    same value (so Ollama keeps the loaded runner when a query and an ingest
+    alternate), and more only when WIKI_SYNTH_MAX_INPUT_TOKENS needs it.
+    """
+
+    BASE = "http://ollama.test"
+
+    @pytest.fixture(autouse=True)
+    def _clear_budget_env(self, monkeypatch):
+        for var in (
+            "WIKI_EXTRACT_MAX_INPUT_TOKENS",
+            "WIKI_EXTRACT_OUTPUT_TOKENS",
+            "WIKI_SYNTH_MAX_INPUT_TOKENS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def _capture_bodies(self, generate_status: int = 200) -> list[dict]:
+        import json
+
+        bodies: list[dict] = []
+
+        def capture(request):
+            bodies.append(json.loads(request.content))
+            if request.url.path == "/api/generate" and generate_status != 200:
+                return httpx.Response(generate_status, json={"error": "unsupported"})
+            return httpx.Response(
+                200, json={"response": "An answer.", "message": {"content": "An answer."}}
+            )
+
+        respx.post(f"{self.BASE}/api/generate").mock(side_effect=capture)
+        respx.post(f"{self.BASE}/api/chat").mock(side_effect=capture)
+        return bodies
+
+    @respx.mock
+    def test_generate_and_chat_carry_the_extraction_num_ctx(self):
+        from anytype_llm_wiki.wiki.extraction import _DETERMINISTIC_OPTS, _model_options
+        from anytype_llm_wiki.wiki.query import _call_ollama_synthesis
+
+        bodies = self._capture_bodies(generate_status=500)
+        assert _call_ollama_synthesis(self.BASE, "prompt") == "An answer."
+        assert [b.get("prompt") is not None for b in bodies] == [True, False]
+        for body in bodies:
+            opts = body["options"]
+            assert opts["num_ctx"] == 8192 + 4096
+            assert opts["num_ctx"] == _model_options()["num_ctx"]
+            assert opts["num_predict"] == 4096
+            for key, value in _DETERMINISTIC_OPTS.items():
+                assert opts[key] == value
+
+    @respx.mock
+    def test_extraction_env_overrides_follow(self, monkeypatch):
+        from anytype_llm_wiki.wiki.query import _call_ollama_synthesis
+
+        monkeypatch.setenv("WIKI_EXTRACT_MAX_INPUT_TOKENS", "6000")
+        monkeypatch.setenv("WIKI_EXTRACT_OUTPUT_TOKENS", "2048")
+        bodies = self._capture_bodies()
+        _call_ollama_synthesis(self.BASE, "prompt")
+        assert len(bodies) == 1
+        assert bodies[0]["options"]["num_ctx"] == 8048
+        assert bodies[0]["options"]["num_predict"] == 2048
+
+    @respx.mock
+    def test_smaller_synth_budget_keeps_the_extraction_value(self, monkeypatch):
+        from anytype_llm_wiki.wiki.query import _call_ollama_synthesis
+
+        monkeypatch.setenv("WIKI_SYNTH_MAX_INPUT_TOKENS", "2000")
+        bodies = self._capture_bodies()
+        _call_ollama_synthesis(self.BASE, "prompt")
+        assert bodies[0]["options"]["num_ctx"] == 8192 + 4096
+
+    @respx.mock
+    def test_larger_synth_budget_raises_num_ctx(self, monkeypatch):
+        from anytype_llm_wiki.wiki.query import _call_ollama_synthesis
+
+        monkeypatch.setenv("WIKI_SYNTH_MAX_INPUT_TOKENS", "16000")
+        bodies = self._capture_bodies()
+        _call_ollama_synthesis(self.BASE, "prompt")
+        assert bodies[0]["options"]["num_ctx"] == 16000 + 4096
+        assert bodies[0]["options"]["num_predict"] == 4096
