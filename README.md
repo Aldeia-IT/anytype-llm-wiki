@@ -61,6 +61,8 @@ you use it:
 > 📊 **[Full visual guide →](docs/diagrams.md)** — the write pipeline, the typed object
 > model, and the self-auditing health check.
 
+Search is **hybrid**: within a space, semantic similarity is fused with keyword matching, and objects whose name matches the query come first, so a name lookup finds the object even when its embedding does not (see [Key behaviors](#key-behaviors-worth-knowing)).
+
 Objects carry their knowledge in **properties** (`wiki_facts`, `wiki_definition`, …), not in the object body — so an ingested object shows an empty body in the Anytype client by design; the content is fully indexed and retrievable.
 
 ## Quick start
@@ -160,7 +162,7 @@ wiki_query(space_id, "What do we know about Qdrant multi-tenancy?")
 
 | Tool | What it does |
 |------|--------------|
-| `semantic_search` | Search the vault by meaning. `query`, `space_id?`, `types?`, `ingested_after?`, `ingested_before?`, `source_type?`, `domain_tags?`, `limit?` (default results exclude `wiki_source` excerpts unless `types=["wiki_source"]` or `source_type` is given; hits from sources ingested from a URL carry `wiki_url`) |
+| `semantic_search` | Search the vault by meaning and keywords, name matches first (hybrid only with `space_id`; pass it for name lookups). `query`, `space_id?`, `types?`, `ingested_after?`, `ingested_before?`, `source_type?`, `domain_tags?`, `limit?` (default results exclude `wiki_source` excerpts unless `types=["wiki_source"]` or `source_type` is given; hits from sources ingested from a URL carry `wiki_url`) |
 | `reindex_anytype` | Trigger an incremental reindex. `space_id?` |
 | `wiki_bootstrap` | Provision the typed wiki schema in a space. `space_id`, `domain_tags?` |
 | `wiki_ingest` | Compile a source (URL or file) into curated, interlinked Objects with provenance; auto-reindex. `source`, `space_id`, `domain_hint?` |
@@ -177,6 +179,7 @@ Extraction and synthesis run on local Ollama by default (`WIKI_EXTRACT_MODEL`, d
 - **Safe repeated writes (`wiki_remember`).** Reworded duplicates merge, genuinely new facts append, superseding facts replace (the prior text is recorded in the WikiLog and recoverable), contradictions are flagged not overwritten, and re-asserting the same knowledge converges to a no-op.
 - **Fleet-safe concurrent writes (no read-after-write).** Independent agents on separate PIDs/terminals can `wiki_remember` the *same* space at once: each durably queues its subjects (a lock-free append to the work-log) and whichever process holds the per-space lock drains them — nobody blocks, nobody's learnings are dropped. A submit may return *before* its subjects are applied, so a `wiki_query` immediately afterward may not see them yet (the wiki is for the *next* agent, not the submitter's own next line). Same-host only — see [known limitations](docs/known-limitations.md). The `wiki-drain` CLI forces a synchronous drain when you need one.
 - **Tiered retrieval.** Below `WIKI_INDEX_THRESHOLD` (default 200) Objects, `wiki_query` reads the whole wiki directly (exhaustive and fast); above it, it uses vector search plus 1-hop neighborhood expansion.
+- **Hybrid, name-aware retrieval (Aldeia-IT/aldeia-box#327).** A `semantic_search` call with a `space_id` (and `wiki_query`'s vector tier) fuses dense similarity with keyword (**BM25**) matching over object name, heading and text, by Reciprocal Rank Fusion. A **name tier** then puts objects whose name matches the query first: an exact name match first, then names that contain every query word. Accents, case, punctuation, a trailing `(context)` and one leading title word are ignored for the match ("Mestre Pastinha (Salvador)" finds "Pastinha"); the title words are `mestre`, `mestra`, `contramestre`, `contra-mestre`, `professor` and their feminine forms, replaced by `NAME_TIER_TITLE_WORDS`. Results stay chunk-level. The `score` follows the result order: it is opaque, higher is better, and not comparable across calls. **Calls without `space_id` are semantic-only** (no keyword matching, no name tier), so pass `space_id` for name lookups. Each space's keyword index is built in memory on its first query and rebuilt after a reindex changes that space; any failure there falls back to semantic-only results.
 - **Incremental, schedulable indexing.** Only changed objects are re-embedded. For continuous indexing, run `reindex_anytype` on a schedule (cron/launchd — a sample launchd plist ships at [`docs/samples/com.aldeia.anytype-llm-wiki-reindex.plist`](docs/samples/com.aldeia.anytype-llm-wiki-reindex.plist)). For high agent write-rates, set `WIKI_AUTO_REINDEX=false` and batch a scheduled reindex, since reindex cost scales with total space size.
 
 ## Performance
@@ -207,6 +210,7 @@ Benchmarked on a Mac Mini (Apple Silicon):
 > *What it does:* on a write, when exact- and fuzzy-title matching don't find an existing object, it asks a local LLM whether the new entity is the **same real-world entity** as a lexically-similar existing one (an alias / abbreviation / rename) and, if so, **merges** into it instead of creating a duplicate — automatically catching dupes like `k8s` → `Kubernetes`.
 > *The risk:* the judgment is **destructive and irreversible-ish** (the new object is never created), and even a vetted model **over-merges distinct entities** on real, messy data (observed ~7–10% on a real graph — e.g. merging a person into the eponymous project, a testnet into its mainnet, or a collection into one of its members). It is deliberately conservative and gated behind this off-by-default flag + a vetted-model startup check, but **it can still corrupt your graph**. For curation we recommend the **non-destructive** path instead: `wiki_lint --include-duplicates`, which only *surfaces* `potential_duplicate` suggestions for a human to review and merge.
 | `WIKI_EXTRACT_ENDPOINT` | *(unset → local Ollama)* | Hosted LLM endpoint for extraction (off-machine; consent-gated) |
+| `NAME_TIER_TITLE_WORDS` | *(unset → built-in list)* | Comma-separated leading title words the search name tier ignores ("Mestre Pastinha" matches "Pastinha"). Replaces the built-in `mestre, mestra, contramestre, contramestra, contra-mestre, contra-mestra, professor, professora`; set but empty = no title words |
 | `WIKI_INDEX_THRESHOLD` | `200` | Object count at which `wiki_query` flips Tier 1 → Tier 2 |
 | `WIKI_QUERY_MAX_NEIGHBORS` | `16` | Cap on distinct 1-hop neighbours `wiki_query` fans out to fetch and cite per query |
 | `WIKI_AUTO_REINDEX` | `true` | Auto-reindex after each write (set `false` to batch via a scheduled reindex) |
@@ -233,7 +237,7 @@ Dependencies are pinned in two layers: **`uv.lock`** locks every direct and tran
 
 ## Roadmap
 
-- Hybrid search — metadata filtering (object type + date range) ships now; keyword/sparse fusion remains roadmap (#327); tag/source filtering tracked in #336
+- Hybrid search — metadata filtering (object type + date range) ships now; keyword fusion (BM25 + RRF) with a name tier ships in Aldeia-IT/aldeia-box#327; tag/source filtering tracked in #336
 - Contradiction detection beyond linked peers (semantic pre-filter)
 - Cross-space federation with access control
 - Webhook-based indexing when Anytype adds webhook support

@@ -1,0 +1,74 @@
+{
+  "frozen": false,
+  "note": "Template only: placeholder IDs. The real, frozen fixture lives in the aldeia-work ticket folder and is passed by path in WIKI_EVAL_FIXTURE. Never commit real object IDs, space IDs or fleet names here (Aldeia-IT/aldeia-box#327).",
+  "ignore_ids_note": "Optional. Object IDs dropped from both the dense and the hybrid result lists before every bar is scored: objects deleted from a space but still in the Qdrant index (Aldeia-IT/aldeia-box#1425). The results output records, per case, which of them appeared (ignored_ids_seen).",
+  "ignore_ids": ["<deleted-but-indexed-object-id>"],
+  "cases": [
+    {
+      "id": "capoeira-name-01",
+      "group": "capoeira-name",
+      "query": "<apelido>",
+      "space_id": "<capoeira-space-id>",
+      "types": ["wiki_entity", "wiki_source"],
+      "expected_ids": ["<object-id>"],
+      "dense_top_ids": ["<object-id>"]
+    },
+    {
+      "id": "capoeira-diacritic-01",
+      "group": "capoeira-diacritic",
+      "query": "<unaccented apelido>",
+      "space_id": "<capoeira-space-id>",
+      "types": ["wiki_entity", "wiki_source"],
+      "expected_ids": ["<object-id>"]
+    },
+    {
+      "id": "capoeira-context-01",
+      "group": "capoeira-context",
+      "query": "<apelido> (<context>)",
+      "space_id": "<capoeira-space-id>",
+      "types": ["wiki_entity", "wiki_source"],
+      "expected_ids": ["<object-id>"]
+    },
+    {
+      "id": "capoeira-shared-01",
+      "group": "capoeira-shared",
+      "query": "<shared apelido, bare>",
+      "space_id": "<capoeira-space-id>",
+      "types": ["wiki_entity", "wiki_source"],
+      "expected_ids": ["<object-id-a>", "<object-id-b>"]
+    },
+    {
+      "id": "fleet-exact-01",
+      "group": "fleet-exact",
+      "query": "<exact object name>",
+      "space_id": "<fleet-space-id>",
+      "types": ["wiki_entity", "wiki_concept"],
+      "expected_ids": ["<object-id>"]
+    },
+    {
+      "id": "fleet-partial-01",
+      "group": "fleet-partial",
+      "query": "<word contained in the target name>",
+      "space_id": "<fleet-space-id>",
+      "types": ["wiki_entity", "wiki_concept"],
+      "expected_ids": ["<object-id>"]
+    },
+    {
+      "id": "control-01",
+      "group": "control",
+      "query": "<question-shaped query without a name>",
+      "space_id": "<fleet-space-id>",
+      "types": ["wiki_entity", "wiki_concept"],
+      "expected_ids": [],
+      "dense_top_ids": ["<object-id>"]
+    },
+    {
+      "id": "control-word-01",
+      "group": "control-word",
+      "query": "<one topical word>",
+      "space_id": "<capoeira-space-id>",
+      "types": ["wiki_entity", "wiki_source"],
+      "expected_ids": []
+    }
+  ]
+}

@@ -30,6 +30,7 @@ New tests added for v1 (issue #323) — type+date metadata filter:
 - AC-F12 test_reembed_writes_last_modified_date
 """
 
+import itertools
 import json
 import httpx
 import pytest
@@ -381,6 +382,8 @@ class FakeQdrantClientWithSearch:
     Supports query_points (captures query_filter), create_payload_index
     (records which fields were indexed), upsert, delete, get_collections,
     create_collection.  Never emits UserWarning.
+
+    Extended for Aldeia-IT/aldeia-box#327: scroll() returns all upserted points (single page).
     """
 
     def __init__(self, mock_results=None):
@@ -434,6 +437,14 @@ class FakeQdrantClientWithSearch:
 
         _Result.points = self._mock_results
         return _Result()
+
+    def scroll(self, collection_name, limit=1000, offset=None,
+               with_payload=True, with_vectors=False):
+        """Single page: return all upserted points, next_offset=None.
+
+        Required by _build_bm25_index (Aldeia-IT/aldeia-box#327 D3).
+        """
+        return list(self.upserted_points), None
 
 
 # ---------------------------------------------------------------------------
@@ -1141,7 +1152,7 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
     test_no_filter_regression stays GREEN because that test calls semantic_search_core
     directly — the OD-B guard is in server.py, not in semantic_search_core.
     """
-    import anytype_llm_wiki.server as _server_mod
+    import anytype_llm_wiki.indexer as _idx_mod
 
     captured_calls: list[dict] = []
 
@@ -1150,7 +1161,11 @@ def test_semantic_search_default_excludes_wiki_source(monkeypatch):
         captured_calls.append({"types": types, "query": query})
         return []
 
-    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    # Aldeia-IT/aldeia-box#327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # switch); retarget this #336 OD-B seam test to the new module-qualified
+    # symbol. The OD-B logic under test (server.py's effective_types) is
+    # unchanged — only the callee name is.
+    monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_core)
 
     from anytype_llm_wiki.server import semantic_search
 
@@ -1192,7 +1207,7 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
     non-source default forced), leaving wiki_source chunks searchable so the
     source_type filter can match them.
     """
-    import anytype_llm_wiki.server as _server_mod
+    import anytype_llm_wiki.indexer as _idx_mod
 
     captured_calls: list[dict] = []
 
@@ -1202,7 +1217,11 @@ def test_semantic_search_source_type_filter_suppresses_default_exclude(monkeypat
         captured_calls.append({"types": types, "source_type": source_type})
         return []
 
-    monkeypatch.setattr(_server_mod, "semantic_search_core", fake_core)
+    # Aldeia-IT/aldeia-box#327: server.py now routes to indexer.hybrid_search_core (AC-H11 call-site
+    # switch); retarget this #336 OD-B seam test to the new module-qualified
+    # symbol. The guard under test (`if types is None and not source_type`) is
+    # unchanged.
+    monkeypatch.setattr(_idx_mod, "hybrid_search_core", fake_core)
     from anytype_llm_wiki.server import semantic_search
 
     semantic_search(query="test", source_type=["document"])
@@ -1245,10 +1264,15 @@ _BASE_CHUNK = {
 _BASE_HIT_KEYS = {"object_name", "object_id", "type", "heading", "text", "score"}
 
 
+_FAKE_POINT_IDS = itertools.count(1)
+
+
 class _FakePoint:
-    def __init__(self, payload, score=0.9):
+    def __init__(self, payload, score=0.9, point_id=None):
         self.payload = payload
         self.score = score
+        # The hybrid path keys RRF fusion on the Qdrant point id (Aldeia-IT/aldeia-box#327).
+        self.id = point_id if point_id is not None else f"fp-{next(_FAKE_POINT_IDS)}"
 
 
 def _source_payload(**extra):
@@ -1662,3 +1686,207 @@ def test_stored_v4_keeps_incremental_skip_and_no_set_payload(monkeypatch, tmp_pa
     assert fake.set_payload_calls == []
     assert fake.get_object_calls == []
     assert embeds == []
+# ===========================================================================
+# Aldeia-IT/aldeia-box#327 — Hybrid Dense+Sparse Fusion (BM25 + RRF)
+# Tests FAIL until the implementation exists.  Import all new symbols INSIDE
+# test bodies so the file collects cleanly before any code is written.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# AC-H1 — BM25 tokenization and scoring
+# ---------------------------------------------------------------------------
+
+
+def test_bm25_scores_keyword_match():
+    """AC-H1: BM25Okapi ranks a keyword-matching corpus item above non-matching items."""
+    from rank_bm25 import BM25Okapi
+    corpus = [["contradiction", "detection", "capability"],
+              ["semantic", "search", "dense"], ["knowledge", "graph", "entity"]]
+    scores = BM25Okapi(corpus).get_scores(["contradiction", "detection"])
+    assert scores[0] > scores[1] and scores[0] > scores[2]
+
+
+# ---------------------------------------------------------------------------
+# AC-H2 — _rrf_fuse: dual-list chunk outranks single-list; dedup; pairs returned
+# ---------------------------------------------------------------------------
+
+
+def test_rrf_fuse_order_and_scores():
+    """AC-H2: dual-list chunk (p2) tops the fused list; no duplicates; scores descend."""
+    from anytype_llm_wiki.indexer import _rrf_fuse
+    dense = [{"_point_id": "p1", "object_id": "o1"},
+             {"_point_id": "p2", "object_id": "o2"}]
+    bm25 = [{"_point_id": "p2", "object_id": "o2"},   # p2 in both
+            {"_point_id": "p3", "object_id": "o3"}]
+    fused = _rrf_fuse(dense, bm25, k=60)
+    assert fused[0][1]["_point_id"] == "p2"           # summed RRF → top
+    pids = [c["_point_id"] for _, c in fused]
+    assert len(pids) == len(set(pids))                # no dup
+    assert fused[0][0] > fused[1][0]                  # scores descend
+
+
+def test_rrf_fuse_both_empty():
+    """AC-H2: both-empty → empty list."""
+    from anytype_llm_wiki.indexer import _rrf_fuse
+    assert _rrf_fuse([], [], k=60) == []
+
+
+def test_rrf_fuse_one_empty():
+    """AC-H2: one-empty → the non-empty list's order is preserved."""
+    from anytype_llm_wiki.indexer import _rrf_fuse
+    d = [{"_point_id": "p1", "object_id": "o1"}]
+    assert [c["_point_id"] for _, c in _rrf_fuse(d, [], 60)] == ["p1"]
+    assert [c["_point_id"] for _, c in _rrf_fuse([], d, 60)] == ["p1"]
+
+
+# ---------------------------------------------------------------------------
+# AC-H-REG1 — semantic_search_core bare call still yields query_filter is None
+# ---------------------------------------------------------------------------
+
+
+def test_no_filter_regression_unchanged(monkeypatch):
+    """AC-H-REG1: semantic_search_core bare call → query_filter is None (unchanged contract)."""
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config as _config
+    fake = FakeQdrantClientWithSearch()
+    monkeypatch.setattr(ix, "_qdrant", lambda: fake)
+    monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * _config.EMBED_DIMS)
+    ix.semantic_search_core(query="test")
+    assert fake.query_calls[-1]["query_filter"] is None
+
+
+# ---------------------------------------------------------------------------
+# AC-H11 (partial) — server.py:semantic_search routes to hybrid_search_core
+# ---------------------------------------------------------------------------
+
+
+def test_server_semantic_search_calls_hybrid(monkeypatch):
+    """AC-H11: server.py:semantic_search calls hybrid_search_core, not semantic_search_core."""
+    import anytype_llm_wiki.indexer as ix
+    seen = {}
+    monkeypatch.setattr(ix, "hybrid_search_core",
+                        lambda **kw: seen.setdefault("kw", kw) or [])
+    from anytype_llm_wiki.server import semantic_search
+    semantic_search(query="test")
+    assert seen["kw"]["query"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# QA-3 (addendum item 3) — _dense_search_with_ids builds a filter structurally
+# identical to semantic_search_core under a fully-populated filter set
+# ---------------------------------------------------------------------------
+
+
+def test_dense_search_with_ids_filter_equals_semantic_search_core(monkeypatch):
+    """QA-3: _dense_search_with_ids constructs the same Qdrant query_filter as
+    semantic_search_core under types + space_id + source_type + domain_tags,
+    guarding the #336 OD-B / #323 nested-filter contract on the dense leg of hybrid.
+    """
+    from qdrant_client.models import FieldCondition
+
+    import anytype_llm_wiki.indexer as ix
+    from anytype_llm_wiki import config as _config
+
+    class CaptureBoth:
+        """Fake Qdrant client that captures the query_filter from both callers."""
+        def __init__(self):
+            self.calls = []
+
+        def get_collections(self):
+            class _Col:
+                name = _config.QDRANT_COLLECTION
+            class _Result:
+                collections = (_Col(),)
+            return _Result()
+
+        def query_points(self, collection_name, query, query_filter=None,
+                         limit=10, with_payload=True):
+            self.calls.append(query_filter)
+
+            class _Res:
+                points = ()
+            return _Res()
+
+        def scroll(self, collection_name, limit=1000, offset=None,
+                   with_payload=True, with_vectors=False):
+            return [], None
+
+    cap = CaptureBoth()
+    monkeypatch.setattr(ix, "_qdrant", lambda: cap)
+    monkeypatch.setattr(ix, "embed_query", lambda q: [0.1] * _config.EMBED_DIMS)
+
+    common_kwargs = {
+        "query": "test",
+        "space_id": "sp-42",
+        "types": ["wiki_entity", "wiki_concept"],
+        "source_type": ["document"],
+        "domain_tags": ["ai"],
+    }
+
+    # Call semantic_search_core → captures filter[0]
+    ix.semantic_search_core(**common_kwargs)
+    # Call _dense_search_with_ids → captures filter[1]
+    ix._dense_search_with_ids(**common_kwargs)
+
+    assert len(cap.calls) == 2, (
+        "Expected exactly 2 query_points calls (one from each function); "
+        f"got {len(cap.calls)}"
+    )
+    f_ssc, f_dense = cap.calls
+
+    # Both must be non-None
+    assert f_ssc is not None and f_dense is not None, (
+        "QA-3: both semantic_search_core and _dense_search_with_ids must produce a "
+        "non-None query_filter for a fully-populated input"
+    )
+
+    # must-list lengths must match
+    assert len(f_ssc.must) == len(f_dense.must), (
+        f"QA-3: must-list lengths differ: ssc={len(f_ssc.must)} vs dense={len(f_dense.must)}"
+    )
+
+    # space_id FieldCondition present in both
+    def _space_cond(f):
+        return next((c for c in f.must
+                     if isinstance(c, FieldCondition) and c.key == "space_id"), None)
+    assert _space_cond(f_ssc) is not None and _space_cond(f_dense) is not None, (
+        "QA-3: space_id FieldCondition must be present in both filters"
+    )
+    assert _space_cond(f_ssc).match.value == _space_cond(f_dense).match.value == "sp-42", (
+        "QA-3: space_id value must be 'sp-42' in both filters"
+    )
+
+    # types nested Filter(should=[...]) present in both
+    def _type_filter(f):
+        return next((c for c in f.must if hasattr(c, "should") and c.should), None)
+    assert _type_filter(f_ssc) is not None and _type_filter(f_dense) is not None, (
+        "QA-3: types nested Filter(should=[...]) must be present in both filters"
+    )
+    ssc_type_keys = {c.match.value for c in _type_filter(f_ssc).should}
+    dense_type_keys = {c.match.value for c in _type_filter(f_dense).should}
+    assert ssc_type_keys == dense_type_keys == {"wiki_entity", "wiki_concept"}, (
+        f"QA-3: type keys must match: ssc={ssc_type_keys} vs dense={dense_type_keys}"
+    )
+
+    # source_type FieldCondition present in both
+    def _st_cond(f):
+        return next((c for c in f.must
+                     if isinstance(c, FieldCondition) and c.key == "source_type"), None)
+    assert _st_cond(f_ssc) is not None and _st_cond(f_dense) is not None, (
+        "QA-3: source_type FieldCondition must be present in both filters"
+    )
+    assert set(_st_cond(f_ssc).match.any) == set(_st_cond(f_dense).match.any) == {"document"}, (
+        "QA-3: source_type MatchAny values must match"
+    )
+
+    # domain_tags FieldCondition present in both
+    def _dt_cond(f):
+        return next((c for c in f.must
+                     if isinstance(c, FieldCondition) and c.key == "domain_tags"), None)
+    assert _dt_cond(f_ssc) is not None and _dt_cond(f_dense) is not None, (
+        "QA-3: domain_tags FieldCondition must be present in both filters"
+    )
+    assert set(_dt_cond(f_ssc).match.any) == set(_dt_cond(f_dense).match.any) == {"ai"}, (
+        "QA-3: domain_tags MatchAny values must match"
+    )
