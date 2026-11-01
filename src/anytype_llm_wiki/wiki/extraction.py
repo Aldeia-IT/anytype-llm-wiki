@@ -320,6 +320,63 @@ def sanitize_name(name: str) -> str | None:
     return stripped
 
 
+# Identifier-like name shapes (Aldeia-IT/aldeia-box#1426 D2/D4). Kept apart from
+# sanitize_name on purpose: sanitize_name also guards existing object names in
+# query.py, where a slug filter would redact real objects.
+_SNAKE_LABEL_RE = re.compile(r"^[A-Za-z0-9]+(_[A-Za-z0-9]+)+$")
+_KEBAB_SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+){2,}$")
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_DOTTED_HOST_PATH_RE = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/")
+_FILE_SUFFIXES = (
+    ".md", ".markdown", ".json", ".yaml", ".yml", ".toml", ".txt", ".csv",
+    ".sql", ".py", ".ts", ".tsx", ".html", ".pdf",
+)
+
+
+def is_identifier_like_name(name: str) -> bool:
+    """Tell whether a name looks like a key, slug, URL or file path, not a title.
+
+    Meant for names a model extracted from narrated text (``wiki_remember``
+    refuses them, Aldeia-IT/aldeia-box#1426). Do not apply it to a caller-given
+    name such as ``subject_hint`` or to existing objects: those are deliberate.
+    The name is stripped first. It is identifier-like when any of these holds:
+
+    1. snake_case label: ``founding_date_conflict``, ``Mestra_Janja``;
+    2. lowercase ASCII kebab slug with 3+ segments:
+       ``associacao-de-capoeira-mestre-bimba`` (two segments such as ``bge-m3``
+       or ``gpt-4o`` pass; any uppercase, space or non-ASCII letter passes);
+    3. URL-like, no whitespace: a scheme (``https://example.org/x``), ``www.``,
+       or a dotted host followed by a slash (``pt.wikipedia.org/wiki/X``); a bare
+       dotted name (``Node.js``, ``ASP.NET``, ``capoeira.com``) passes;
+    4. file name or path, no whitespace, whose last ``/`` segment ends in a
+       document or code suffix (``persons/mestre-bimba.md``, ``notes.yaml``);
+       ``.js`` is deliberately not a suffix (``Node.js``).
+
+    Args:
+        name: the candidate object name.
+
+    Returns:
+        ``True`` when the name matches a rule above; ``False`` otherwise,
+        including for non-str or blank input (``sanitize_name`` rejects those).
+    """
+    if not isinstance(name, str):
+        return False
+    stripped = name.strip()
+    if not stripped:
+        return False
+    if _SNAKE_LABEL_RE.match(stripped) or _KEBAB_SLUG_RE.match(stripped):
+        return True
+    if any(ch.isspace() for ch in stripped):
+        return False
+    if (
+        _URL_SCHEME_RE.match(stripped)
+        or stripped.lower().startswith("www.")
+        or _DOTTED_HOST_PATH_RE.match(stripped)
+    ):
+        return True
+    return stripped.rsplit("/", 1)[-1].lower().endswith(_FILE_SUFFIXES)
+
+
 def sanitize_property_value(text: str) -> str:
     """Strip control/bidi/tag codepoints from a property value (AC#16/SF2)."""
     if not isinstance(text, str):

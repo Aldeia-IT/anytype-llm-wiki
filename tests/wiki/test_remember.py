@@ -3818,7 +3818,7 @@ class TestSubjectHintNaming:
         assert rels == []
 
     def test_ac2_hint_wins_over_proper_extracted_name(self, monkeypatch, tmp_path):
-        result, creates, rels = _run_remember_capturing(
+        _result, creates, rels = _run_remember_capturing(
             monkeypatch, tmp_path,
             [_ent("Mestre Bimba", "Mestre Bimba founded the academy.")],
             knowledge="Mestre Bimba founded the Associação de Capoeira Mestre Bimba.",
@@ -3964,7 +3964,7 @@ class TestSubjectHintNaming:
 
     def test_ac8_hint_kind_concept_with_nonempty_extraction(self, monkeypatch, tmp_path):
         knowledge = "Capoeira Regional is the style Mestre Bimba created."
-        result, creates, _ = _run_remember_capturing(
+        _result, creates, _ = _run_remember_capturing(
             monkeypatch, tmp_path, [_ent("Mestre Bimba")],
             knowledge=knowledge, subject_hint="Capoeira Regional", kind="concept",
         )
@@ -3975,7 +3975,7 @@ class TestSubjectHintNaming:
         assert creates[1]["type_key"] == "wiki_entity"
 
     def test_ac8_hint_kind_other_is_entity(self, monkeypatch, tmp_path):
-        result, creates, _ = _run_remember_capturing(
+        _result, creates, _ = _run_remember_capturing(
             monkeypatch, tmp_path, [_con("Capoeira Regional")],
             knowledge="Mestre Bimba created Capoeira Regional.",
             subject_hint="Mestre Bimba", kind="person",
@@ -3992,7 +3992,7 @@ class TestSubjectHintNaming:
         ],
     )
     def test_ac9_caller_relations_not_duplicated(self, monkeypatch, tmp_path, caller_rel):
-        result, creates, rels = _run_remember_capturing(
+        _result, creates, rels = _run_remember_capturing(
             monkeypatch, tmp_path, [_ent("Mestre Bimba"), _ent("Salvador")],
             knowledge="Mestre Bimba founded the academy in Salvador.",
             subject_hint=_HINT_ACM, relations=[caller_rel],
@@ -4017,7 +4017,7 @@ class TestIdentifierNamesAllowedSpaces:
     """Aldeia-IT/aldeia-box#1426 D5/AC14 — WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES
     switches the identifier-like refusal off for listed spaces only."""
 
-    _SUBJECTS = [_con("wiki_query"), _ent("anytype-llm-wiki")]
+    _SUBJECTS = (_con("wiki_query"), _ent("anytype-llm-wiki"))
 
     def test_unset_refuses(self, monkeypatch, tmp_path):
         monkeypatch.delenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", raising=False)

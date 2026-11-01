@@ -321,6 +321,22 @@ def fetch_extra_ports() -> list[int]:
     return ports
 
 
+def identifier_names_allowed_spaces() -> frozenset[str]:
+    """Resolve WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES — comma-separated space IDs.
+
+    In a listed space ``wiki_remember`` keeps model-extracted names that look
+    like keys, slugs, URLs or paths (``wiki_query``, ``anytype-llm-wiki``)
+    instead of refusing them (Aldeia-IT/aldeia-box#1426 D5). Entries are
+    stripped and empty entries dropped.
+
+    Returns:
+        The listed space IDs; an empty set when unset or empty, so the refusal
+        applies in every space by default.
+    """
+    raw = os.environ.get("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 def lock_dir_path() -> Path:
     """Convenience: WIKI_LOCK_DIR resolved to a pathlib.Path at call time."""
     return Path(lock_dir())
