@@ -201,8 +201,10 @@ def wiki_remember(
     naming policy: in spaces listed in WIKI_REFUSE_IDENTIFIER_NAMES_SPACES,
     extracted names that look like keys, slugs, URLs, file names or snake_case
     labels are refused (warning "name_policy_rejected: identifier_like: <name>"),
-    e.g. a genealogy space where names are proper names such as apelidos, so keys and labels never become objects. Write knowledge as plain external facts: no keys, slugs, file names,
-    URLs or internal labels in it; cite sources through `source`.
+    e.g. a genealogy space where names are proper names such as apelidos, so keys
+    and labels never become objects. Write knowledge as plain external facts: no
+    keys, slugs, file names, URLs or internal labels in it; cite sources through
+    `source`.
 
     Args:
         space_id: Target Anytype space ID (must be bootstrapped at schema >= 0.3.1).

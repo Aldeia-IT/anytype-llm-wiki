@@ -418,8 +418,8 @@ def wiki_remember(
 
         # Subjects are planned before the work-log append so a pending batch
         # already carries clean names (Aldeia-IT/aldeia-box#1426). The refusal
-        # applies only in opted-in spaces; its warnings ride on base_warnings: drained, queued and degraded results
-        # all report them.
+        # applies only in opted-in spaces; its warnings ride on base_warnings:
+        # drained, queued and degraded results all report them.
         new_subjects, batch_relations, name_warnings = _plan_subjects(
             extracted, knowledge, subject_hint, kind, relations,
             refuse_identifiers=space_id in config.refuse_identifier_names_spaces(),
