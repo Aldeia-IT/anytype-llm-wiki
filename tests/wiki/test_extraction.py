@@ -1237,32 +1237,33 @@ class TestIsIdentifierLikeName:
         )
 
 
-class TestIdentifierNamesAllowedSpacesConfig:
-    """Aldeia-IT/aldeia-box#1426 D5/AC14 — WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES
-    parsing: comma-separated space IDs, resolved per call, default empty."""
+class TestRefuseIdentifierNamesSpacesConfig:
+    """Aldeia-IT/aldeia-box#1426 D5/AC14 — WIKI_REFUSE_IDENTIFIER_NAMES_SPACES
+    parsing: comma-separated space IDs, resolved per call, default empty (the
+    identifier-like refusal applies nowhere)."""
 
     def test_unset_is_empty(self, monkeypatch):
-        monkeypatch.delenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", raising=False)
+        monkeypatch.delenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", raising=False)
         from anytype_llm_wiki.wiki import config
-        assert config.identifier_names_allowed_spaces() == frozenset()
+        assert config.refuse_identifier_names_spaces() == frozenset()
 
     def test_empty_string_is_empty(self, monkeypatch):
-        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "")
+        monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "")
         from anytype_llm_wiki.wiki import config
-        assert config.identifier_names_allowed_spaces() == frozenset()
+        assert config.refuse_identifier_names_spaces() == frozenset()
 
     def test_entries_stripped_and_empties_dropped(self, monkeypatch):
         monkeypatch.setenv(
-            "WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", " space-a , space-b,, space-c ,"
+            "WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", " space-a , space-b,, space-c ,"
         )
         from anytype_llm_wiki.wiki import config
-        assert config.identifier_names_allowed_spaces() == frozenset(
+        assert config.refuse_identifier_names_spaces() == frozenset(
             {"space-a", "space-b", "space-c"}
         )
 
     def test_resolved_at_call_time(self, monkeypatch):
         from anytype_llm_wiki.wiki import config
-        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "space-a")
-        assert config.identifier_names_allowed_spaces() == frozenset({"space-a"})
-        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "space-b")
-        assert config.identifier_names_allowed_spaces() == frozenset({"space-b"})
+        monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "space-a")
+        assert config.refuse_identifier_names_spaces() == frozenset({"space-a"})
+        monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "space-b")
+        assert config.refuse_identifier_names_spaces() == frozenset({"space-b"})

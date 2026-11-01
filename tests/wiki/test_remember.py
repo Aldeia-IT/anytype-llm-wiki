@@ -3798,11 +3798,13 @@ def _prop_text(payload, key):
 
 class TestSubjectHintNaming:
     """Aldeia-IT/aldeia-box#1426 D1/D2 — the hint is the primary subject even
-    when extraction returns subjects; identifier-like extracted names are refused."""
+    when extraction returns subjects; in a space listed in
+    WIKI_REFUSE_IDENTIFIER_NAMES_SPACES identifier-like extracted names are refused.
+    Every test here runs with the test space listed (the strict case)."""
 
     @pytest.fixture(autouse=True)
-    def _no_allow_list(self, monkeypatch):
-        monkeypatch.delenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", raising=False)
+    def _refusing_space(self, monkeypatch):
+        monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", FAKE_SPACE_ID)
 
     def test_ac1_hint_wins_over_slug_of_itself(self, monkeypatch, tmp_path):
         knowledge = "The Associação de Capoeira Mestre Bimba was founded in Salvador."
@@ -4013,54 +4015,62 @@ class TestSubjectHintNaming:
         assert _identifier_warnings(result) == []
 
 
-class TestIdentifierNamesAllowedSpaces:
-    """Aldeia-IT/aldeia-box#1426 D5/AC14 — WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES
-    switches the identifier-like refusal off for listed spaces only."""
+class TestRefuseIdentifierNamesSpaces:
+    """Aldeia-IT/aldeia-box#1426 D5/AC14 — the identifier-like refusal is opt-in:
+    it applies only in spaces listed in WIKI_REFUSE_IDENTIFIER_NAMES_SPACES."""
 
-    _SUBJECTS = (_con("wiki_query"), _ent("anytype-llm-wiki"))
+    _SUBJECTS = (
+        _con("founding_date_conflict"), _con("wiki_query"), _ent("anytype-llm-wiki"),
+    )
+    _KNOWLEDGE = "wiki_query is a tool of anytype-llm-wiki; founding dates can conflict."
 
-    def test_unset_refuses(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", raising=False)
+    def test_unset_creates_all_without_warning(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", raising=False)
+        result, creates, rels = _run_remember_capturing(
+            monkeypatch, tmp_path, self._SUBJECTS, knowledge=self._KNOWLEDGE,
+        )
+        assert [p["name"] for p in creates] == [
+            "anytype-llm-wiki", "founding_date_conflict", "wiki_query",
+        ]
+        assert _identifier_warnings(result) == []
+        assert rels == []
+
+    def test_other_space_listed_creates_all_without_warning(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "some-other-space")
         result, creates, _ = _run_remember_capturing(
-            monkeypatch, tmp_path, self._SUBJECTS,
-            knowledge="wiki_query is a tool of anytype-llm-wiki.",
+            monkeypatch, tmp_path, self._SUBJECTS, knowledge=self._KNOWLEDGE,
+        )
+        assert len(creates) == 3
+        assert _identifier_warnings(result) == []
+
+    def test_listed_space_refuses_all_with_warnings(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(
+            "WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", f"other-space, {FAKE_SPACE_ID} ,"
+        )
+        result, creates, _ = _run_remember_capturing(
+            monkeypatch, tmp_path, self._SUBJECTS, knowledge=self._KNOWLEDGE,
         )
         assert creates == []
         assert sorted(_identifier_warnings(result)) == [
             "name_policy_rejected: identifier_like: anytype-llm-wiki",
+            "name_policy_rejected: identifier_like: founding_date_conflict",
             "name_policy_rejected: identifier_like: wiki_query",
         ]
 
-    def test_other_space_listed_refuses(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "some-other-space")
-        result, creates, _ = _run_remember_capturing(
-            monkeypatch, tmp_path, self._SUBJECTS,
-            knowledge="wiki_query is a tool of anytype-llm-wiki.",
-        )
-        assert creates == []
-        assert len(_identifier_warnings(result)) == 2
-
-    def test_listed_space_creates_without_warning(self, monkeypatch, tmp_path):
-        monkeypatch.setenv(
-            "WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", f"other-space, {FAKE_SPACE_ID} ,"
-        )
-        result, creates, rels = _run_remember_capturing(
-            monkeypatch, tmp_path, self._SUBJECTS,
-            knowledge="wiki_query is a tool of anytype-llm-wiki.",
-        )
-        assert [p["name"] for p in creates] == ["anytype-llm-wiki", "wiki_query"]
-        assert _identifier_warnings(result) == []
-        assert rels == []
-
-    def test_listed_space_hint_primary_fold_and_links_apply(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", FAKE_SPACE_ID)
+    def test_unlisted_space_hint_primary_fold_and_links_apply(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", raising=False)
         knowledge = "The Anytype LLM Wiki exposes the wiki_query tool."
         result, creates, rels = _run_remember_capturing(
             monkeypatch, tmp_path, self._SUBJECTS,
             knowledge=knowledge, subject_hint="Anytype LLM Wiki",
         )
         # anytype-llm-wiki is the slug of the hint: folded, not created.
-        assert [p["name"] for p in creates] == ["Anytype LLM Wiki", "wiki_query"]
+        assert [p["name"] for p in creates] == [
+            "Anytype LLM Wiki", "founding_date_conflict", "wiki_query",
+        ]
         assert _prop_text(creates[0], "wiki_facts") == knowledge
-        assert rels == [("Anytype LLM Wiki", "wiki_query", "related")]
+        assert rels == [
+            ("Anytype LLM Wiki", "founding_date_conflict", "related"),
+            ("Anytype LLM Wiki", "wiki_query", "related"),
+        ]
         assert _identifier_warnings(result) == []
