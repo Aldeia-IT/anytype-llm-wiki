@@ -27,7 +27,8 @@ extraction prompt and the extracted items run through ``plan_primary_subject``,
 the helper ``wiki_ingest`` uses: ``entities`` / ``concepts`` then show the
 renamed primary, ``primary_name`` is its name (null when none matched) and
 ``marked`` is the model's raw ``primary_subject`` (null without a hint or when
-the model gave none) and ``hint_warnings`` lists ``subject_hint_unmatched`` when no entity is the subject.
+the model gave none) and ``hint_warnings`` lists ``subject_hint_unmatched`` when no
+entity is the subject.
 ``--strip-name-titles`` mirrors a space in ``WIKI_STRIP_NAME_TITLES_SPACES``:
 one leading title word is dropped from the names ("Mestre Bimba" becomes "Bimba").
 """

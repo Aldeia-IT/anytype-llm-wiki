@@ -143,7 +143,7 @@ class TestFileBackDefault:
         assert config.file_back_default("sp-a") is False
         assert config.file_back_default("sp-b") is None
 
-    @pytest.mark.parametrize("value", ["true", '"always"', '"false"', "1", '"GATE"'])
+    @pytest.mark.parametrize("value", ["true", '"always"', '"false"', "1", "0", "0.0", '"GATE"'])
     def test_other_values_are_malformed_and_the_file_counts_as_absent(self, cfg, caplog, value):
         cfg.write_text(f'[spaces."sp-a"]\nfile_back_default = {value}\nstrip_name_titles = true\n')
         with caplog.at_level(logging.WARNING):

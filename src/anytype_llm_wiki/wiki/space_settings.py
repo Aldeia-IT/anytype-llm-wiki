@@ -79,7 +79,9 @@ def _load_file() -> dict[str, dict]:
             if bad:
                 problem = f"spaces.{space_id!r}.{bad} is not true or false"
                 break
-            if table.get(_FILE_BACK_KEY, "gate") not in ("gate", False):
+            value = table.get(_FILE_BACK_KEY, "gate")
+            # `is False`, not `in`: 0 == False would let 0 and 0.0 through.
+            if not (value == "gate" or value is False):
                 problem = f'spaces.{space_id!r}.{_FILE_BACK_KEY} is not "gate" or false'
                 break
     if problem:
