@@ -142,18 +142,19 @@ _ROOT_MIN_TEXT_SHARE = 0.25
 
 # AC9 usable-content gate thresholds and markers.
 _MIN_VISIBLE_CHARS = 300
-# Bot-challenge markers decide only on a page this short: a captcha widget beside
-# a full article (a contact form) must not refuse the page.
+# Interstitial (bot-challenge) markers decide only on a page this short, so an
+# article that merely mentions one is kept.
 _CHALLENGE_MAX_VISIBLE_CHARS = 2000
 _CHALLENGE_MARKERS = (
     "cf-chl",
     "just a moment...",
     "checking your browser",
     "attention required",
-    "g-recaptcha",
-    "h-captcha",
-    "cf-turnstile",
 )
+# Captcha widgets also sit in ordinary login, comment and contact forms (a group
+# site's home page with ~1,500 chars of text carried g-recaptcha), so they mark a
+# challenge only on a page with no usable text of its own.
+_CAPTCHA_MARKERS = ("g-recaptcha", "h-captcha", "cf-turnstile")
 _JS_MOUNT_IDS = re.compile(r"^(root|app|__next)$")
 _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
 _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -246,7 +247,11 @@ def usable_content_verdict(raw: str, markdown: str) -> str | None:
     :param markdown: the converted, boilerplate-stripped markdown.
     :returns: ``None`` for a usable page, else the refusal reason: ``empty``,
         ``challenge_page``, ``js_shell`` or ``too_little_text (<n> chars)``.
-        Bot-challenge markers only count on a short page; an empty app mount
+        Interstitial markers (Cloudflare ``cf-chl``, "Just a moment...",
+        "Checking your browser", "Attention Required") count on a page under
+        2,000 visible chars; captcha widgets (``g-recaptcha``, ``h-captcha``,
+        ``cf-turnstile``) only on a page under 300, since ordinary forms carry
+        them too. An empty app mount
         point (``div#root|app|__next``) or a page whose only text is a
         ``<noscript>`` notice is a JavaScript shell.
     """
@@ -258,6 +263,10 @@ def usable_content_verdict(raw: str, markdown: str) -> str | None:
         lowered = raw.lower()
         if len(visible) < _CHALLENGE_MAX_VISIBLE_CHARS and any(
             marker in lowered for marker in _CHALLENGE_MARKERS
+        ):
+            return "challenge_page"
+        if len(visible) < _MIN_VISIBLE_CHARS and any(
+            marker in lowered for marker in _CAPTCHA_MARKERS
         ):
             return "challenge_page"
         if len(visible) < _MIN_VISIBLE_CHARS and _is_js_shell(raw):

@@ -189,6 +189,17 @@ class TestUsableContentVerdict:
         md = _to_markdown(marker_html, "text/html")
         assert usable_content_verdict(marker_html, md) == "challenge_page"
 
+    def test_captcha_in_a_form_on_a_short_real_page_is_not_a_challenge(self):
+        """A group home page (~1,500 chars) with a login-form captcha is kept."""
+        from anytype_llm_wiki.wiki.fetch import _to_markdown, usable_content_verdict
+
+        html = (
+            f"<html><body><div><h1>Grupo</h1><p>{_ARTICLE_TEXT * 6}</p></div>"
+            "<input type='hidden' name='g-recaptcha-response'></body></html>"
+        )
+        md = _to_markdown(html, "text/html")
+        assert usable_content_verdict(html, md) is None
+
     def test_captcha_widget_on_a_real_article_is_not_a_challenge(self):
         """A contact-form captcha beside a full article does not refuse the page."""
         from anytype_llm_wiki.wiki.fetch import _to_markdown, usable_content_verdict
