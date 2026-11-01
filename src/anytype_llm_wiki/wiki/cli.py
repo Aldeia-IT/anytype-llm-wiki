@@ -358,9 +358,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--subject-hint", default=None,
         help=(
             "Optional title of the primary subject: names the object even when "
-            "extraction finds subjects, which are linked to it as related. "
-            "Extracted names that look like keys, slugs, URLs or file names are "
-            "refused, so keep those out of --knowledge (cite sources via --source)."
+            "extraction finds subjects, which are linked to it as related. Keep "
+            "keys, slugs, file names, URLs and internal labels out of --knowledge "
+            "(cite sources via --source); spaces listed in "
+            "WIKI_REFUSE_IDENTIFIER_NAMES_SPACES refuse extracted names shaped "
+            "like them."
         ),
     )
     remember_p.add_argument(

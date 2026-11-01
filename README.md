@@ -157,7 +157,7 @@ anytype-llm-wiki wiki-query --space-id <id> \
 wiki_remember(space_id, "Qdrant 1.12 added native multi-tenancy via payload partitioning.", subject_hint="Qdrant")
 wiki_query(space_id, "What do we know about Qdrant multi-tenancy?")
 ```
-`subject_hint` names the primary object even when extraction finds other subjects; those are linked to it as `related`. Extracted names that look like keys, slugs, URLs, file names or snake_case labels are refused, so write `knowledge` as plain facts and cite sources through `source`.
+`subject_hint` names the primary object even when extraction finds other subjects; those are linked to it as `related`. Write `knowledge` as plain facts, with no keys, slugs, file names, URLs or internal labels, and cite sources through `source`. An optional per-space naming policy (`WIKI_REFUSE_IDENTIFIER_NAMES_SPACES`) refuses extracted names shaped like identifiers, e.g. a genealogy space where names are proper names such as apelidos, so keys and labels never become objects.
 
 ## The MCP tools
 
@@ -167,7 +167,7 @@ wiki_query(space_id, "What do we know about Qdrant multi-tenancy?")
 | `reindex_anytype` | Trigger an incremental reindex. `space_id?` |
 | `wiki_bootstrap` | Provision the typed wiki schema in a space. `space_id`, `domain_tags?` |
 | `wiki_ingest` | Compile a source (URL or file) into curated, interlinked Objects with provenance; auto-reindex. `source`, `space_id`, `domain_hint?` |
-| `wiki_remember` | Consolidate an agent's natural-language narration into typed Objects (LLM merge/dedup/conflict-flag). Fleet-safe **queue-submit**: concurrent writers never block or lose writes (no read-after-write). `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?`. `subject_hint` names the primary object (extracted subjects link to it); identifier-like extracted names are refused |
+| `wiki_remember` | Consolidate an agent's natural-language narration into typed Objects (LLM merge/dedup/conflict-flag). Fleet-safe **queue-submit**: concurrent writers never block or lose writes (no read-after-write). `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?`. `subject_hint` names the primary object (extracted subjects link to it); opted-in spaces refuse identifier-like extracted names |
 | `wiki_query` | Query the wiki for a synthesized, source-cited answer (tiered retrieval + local synthesis); optionally file the answer back. `question`, `space_id`, `file_back?`, `types?`, `ingested_after?`, `ingested_before?`, `source_type?` (no-op — accepted for API symmetry), `domain_tags?` |
 | `wiki_lint` | Read-only structural health check (contradictions, orphans, staleness, asymmetric relations, …), ranked by severity. `space_id`, `severity_threshold?`, `include_duplicates?` |
 
@@ -206,7 +206,7 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_EXTRACT_MODEL` | `qwen2.5:7b` | Local model for extraction / synthesis / consolidation |
 | `WIKI_ALIAS_ADJUDICATION` | `off` | **⚠️ EXPERIMENTAL — enable at your own risk.** LLM alias-merge in entity resolution (Step 3). Off by default. Only runs on a vetted model; **enabling it on an unvetted model makes the MCP server refuse to start** (loud `[CONFIG ERROR]`). See the warning below. |
 | `WIKI_ALIAS_VETTED_MODELS` | _(empty)_ | Comma-separated extra extraction-model **prefixes** trusted for alias adjudication, unioned with the built-in `qwen3.5-mlx`. Adding your model here is the override (there is no force flag). |
-| `WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES` | _(empty)_ | Comma-separated space IDs where `wiki_remember` keeps extracted names that look like keys, slugs, URLs or file names (for example a space that documents tools such as `wiki_query`). Empty: they are refused in every space. |
+| `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` | _(empty)_ | Optional per-space naming policy: comma-separated space IDs where `wiki_remember` refuses extracted names that look like keys, slugs, URLs, file names or snake_case labels, e.g. a genealogy space where names are proper names such as apelidos, so keys and labels never become objects. Empty: nothing is refused in any space. |
 
 > **⚠️ `WIKI_ALIAS_ADJUDICATION` is experimental — leave it off unless you accept the risk.**
 > *What it does:* on a write, when exact- and fuzzy-title matching don't find an existing object, it asks a local LLM whether the new entity is the **same real-world entity** as a lexically-similar existing one (an alias / abbreviation / rename) and, if so, **merges** into it instead of creating a duplicate — automatically catching dupes like `k8s` → `Kubernetes`.

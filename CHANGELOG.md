@@ -61,13 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the primary subject (kind from `kind`, facts = the whole `knowledge`). Extracted subjects
   that are the hinted subject under another spelling (case, accents, slug form) fold into it;
   the others are created and linked to it with a `related` relation, unless the caller's
-  `relations` already link the pair. Extracted names that look like identifiers (snake_case
+  `relations` already link the pair. New optional per-space naming policy:
+  `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` (comma-separated space IDs, default empty = nothing
+  refused) lists the spaces where extracted names that look like identifiers (snake_case
   labels, lowercase kebab slugs of 3+ segments, URL-likes, file names or paths) are refused
-  with the warning `name_policy_rejected: identifier_like: <name>`, with or without a hint;
-  the hint itself is never refused. The new public `extraction.is_identifier_like_name`
-  holds the rule (`sanitize_name` and `wiki_ingest` are unchanged). The new setting
-  `WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES` (comma-separated space IDs, default empty) turns the
-  refusal off for spaces where such names are legitimate.
+  with the warning `name_policy_rejected: identifier_like: <name>`, with or without a hint,
+  e.g. a genealogy space where names are proper names such as apelidos, so keys and labels
+  never become objects. The hint itself is never refused. The rule is the new public
+  `extraction.is_identifier_like_name`, the setting is read by
+  `config.refuse_identifier_names_spaces()` (`sanitize_name` and `wiki_ingest` are unchanged).
 
 ### Fixed
 
