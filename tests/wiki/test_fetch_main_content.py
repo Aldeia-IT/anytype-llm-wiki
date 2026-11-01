@@ -169,11 +169,15 @@ class TestUsableContentVerdict:
     @pytest.mark.parametrize(
         "marker_html",
         [
-            "<html><head><title>Just a moment...</title></head><body>"
-            "<div id='cf-chl-widget'>Verifying</div></body></html>",
+            (
+                "<html><head><title>Just a moment...</title></head><body>"
+                "<div id='cf-chl-widget'>Verifying</div></body></html>"
+            ),
             "<html><body><h1>Checking your browser before accessing the site</h1></body></html>",
-            "<html><head><title>Attention Required! | Cloudflare</title></head>"
-            "<body><p>Sorry, you have been blocked</p></body></html>",
+            (
+                "<html><head><title>Attention Required! | Cloudflare</title></head>"
+                "<body><p>Sorry, you have been blocked</p></body></html>"
+            ),
             "<html><body><div class='g-recaptcha' data-sitekey='x'></div></body></html>",
             "<html><body><div class='h-captcha'></div></body></html>",
             "<html><body><div class='cf-turnstile'></div></body></html>",
