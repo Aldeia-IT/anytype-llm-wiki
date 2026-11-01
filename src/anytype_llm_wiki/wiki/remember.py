@@ -54,6 +54,7 @@ from .util import (
     _existing_text,
     normalize_title,
     scrub_credentials,
+    scrub_text_urls,
     space_ingest_lock,
 )
 from .wiki_client import WikiClient
@@ -162,12 +163,12 @@ def _create_remember_source(
     only when ``source_type_tag_id`` is resolvable.
     """
     name = (
-        scrub_credentials(source_note)[:200]
+        scrub_text_urls(source_note)[:200]
         if source_note
         else f"agent {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
     )
     if source_note:
-        excerpt = sanitize_property_value(scrub_credentials(source_note))[:500]
+        excerpt = sanitize_property_value(scrub_text_urls(source_note))[:500]
     else:
         # #336 D4b: a non-empty stub (the source name) so an agent source with no
         # note still produces >=1 chunk and is reachable by source_type=["agent"]

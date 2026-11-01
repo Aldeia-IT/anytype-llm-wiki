@@ -204,6 +204,28 @@ def scrub_credentials(url: str) -> str:
     return scrubbed
 
 
+# A URL in prose ends at whitespace or a closing delimiter of the markup around
+# it: markdown link ``)``/``]``, autolink ``>``, or a quote.
+_TEXT_URL_RE = re.compile(r"""https?://[^\s)\]>"']+""")
+
+
+def scrub_text_urls(text: str) -> str:
+    """Scrub credentials from every URL inside ``text``, leaving the prose intact.
+
+    ``scrub_credentials`` parses its input as ONE URL and drops the query and
+    fragment, so applied to prose it cuts the text at the first ``#`` or ``?``
+    (a markdown excerpt starting with ``# Title`` became empty;
+    Aldeia-IT/aldeia-box#1427). This runs it on each ``http(s)://`` match only,
+    so the userinfo and query string of an embedded link are removed while
+    headings and ordinary punctuation survive.
+
+    :param text: free text (a markdown excerpt, a note).
+    :returns: ``text`` with each embedded URL replaced by its scrubbed form;
+        ``""`` for a falsy input.
+    """
+    return _TEXT_URL_RE.sub(lambda m: scrub_credentials(m.group(0)), text or "")
+
+
 # ---------------------------------------------------------------------------
 # scrub_url_secrets — narrow scrub that keeps a stored link working
 # ---------------------------------------------------------------------------
