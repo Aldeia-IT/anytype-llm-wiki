@@ -20,7 +20,6 @@ _BUILTIN_TITLE_WORDS = (
     "contra-mestra", "professor", "professora",
 )
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
-_TRAILING_PAREN_RE = re.compile(r"\(([^()]*)\)\s*$")
 
 
 def _norm(text: str) -> str:
@@ -28,16 +27,62 @@ def _norm(text: str) -> str:
     return _NON_ALNUM_RE.sub(" ", fold(text)).strip()
 
 
+def _trailing_group_start(text: str) -> int | None:
+    """Index of the ``(`` opening the balanced group ``text`` ends with, else ``None``.
+
+    ``text`` must already be right-stripped. Nested groups belong to the outer one.
+    """
+    if not text.endswith(")"):
+        return None
+    depth = 0
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == ")":
+            depth += 1
+        elif text[i] == "(":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def split_qualifier(name: str) -> tuple[str, str]:
+    """Split a display name into its base and its trailing qualifier (Aldeia-IT/aldeia-box#1439).
+
+    The qualifier is the last balanced parenthetical group at the end of the
+    name, nested groups included: "Onça (São Paulo)" gives ``("Onça", "São
+    Paulo")`` and "Filhos de Bimba (Bay Area (California))" gives ``("Filhos de
+    Bimba", "Bay Area (California)")``. Both parts are stripped, the spelling is
+    kept.
+
+    Args:
+        name: a display name; a non-string has no qualifier.
+
+    Returns:
+        ``(base, qualifier)``; ``(name, "")`` when the name does not end in a
+        balanced group, or is only that group ("(São Paulo)").
+    """
+    if not isinstance(name, str):
+        return name, ""
+    text = name.rstrip()
+    start = _trailing_group_start(text)
+    if start is None or not text[:start].strip():
+        return name, ""
+    return text[:start].strip(), text[start + 1:-1].strip()
+
+
 def _split_name(name: str) -> tuple[str, str]:
     """Return ``(base, paren)``: the normalised name without and the normalised trailing ``(...)``.
 
-    A name that is only a parenthetical keeps its whole normalised text as ``base``.
+    The trailing group is the one ``split_qualifier`` takes, nested groups
+    included. A name that is only a parenthetical keeps its whole normalised
+    text as ``base``.
     """
-    match = _TRAILING_PAREN_RE.search(name)
-    if not match:
+    text = name.rstrip()
+    start = _trailing_group_start(text)
+    if start is None:
         return _norm(name), ""
-    base = _norm(name[: match.start()]) or _norm(name)
-    return base, _norm(match.group(1))
+    base = _norm(text[:start]) or _norm(name)
+    return base, _norm(text[start + 1:-1])
 
 
 def _title_words() -> tuple[str, ...]:

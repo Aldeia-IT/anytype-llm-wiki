@@ -137,6 +137,19 @@ class TestIngestSubjectHint:
         assert len(client.created) == 2
         assert result["warnings"] == []
 
+    def test_qualified_hint_names_the_titled_base(self, run):
+        """Aldeia-IT/aldeia-box#1439: "Mestre Onça" is the subject "Onça (São Paulo)"."""
+        extracted = {
+            "entities": [{"name": "Mestre Onça", "description": "a"},
+                         {"name": "Onça (Rio)", "description": "b"}],
+            "concepts": [],
+        }
+        result, client, calls = run(extracted, hint="Onça (São Paulo)")
+        assert _titles(result) == ["Onça (São Paulo)", "Onça (Rio)"]
+        by_name = {o["name"]: o["id"] for o in client.created}
+        assert calls["relations"] == [(by_name["Onça (São Paulo)"], by_name["Onça (Rio)"], "related")]
+        assert result["warnings"] == []
+
     def test_unmatched_hint_warns_and_creates_everything_as_extracted(self, run):
         extracted = {"entities": [{"name": "Salvador", "description": "c"}], "concepts": []}
         result, _, _ = run(extracted, hint="Mestre Bimba")

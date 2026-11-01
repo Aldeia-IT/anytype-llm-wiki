@@ -12,7 +12,7 @@ import pytest
 
 from anytype_llm_wiki import config as root_config
 from anytype_llm_wiki import indexer
-from anytype_llm_wiki.wiki import config, extraction, ingest, remember, util
+from anytype_llm_wiki.wiki import config, extraction, ingest, names, remember, util
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SRC = Path(__file__).resolve().parents[2] / "src" / "anytype_llm_wiki"
@@ -263,6 +263,127 @@ class TestPlanPrimarySubject:
         cands = [_cand("Mestre Moraes"), _cand("Moraes")]
         out, warnings = util.plan_primary_subject(cands, None, None)
         assert out == cands and warnings == []
+
+
+# ---------------------------------------------------------------------------
+# A qualified hint matches on its base name (Aldeia-IT/aldeia-box#1439)
+# ---------------------------------------------------------------------------
+
+
+class TestSplitQualifier:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("Onça (São Paulo)", ("Onça", "São Paulo")),
+            ("Manoela (São Paulo, Nzinga)", ("Manoela", "São Paulo, Nzinga")),
+            ("Filhos de Bimba (Bay Area (California))", ("Filhos de Bimba", "Bay Area (California)")),
+            ("  Onça (Rio)  ", ("Onça", "Rio")),
+            ("Onça", ("Onça", "")),
+            ("Onça (São Paulo) Jr", ("Onça (São Paulo) Jr", "")),
+            ("(São Paulo)", ("(São Paulo)", "")),
+            ("Onça (São Paulo))", ("Onça (São Paulo))", "")),
+            ("Onça São Paulo)", ("Onça São Paulo)", "")),
+        ],
+    )
+    def test_last_balanced_trailing_group(self, name, expected):
+        assert names.split_qualifier(name) == expected
+
+    def test_non_string_has_no_qualifier(self):
+        assert names.split_qualifier(None) == (None, "")
+
+    def test_split_name_takes_the_whole_nested_group(self):
+        assert names._split_name("Filhos de Bimba (Bay Area (California))") == (
+            "filhos de bimba", "bay area california"
+        )
+
+
+class TestQualifiedHint:
+    @pytest.mark.parametrize("extracted", ["Onça", "Mestre Onça", "onca", "Mestra Onça"])
+    def test_base_name_matches_and_takes_the_full_hint(self, extracted):
+        cands = [_cand("Salvador"), _cand(extracted, facts="about")]
+        out, warnings = util.plan_primary_subject(cands, "Onça (São Paulo)", None)
+        assert [c["name"] for c in out] == ["Salvador", "Onça (São Paulo)"]
+        assert out[1]["primary"] is True and out[1]["facts"] == "about"
+        assert warnings == []
+
+    def test_bare_and_titled_forms_fold_into_the_hint(self):
+        cands = [_cand("Mestre Onça", facts="first"), _cand("Onça"), _cand("Salvador")]
+        out, warnings = util.plan_primary_subject(cands, "Onça (São Paulo)", None)
+        assert [c["name"] for c in out] == ["Onça (São Paulo)", "Salvador"]
+        assert out[0]["facts"] == "first" and warnings == []
+
+    def test_full_hint_spelling_still_matches(self):
+        out, _ = util.plan_primary_subject(
+            [_cand("Mestre Onça (São Paulo)")], "Onça (São Paulo)", None
+        )
+        assert out[0]["name"] == "Onça (São Paulo)" and out[0]["primary"] is True
+
+    @pytest.mark.parametrize("extracted", ["Onça (Rio)", "Mestre Onça (Rio)", "Onça (São Paulo, Nzinga)"])
+    def test_another_qualifier_never_matches(self, extracted):
+        out, warnings = util.plan_primary_subject([_cand(extracted)], "Onça (São Paulo)", None)
+        assert [c["name"] for c in out] == [extracted]
+        assert "primary" not in out[0]
+        assert warnings == [
+            'subject_hint_unmatched: no extracted entity is the primary subject "Onça (São Paulo)"'
+        ]
+
+    def test_candidate_with_a_qualifier_never_matches_the_hint_base(self):
+        """The hint's base may itself end in a group; a qualified candidate equal to it differs."""
+        hint = "Onça (São Paulo) (Nzinga)"
+        out, warnings = util.plan_primary_subject([_cand("Onça (São Paulo)")], hint, None)
+        assert out[0]["name"] == "Onça (São Paulo)" and "primary" not in out[0]
+        assert len(warnings) == 1
+        out, warnings = util.plan_primary_subject([_cand("Onça São Paulo")], hint, None)
+        assert out[0]["name"] == hint and warnings == []
+
+    def test_cross_qualifier_candidate_stays_beside_the_match(self):
+        cands = [_cand("Onça (Rio)"), _cand("Mestre Onça")]
+        out, warnings = util.plan_primary_subject(cands, "Onça (São Paulo)", None)
+        assert [c["name"] for c in out] == ["Onça (Rio)", "Onça (São Paulo)"]
+        assert "primary" not in out[0] and out[1]["primary"] is True
+        assert warnings == []
+
+    def test_nested_qualifier(self):
+        cands = [_cand("Bimba"), _cand("Filhos de Bimba")]
+        out, warnings = util.plan_primary_subject(
+            cands, "Filhos de Bimba (Bay Area (California))", None
+        )
+        assert [c["name"] for c in out] == ["Bimba", "Filhos de Bimba (Bay Area (California))"]
+        assert out[1]["primary"] is True and warnings == []
+
+    def test_nested_qualifier_does_not_match_its_inner_group(self):
+        out, warnings = util.plan_primary_subject(
+            [_cand("Filhos de Bimba (Bay Area)")], "Filhos de Bimba (Bay Area (California))", None
+        )
+        assert out[0]["name"] == "Filhos de Bimba (Bay Area)" and len(warnings) == 1
+
+    def test_unqualified_hint_is_unchanged(self):
+        cands = [_cand("Onça (São Paulo)"), _cand("Onça (Rio)")]
+        out, warnings = util.plan_primary_subject(cands, "Onça", None)
+        assert [c["name"] for c in out] == ["Onça (São Paulo)", "Onça (Rio)"]
+        assert not any(c.get("primary") for c in out)
+        assert warnings == ['subject_hint_unmatched: no extracted entity is the primary subject "Onça"']
+
+    def test_other_base_name_is_unmatched(self):
+        out, warnings = util.plan_primary_subject(
+            [_cand("Mestre Pastinha"), _cand("Salvador")], "Onça (São Paulo)", None
+        )
+        assert [c["name"] for c in out] == ["Mestre Pastinha", "Salvador"]
+        assert warnings == [
+            'subject_hint_unmatched: no extracted entity is the primary subject "Onça (São Paulo)"'
+        ]
+
+    def test_marker_still_applies_to_a_qualified_hint(self):
+        out, warnings = util.plan_primary_subject(
+            [_cand("João Batista"), _cand("Salvador")], "Onça (São Paulo)", "João Batista"
+        )
+        assert out[0]["name"] == "Onça (São Paulo)" and warnings == []
+
+    def test_strip_titles_space(self):
+        out, warnings = util.plan_primary_subject(
+            [_cand("Mestre Onça")], "Mestre Onça (São Paulo)", None, strip_titles=True
+        )
+        assert out[0]["name"] == "Onça (São Paulo)" and warnings == []
 
 
 # ---------------------------------------------------------------------------
