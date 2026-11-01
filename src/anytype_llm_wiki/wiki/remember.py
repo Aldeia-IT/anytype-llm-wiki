@@ -642,9 +642,6 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         return sid
 
     strip = _title_stripper(strip_titles)
-    # Passed only when on, so a space that does not opt in calls resolve_entity
-    # exactly as before.
-    resolve_kwargs = {"strip_titles": True} if strip_titles else {}
     for subj in items:
         clean_name = sanitize_name(subj["name"])
         if clean_name is not None:
@@ -668,7 +665,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
         try:
             resolution = resolve_entity(
-                client, space_id, type_key, clean_name, **resolve_kwargs
+                client, space_id, type_key, clean_name, strip_titles=strip_titles
             )
 
             if resolution.get("action") == "update":
@@ -863,19 +860,17 @@ def _resolve_existing_endpoint(
     name: str,
     name_to_id: dict[str, str],
     kind_by_id: dict[str, str],
-    strip_titles: bool | None = None,
+    strip_titles: bool,
 ) -> str | None:
     """Resolve a relation-endpoint name to an EXISTING object id (entity or
     concept) for cross-batch / resume relations whose endpoint was written by a
     prior run. Returns the id or None; caches a hit into name_to_id/kind_by_id so
     the unresolved-warning check and _write_bidirectional_relations see it.
 
-    ``strip_titles`` defaults to the space's WIKI_STRIP_NAME_TITLES_SPACES
-    membership (Aldeia-IT/aldeia-box#1430): the name loses its leading title word
-    and the lookup also matches stored names that differ only by one.
+    ``strip_titles`` (the space is in WIKI_STRIP_NAME_TITLES_SPACES,
+    Aldeia-IT/aldeia-box#1430): the name loses its leading title word and the
+    lookup also matches stored names that differ only by one.
     """
-    if strip_titles is None:
-        strip_titles = space_id in config.strip_name_titles_spaces()
     name = _title_stripper(strip_titles)(name)
     if not name:
         return None
@@ -885,8 +880,7 @@ def _resolve_existing_endpoint(
     for type_key, subj_kind in (("wiki_entity", "entity"), ("wiki_concept", "concept")):
         try:
             res = resolve_entity(
-                client, space_id, type_key, name,
-                **({"strip_titles": True} if strip_titles else {}),
+                client, space_id, type_key, name, strip_titles=strip_titles
             )
         except (httpx.HTTPError, KeyError, ValueError, TypeError):
             continue

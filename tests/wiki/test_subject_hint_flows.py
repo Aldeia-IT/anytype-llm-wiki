@@ -107,7 +107,7 @@ class TestIngestSubjectHint:
     def test_without_a_hint_nothing_changes(self, run):
         result, _client, calls = run(EXTRACTED)
         assert _titles(result) == ["Manoel dos Reis Machado", "Salvador"]
-        assert "subject_hint" not in calls["extract"][0]
+        assert calls["extract"][0]["subject_hint"] is None
         assert result["warnings"] == []
 
     def test_hint_reaches_extract(self, run):
@@ -276,6 +276,18 @@ class TestResolveEntityStripTitles:
         )
         assert out["action"] == "update" and out["target"]["id"] == "old-0"
 
+    def test_strip_titles_keeps_the_parenthetical_apart(self):
+        out = ingest.resolve_entity(
+            self._client("Mestre Bimba (Salvador)"), SPACE, "wiki_entity", "Bimba (Rio)",
+            strip_titles=True,
+        )
+        assert out == {"action": "create"}
+        out = ingest.resolve_entity(
+            self._client("Mestre Bimba (Salvador)"), SPACE, "wiki_entity",
+            "Bimba (Salvador)", strip_titles=True,
+        )
+        assert out["action"] == "update"
+
     def test_strip_titles_does_not_cross_types(self):
         client = FakeClient([("Mestre Moraes", "wiki_concept")])
         out = ingest.resolve_entity(client, SPACE, "wiki_entity", "Moraes", strip_titles=True)
@@ -385,11 +397,11 @@ class TestRememberTitleStrip:
         client = FakeClient([("Mestre Bimba", "wiki_entity")])
         name_to_id, kind_by_id = {}, {}
         got = remember._resolve_existing_endpoint(
-            client, SPACE, "Bimba", name_to_id, kind_by_id
+            client, SPACE, "Bimba", name_to_id, kind_by_id, strip_titles=True
         )
         assert got == "old-0"
 
     def test_existing_endpoint_lookup_unchanged_in_an_unlisted_space(self):
         client = FakeClient([("Mestre Bimba", "wiki_entity")])
-        got = remember._resolve_existing_endpoint(client, SPACE, "Bimba", {}, {})
+        got = remember._resolve_existing_endpoint(client, SPACE, "Bimba", {}, {}, strip_titles=False)
         assert got is None

@@ -256,7 +256,8 @@ def resolve_entity(
 
     With ``strip_titles`` (the space is in WIKI_STRIP_NAME_TITLES_SPACES,
     Aldeia-IT/aldeia-box#1430) step 1 also matches a same-type object whose
-    ``indexer.strip_name`` key equals the candidate's, so "Mestre Moraes" and
+    title-stripped ``normalize_title`` equals the candidate's (a trailing
+    parenthetical is kept, so "Bimba (Rio)" is not "Bimba (Salvador)"), so "Mestre Moraes" and
     "Moraes" resolve to one object.
     """
     normalized = normalize_title(candidate_title)
@@ -280,9 +281,10 @@ def resolve_entity(
     if strip_titles:
         from .. import indexer
 
-        candidate_key = indexer.strip_name(candidate_title)
+        candidate_key = normalize_title(indexer.strip_display_title(candidate_title))
         for obj in same_type:
-            if candidate_key and indexer.strip_name(obj.get("name", "")) == candidate_key:
+            stored = normalize_title(indexer.strip_display_title(obj.get("name", "")))
+            if stored == candidate_key:
                 return {"action": "update", "target": obj}
 
     # Step 2 — fuzzy title match over same-type results.
@@ -906,8 +908,9 @@ def _run_ingest(
         extract_started = time.monotonic()
         extracted: dict | None = None
         try:
-            extract_kwargs = {"subject_hint": subject_hint} if subject_hint else {}
-            extracted = extract(markdown=markdown, space_id=space_id, **extract_kwargs)
+            extracted = extract(
+                markdown=markdown, space_id=space_id, subject_hint=subject_hint
+            )
             # AC#11: ollama model not pulled must abort BEFORE Source creation.
             if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
                 "[CONFIG ERROR] ollama_model_not_pulled"
@@ -961,9 +964,9 @@ def _run_ingest(
         # resolution. A degraded URL run has no candidates: it reports only the
         # degradation. The marker is read only when the caller gave a hint.
         if not (extraction_error is not None and is_url):
-            marked = extracted.get("primary_subject") if (
-                subject_hint and isinstance(extracted, dict) and extracted_cands
-            ) else None
+            marked = None
+            if subject_hint and isinstance(extracted, dict) and extracted_cands:
+                marked = extracted.get("primary_subject")
             candidates, plan_warnings = plan_primary_subject(
                 candidates, subject_hint, marked, strip_titles=strip_titles
             )
@@ -1031,7 +1034,7 @@ def _run_ingest(
             try:
                 resolution = resolve_entity(
                     client, space_id, type_key, clean_name, candidate_facts=facts,
-                    **({"strip_titles": True} if strip_titles else {}),
+                    strip_titles=strip_titles,
                 )
                 if resolution["action"] == "update":
                     target = resolution["target"]

@@ -154,11 +154,16 @@ def plan_primary_subject(
     strip = _title_stripper(strip_titles)
     planned = [dict(c, name=strip(c["name"])) for c in candidates]
     if strip_titles:
+        # Names that become equal once stripped collapse; the first one wins.
+        deduped: list[dict] = []
         seen: set[str] = set()
-        planned = [
-            c for c in planned
-            if not (normalize_title(c["name"]) in seen or seen.add(normalize_title(c["name"])))
-        ]
+        for cand in planned:
+            key = normalize_title(cand["name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cand)
+        planned = deduped
     hint = hint.strip() if isinstance(hint, str) else ""
     if not hint:
         return planned, []
