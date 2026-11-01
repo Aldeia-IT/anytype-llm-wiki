@@ -170,6 +170,7 @@ class TestDryRunSubjectHint:
         }
         page, generate = self._run(["--subject-hint", "Mestre Bimba"], extracted, capsys)
         assert page["primary_name"] == "Mestre Bimba"
+        assert page["marked"] == "Manoel dos Reis Machado"
         assert page["hint_warnings"] == []
         assert [e["name"] for e in page["entities"]] == ["Mestre Bimba"]
         assert 'primary subject is "Mestre Bimba"' in json.loads(
@@ -180,6 +181,7 @@ class TestDryRunSubjectHint:
         extracted = {"entities": [{"name": "Salvador", "description": "d"}], "concepts": []}
         page, _ = self._run(["--subject-hint", "Mestre Bimba"], extracted, capsys)
         assert page["primary_name"] is None
+        assert page["marked"] is None
         assert page["hint_warnings"] == [
             'subject_hint_unmatched: no extracted entity is the primary subject "Mestre Bimba"'
         ]
@@ -198,4 +200,5 @@ class TestDryRunSubjectHint:
         extracted = {"entities": [{"name": "Salvador", "description": "d"}], "concepts": []}
         page, generate = self._run([], extracted, capsys)
         assert page["primary_name"] is None and page["hint_warnings"] == []
+        assert page["marked"] is None
         assert "PRIMARY SUBJECT" not in json.loads(generate.calls[0].request.content)["prompt"]

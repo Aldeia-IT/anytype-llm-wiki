@@ -117,3 +117,42 @@ class TestPath:
         d.mkdir()
         (d / "spaces.toml").write_text(TOML)
         assert config.refuse_identifier_names_spaces() == frozenset({"sp-a"})
+
+
+class TestFileBackDefault:
+    """`file_back_default` (Aldeia-IT/aldeia-box#1430 F-B): "gate" (default) or false."""
+
+    def _write(self, cfg, value_line):
+        cfg.write_text(f'[spaces."sp-a"]\n{value_line}\n[spaces."sp-b"]\nstrip_name_titles = true\n')
+
+    def test_unset_is_the_gate(self, cfg):
+        self._write(cfg, "strip_name_titles = true")
+        assert config.file_back_default("sp-a") is None
+        assert config.file_back_default("sp-b") is None
+        assert config.file_back_default("not-listed") is None
+
+    def test_no_file_is_the_gate(self, cfg):
+        assert config.file_back_default("sp-a") is None
+
+    def test_gate_is_the_gate(self, cfg):
+        self._write(cfg, 'file_back_default = "gate"')
+        assert config.file_back_default("sp-a") is None
+
+    def test_false_turns_the_default_off_for_that_space_only(self, cfg):
+        self._write(cfg, "file_back_default = false")
+        assert config.file_back_default("sp-a") is False
+        assert config.file_back_default("sp-b") is None
+
+    @pytest.mark.parametrize("value", ["true", '"always"', '"false"', "1", '"GATE"'])
+    def test_other_values_are_malformed_and_the_file_counts_as_absent(self, cfg, caplog, value):
+        cfg.write_text(f'[spaces."sp-a"]\nfile_back_default = {value}\nstrip_name_titles = true\n')
+        with caplog.at_level(logging.WARNING):
+            assert config.file_back_default("sp-a") is None
+            warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+            assert len(warnings) == 1 and "file_back_default" in warnings[0].getMessage()
+            assert config.strip_name_titles_spaces() == frozenset()
+
+    def test_no_env_override(self, cfg, monkeypatch):
+        self._write(cfg, "file_back_default = false")
+        monkeypatch.setenv("WIKI_FILE_BACK_DEFAULT", "gate")
+        assert config.file_back_default("sp-a") is False

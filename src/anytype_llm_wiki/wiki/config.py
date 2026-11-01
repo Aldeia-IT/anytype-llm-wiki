@@ -380,6 +380,16 @@ def strip_name_titles_spaces() -> frozenset[str]:
     return space_settings.spaces_with("strip_name_titles")
 
 
+def file_back_default(space_id: str) -> bool | None:
+    """Resolve the space's ``file_back_default`` from the per-space config file.
+
+    Returns:
+        ``False`` when the space never files back by default; ``None`` when the
+        gate decides (setting unset or ``"gate"``). No environment override.
+    """
+    return space_settings.file_back_default(space_id)
+
+
 def lock_dir_path() -> Path:
     """Convenience: WIKI_LOCK_DIR resolved to a pathlib.Path at call time."""
     return Path(lock_dir())

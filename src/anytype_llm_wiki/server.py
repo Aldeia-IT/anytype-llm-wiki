@@ -286,8 +286,11 @@ def wiki_query(
     Args:
         question: Natural-language question.
         space_id: Target Anytype space ID (must be bootstrapped at the current schema).
-        file_back: True forces filing; False suppresses; None uses the default gate
-            (>= 3 cited sources AND >= 100-word answer).
+        file_back: True forces filing; False suppresses; None uses the space's
+            ``file_back_default`` from the per-space settings file (``false`` =
+            never file back unless the call asks) and otherwise the default gate
+            (>= 3 cited sources AND >= 100-word answer). An explicit True/False
+            always wins over the space default.
         types: Optional subset of wiki type keys to scope retrieval. Intersected with
             the wiki type set; an empty intersection is a config error.
         ingested_after: Optional ISO-8601 datetime lower bound on last_modified_date, inclusive.

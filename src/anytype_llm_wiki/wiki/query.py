@@ -886,6 +886,10 @@ def wiki_query(
             return _log_error(result)
 
         # --- File-back gate ---
+        # Aldeia-IT/aldeia-box#1430: the space default applies only when the call
+        # leaves file_back unset; an explicit True/False always wins.
+        if file_back is None:
+            file_back = config.file_back_default(space_id)
         filed_back, query_obj_id, fb_status, fb_warnings = _maybe_file_back(
             write_client, read_client, space_id, safe_question, answer,
             filed_sources, file_back, cache, enum_map,

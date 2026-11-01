@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` / `WIKI_STRIP_NAME_TITLES_SPACES` stay and, when set and
   non-empty, override the file for their setting. A malformed file logs a warning on each read and counts as
   absent; a missing file is silent; no file and no variables leaves every space off.
+- **Per-space `file_back_default` for `wiki_query` (Aldeia-IT/aldeia-box#1430).** In `spaces.toml`,
+  `file_back_default = false` stops a space from filing answers back unless the call passes
+  `file_back=True`; `"gate"` (the default) keeps today's gate. It applies only when `file_back` is
+  `None`: an explicit `True`/`False` always wins. Any other value makes the file malformed. No env
+  override; WikiLog is unchanged (`config.file_back_default(space_id)`). `WIKI_SPACES_CONFIG` is
+  the way to point several server users with different `$HOME`s at one shared file.
+  `scripts/ingest_dry_run.py` also reports the model's raw `primary_subject` as `marked`.
 - **Opt-in title strip for person names (Aldeia-IT/aldeia-box#1430).** In spaces listed in
   `WIKI_STRIP_NAME_TITLES_SPACES` (read by `config.strip_name_titles_spaces()`), `wiki_ingest` and
   `wiki_remember` drop one leading title word (`NAME_TIER_TITLE_WORDS`, via the new

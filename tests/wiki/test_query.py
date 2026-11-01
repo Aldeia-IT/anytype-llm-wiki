@@ -3713,3 +3713,52 @@ def test_wiki_query_tier2_calls_hybrid(monkeypatch):
 
     query_mod.wiki_query(question="q", space_id=FAKE_SPACE_ID)
     assert called.get("hit"), "hybrid_search_core was not called in Tier-2"
+
+
+class TestSpaceFileBackDefault:
+    """Aldeia-IT/aldeia-box#1430 F-B: the space's file_back_default applies only when
+    the call leaves file_back unset; an explicit True/False always wins."""
+
+    def _run(self, monkeypatch, tmp_path, file_back, setting):
+        cfg = tmp_path / "spaces.toml"
+        if setting is not None:
+            cfg.write_text(f'[spaces."{FAKE_SPACE_ID}"]\nfile_back_default = {setting}\n')
+        monkeypatch.setenv("WIKI_SPACES_CONFIG", str(cfg))
+        monkeypatch.setenv("WIKI_FILE_BACK_MIN_SOURCES", "3")
+        monkeypatch.setenv("WIKI_FILE_BACK_MIN_WORDS", "100")
+        import anytype_llm_wiki.wiki.query as _q_mod
+        monkeypatch.setattr(_q_mod, "synthesize", lambda q, ctx: " ".join(["word"] * 150))
+        schema_obj = _make_schema_ok_response()["data"][0]
+        entities = [_make_wiki_entity(f"entity-{i}", f"Entity {i}") for i in range(3)]
+        list_resp = {"data": [schema_obj] + entities, "pagination": {"has_more": False}}
+        with respx.mock:
+            respx.get().mock(return_value=httpx.Response(200, json=list_resp))
+            for i in range(3):
+                respx.get(f"{ANYTYPE_BASE}/v1/spaces/{FAKE_SPACE_ID}/objects/entity-{i}").mock(
+                    return_value=httpx.Response(
+                        200, json=_make_get_object_response(f"entity-{i}", f"Entity {i}")
+                    )
+                )
+            respx.post().mock(return_value=httpx.Response(201, json=_make_create_object_response("obj-1")))
+            respx.patch().mock(return_value=httpx.Response(200, json=_make_update_object_response("q-001")))
+            from anytype_llm_wiki.wiki.query import wiki_query
+            return wiki_query(question="What are the entities?", space_id=FAKE_SPACE_ID,
+                              file_back=file_back)
+
+    def test_unset_keeps_the_gate(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, None, None)["filed_back"] is True
+
+    def test_gate_keeps_the_gate(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, None, '"gate"')["filed_back"] is True
+
+    def test_false_suppresses_when_the_call_leaves_it_unset(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, None, "false")["filed_back"] is False
+
+    def test_explicit_true_overrides_false(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, True, "false")["filed_back"] is True
+
+    def test_explicit_false_overrides_gate(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, False, '"gate"')["filed_back"] is False
+
+    def test_invalid_value_falls_back_to_the_gate(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, None, "true")["filed_back"] is True

@@ -26,7 +26,8 @@ With ``--subject-hint NAME`` (Aldeia-IT/aldeia-box#1430) the hint goes into the
 extraction prompt and the extracted items run through ``plan_primary_subject``,
 the helper ``wiki_ingest`` uses: ``entities`` / ``concepts`` then show the
 renamed primary, ``primary_name`` is its name (null when none matched) and
-``hint_warnings`` lists ``subject_hint_unmatched`` when no entity is the subject.
+``marked`` is the model's raw ``primary_subject`` (null without a hint or when
+the model gave none) and ``hint_warnings`` lists ``subject_hint_unmatched`` when no entity is the subject.
 ``--strip-name-titles`` mirrors a space in ``WIKI_STRIP_NAME_TITLES_SPACES``:
 one leading title word is dropped from the names ("Mestre Bimba" becomes "Bimba").
 """
@@ -94,6 +95,7 @@ def dry_run(
         "extraction_seconds": None,
         "refused_names": [],
         "primary_name": None,
+        "marked": None,
         "hint_warnings": [],
     }
     started = time.monotonic()
@@ -122,12 +124,14 @@ def dry_run(
     report["truncated"] = extracted.get("truncated")
     entities = _items(extracted, "entities", "entity")
     concepts = _items(extracted, "concepts", "concept")
+    if subject_hint:
+        report["marked"] = extracted.get("primary_subject")
     if (subject_hint or strip_titles) and not error:
         planned, report["hint_warnings"] = plan_primary_subject(
             [dict(i, kind="entity") for i in entities]
             + [dict(i, kind="concept") for i in concepts],
             subject_hint,
-            extracted.get("primary_subject") if subject_hint else None,
+            report["marked"],
             strip_titles=strip_titles,
         )
         entities = [{"name": c["name"], "facts": c["facts"]}

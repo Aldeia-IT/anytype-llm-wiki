@@ -11,6 +11,7 @@ else ``~/.config/anytype-llm-wiki/spaces.toml``::
     [spaces."<space id>"]
     refuse_identifier_names = true
     strip_name_titles = true
+    file_back_default = false   # or "gate" (the default): wiki_query's file-back
 
 Everything is read at call time (tests monkeypatch the environment).
 """
@@ -27,6 +28,9 @@ _ENV_BY_SETTING = {
     "refuse_identifier_names": "WIKI_REFUSE_IDENTIFIER_NAMES_SPACES",
     "strip_name_titles": "WIKI_STRIP_NAME_TITLES_SPACES",
 }
+
+
+_FILE_BACK_KEY = "file_back_default"
 
 
 def settings_path() -> Path:
@@ -75,6 +79,9 @@ def _load_file() -> dict[str, dict]:
             if bad:
                 problem = f"spaces.{space_id!r}.{bad} is not true or false"
                 break
+            if table.get(_FILE_BACK_KEY, "gate") not in ("gate", False):
+                problem = f'spaces.{space_id!r}.{_FILE_BACK_KEY} is not "gate" or false'
+                break
     if problem:
         logger.warning("wiki spaces config %s ignored: %s", path, problem)
         return {}
@@ -106,3 +113,22 @@ def spaces_with(setting: str) -> frozenset[str]:
     return frozenset(
         space_id for space_id, table in _load_file().items() if table.get(setting) is True
     )
+
+
+def file_back_default(space_id: str) -> bool | None:
+    """The space's default for ``wiki_query``'s ``file_back`` (Aldeia-IT/aldeia-box#1430).
+
+    Set per space in the file as ``file_back_default = "gate"`` (today's
+    behaviour, also the default) or ``false`` (never file back unless the call
+    asks). Any other value makes the file malformed (see ``_load_file``). No
+    environment override. The caller applies it only when ``file_back`` is None.
+
+    Args:
+        space_id: the space being queried.
+
+    Returns:
+        ``False`` when the space turns file-back off by default, else ``None``
+        (the gate decides).
+    """
+    table = _load_file().get(space_id, {})
+    return False if table.get(_FILE_BACK_KEY, "gate") is False else None
