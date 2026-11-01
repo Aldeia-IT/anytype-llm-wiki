@@ -94,17 +94,35 @@ def _ollama_base() -> str:
     return base.rstrip("/")
 
 
+def _synthesis_options() -> dict:
+    """Decoding options for the synthesis call (Aldeia-IT/aldeia-box#1428).
+
+    ``num_ctx`` is the extraction value (max input + output tokens) unless
+    ``WIKI_SYNTH_MAX_INPUT_TOKENS`` plus the answer budget needs more. Sharing
+    the value means Ollama does not reload the model runner when a query and an
+    ingest alternate on the same model. ``num_predict`` is the output budget.
+    """
+    output_tokens = config.extract_output_tokens()
+    input_tokens = max(config.extract_max_input_tokens(), config.synth_max_input_tokens())
+    return {
+        **_DETERMINISTIC_OPTS,
+        "num_ctx": input_tokens + output_tokens,
+        "num_predict": output_tokens,
+    }
+
+
 def _call_ollama_synthesis(base: str, prompt: str) -> str:
     """POST a synthesis ``prompt`` to {base}/api/generate then /api/chat.
 
     Mirrors ``extraction._call_ollama_prompt`` (generate→chat fallback, finite
-    httpx.Timeout, deterministic options) but OMITS ``format: json`` and reads
+    httpx.Timeout, ``_synthesis_options``) but OMITS ``format: json`` and reads
     the RAW ``response`` / ``message.content`` prose (no JSON parse). Returns the
     prose answer, or a sentinel error string on a not-pulled model / unreachable
     endpoint.
     """
     model = config.extract_model()
     think = config.extract_think()
+    options = _synthesis_options()
     # Finite timeout is the true anti-hang backstop; read reuses the 600s ceiling.
     timeout = httpx.Timeout(connect=5, read=config.extract_timeout(), write=10, pool=5)
 
@@ -118,7 +136,7 @@ def _call_ollama_synthesis(base: str, prompt: str) -> str:
                     "prompt": prompt,
                     "stream": False,
                     "think": think,
-                    "options": _DETERMINISTIC_OPTS,
+                    "options": options,
                 },
             )
             if _is_model_not_pulled(gen_resp):
@@ -139,7 +157,7 @@ def _call_ollama_synthesis(base: str, prompt: str) -> str:
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "think": think,
-                    "options": _DETERMINISTIC_OPTS,
+                    "options": options,
                 },
             )
             if _is_model_not_pulled(chat_resp):

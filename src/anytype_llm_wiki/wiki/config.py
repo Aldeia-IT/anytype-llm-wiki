@@ -45,6 +45,7 @@ DEFAULT_WIKI_EXTRACT_MAX_INPUT_TOKENS = 8192
 
 # Default output budget (tokens) for extraction-family calls. Sent as
 # ``num_predict``; ``num_ctx`` = max input tokens + this (12288 with the defaults).
+# Synthesis sends the same pair (wiki/query.py ``_synthesis_options``).
 DEFAULT_WIKI_EXTRACT_OUTPUT_TOKENS = 4096
 
 # v0.4.0 wiki_query tiered-retrieval / synthesis defaults.

@@ -145,6 +145,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`wiki_query` synthesis sends `num_ctx` (Aldeia-IT/aldeia-box#1428).** The synthesis call now
+  sends the same `num_ctx` and `num_predict` as extraction. It sent none, so Ollama ran it at the
+  server's default context and reloaded the model runner (about 1 to 4 s) at every switch between
+  a query and an ingest on the same model. A `WIKI_SYNTH_MAX_INPUT_TOKENS` above the extraction
+  input cap raises the synthesis `num_ctx` to that budget plus the output tokens.
+
 - **Excerpts no longer cut at the first `#` or `?` (Aldeia-IT/aldeia-box#1427).** The ingest
   excerpt and the `wiki_remember` agent Source's name and excerpt ran the whole text through a
   URL scrubber, which dropped everything after a `#` or `?`. Credentials are now scrubbed from
