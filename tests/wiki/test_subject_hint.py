@@ -327,6 +327,15 @@ class TestQualifiedHint:
             'subject_hint_unmatched: no extracted entity is the primary subject "Onça (São Paulo)"'
         ]
 
+    def test_candidate_with_a_qualifier_never_matches_the_hint_base(self):
+        """The hint's base may itself end in a group; a qualified candidate equal to it differs."""
+        hint = "Onça (São Paulo) (Nzinga)"
+        out, warnings = util.plan_primary_subject([_cand("Onça (São Paulo)")], hint, None)
+        assert out[0]["name"] == "Onça (São Paulo)" and "primary" not in out[0]
+        assert len(warnings) == 1
+        out, warnings = util.plan_primary_subject([_cand("Onça São Paulo")], hint, None)
+        assert out[0]["name"] == hint and warnings == []
+
     def test_cross_qualifier_candidate_stays_beside_the_match(self):
         cands = [_cand("Onça (Rio)"), _cand("Mestre Onça")]
         out, warnings = util.plan_primary_subject(cands, "Onça (São Paulo)", None)

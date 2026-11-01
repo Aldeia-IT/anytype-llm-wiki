@@ -23,7 +23,7 @@ from urllib.parse import unquote_plus, urlparse, urlsplit, urlunparse, urlunspli
 
 from ..textfold import fold
 from . import config
-from .names import strip_display_title
+from .names import split_qualifier, strip_display_title
 
 # ---------------------------------------------------------------------------
 # normalize_title — exact implementation from the spec
@@ -124,8 +124,12 @@ def plan_primary_subject(
     1. every candidate that is the hinted subject under another spelling
        (``same_subject``), or whose name is the hint once one leading title word
        is removed ("Mestre Bimba" for the hint "Bimba", in every space), is a
-       match; the first becomes the primary, named exactly
-       as the hint, and the others are dropped;
+       match. A hint with a trailing qualifier (``names.split_qualifier``: "Onça
+       (São Paulo)") also matches, by the same two tests, a candidate without a
+       qualifier of its own on the hint's base name ("Onça", "Mestre Onça"); a
+       candidate with another qualifier ("Onça (Rio)") never does
+       (Aldeia-IT/aldeia-box#1439). The first match becomes the primary, named
+       exactly as the hint, qualifier included, and the others are dropped;
     2. else the candidate named by ``marked`` (the model's ``primary_subject``,
        ``normalize_title`` equal) becomes the primary, renamed to the hint;
     3. else nothing is renamed and the warning
@@ -165,10 +169,18 @@ def plan_primary_subject(
 
     hint = strip(hint)
     strip_one = _title_stripper(True)
-    matches = [
-        i for i, c in enumerate(planned)
-        if same_subject(c["name"], hint) or same_subject(strip_one(c["name"]), hint)
-    ]
+    hint_base, hint_qualifier = split_qualifier(hint)
+
+    def is_hint(name) -> bool:
+        if same_subject(name, hint) or same_subject(strip_one(name), hint):
+            return True
+        # A qualified hint also matches its base name when the candidate carries
+        # no qualifier of its own (Aldeia-IT/aldeia-box#1439).
+        return bool(hint_qualifier) and not split_qualifier(name)[1] and (
+            same_subject(name, hint_base) or same_subject(strip_one(name), hint_base)
+        )
+
+    matches = [i for i, c in enumerate(planned) if is_hint(c["name"])]
     if not matches and isinstance(marked, str) and marked.strip():
         key = normalize_title(strip(marked.strip()))
         matches = [

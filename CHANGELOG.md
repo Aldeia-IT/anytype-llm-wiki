@@ -114,6 +114,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A qualified `subject_hint` matches on its base name (Aldeia-IT/aldeia-box#1439).** A hint
+  that ends in a disambiguating parenthetical ("Onça (São Paulo)") now matches an extracted
+  "Onça" or "Mestre Onça" in `plan_primary_subject`, and the object takes the full hint. The
+  qualifier is the last balanced trailing group, nested groups included
+  (`names.split_qualifier`; "Filhos de Bimba (Bay Area (California))" has the base "Filhos de
+  Bimba"). An extracted name with another qualifier ("Onça (Rio)") never matches; an unqualified
+  hint behaves as before. Storage matching (`resolve_entity`, the search name tier) still keeps the
+  qualifier as part of the name; its trailing-group split (`_split_name`) now takes a nested group
+  whole.
 - **A degraded URL ingest stores only the Source (Aldeia-IT/aldeia-box#1427).** When extraction
   degrades on a URL, ingest writes the Source and the WikiLog but no heading-derived objects;
   re-ingesting the URL later fills it. Local files and text keep the heading fallback.
