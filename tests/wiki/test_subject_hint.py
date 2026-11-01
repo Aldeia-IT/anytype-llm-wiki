@@ -39,16 +39,13 @@ class TestStripNameTitlesSpaces:
         assert config.strip_name_titles_spaces() == frozenset({"sp-b"})
 
     def test_is_the_only_reader_of_the_env_var(self):
-        """A later switch to a per-space file must stay local to one function."""
+        """Env list and file resolve in one module (space_settings), config delegates."""
         readers = [
             p.relative_to(SRC).as_posix()
             for p in SRC.rglob("*.py")
-            if re.search(r"""environ.*["']WIKI_STRIP_NAME_TITLES_SPACES["']""",
-                         p.read_text(encoding="utf-8"))
-            or re.search(r"""getenv\(\s*["']WIKI_STRIP_NAME_TITLES_SPACES["']""",
-                         p.read_text(encoding="utf-8"))
+            if re.search(r"""["']WIKI_STRIP_NAME_TITLES_SPACES["']""", p.read_text(encoding="utf-8"))
         ]
-        assert readers == ["wiki/config.py"]
+        assert readers == ["wiki/space_settings.py"]
 
 
 # ---------------------------------------------------------------------------

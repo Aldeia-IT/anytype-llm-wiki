@@ -11,6 +11,8 @@ and ``run_doctor`` rely on ``monkeypatch.setenv`` taking effect after import.
 import os
 from pathlib import Path
 
+from . import space_settings
+
 # Default lock directory (resolved at call time via lock_dir()).
 DEFAULT_WIKI_LOCK_DIR = os.path.expanduser("~/.local/share/anytype-llm-wiki/locks")
 
@@ -348,14 +350,15 @@ def refuse_identifier_names_spaces() -> frozenset[str]:
     of becoming objects. Example: a genealogy space where names are proper names
     such as apelidos, so keys and labels never become objects. Elsewhere such
     names are kept (a tool's docs space legitimately has ``wiki_query``).
-    Entries are stripped and empty entries dropped; read at call time.
+    Entries are stripped and empty entries dropped; read at call time. A set,
+    non-empty variable wins; otherwise the per-space config file decides
+    (``space_settings``, ``refuse_identifier_names = true``).
 
     Returns:
-        The listed space IDs; an empty set when unset or empty, so by default
+        The opted-in space IDs; an empty set when neither is set, so by default
         nothing is refused in any space.
     """
-    raw = os.environ.get("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "")
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+    return space_settings.spaces_with("refuse_identifier_names")
 
 
 def strip_name_titles_spaces() -> frozenset[str]:
@@ -366,15 +369,15 @@ def strip_name_titles_spaces() -> frozenset[str]:
     (``NAME_TIER_TITLE_WORDS``: "Mestre Bimba" becomes "Bimba") before they
     resolve or create an object, so a person has one object under the bare name.
     Elsewhere names are kept as written. Entries are stripped and empty entries
-    dropped; read at call time. This is the only reader of the variable, so a
-    later move to per-space config stays local to this function.
+    dropped; read at call time. A set, non-empty variable wins; otherwise the
+    per-space config file decides (``space_settings``, ``strip_name_titles =
+    true``).
 
     Returns:
-        The listed space IDs; an empty set when unset or empty, so by default
+        The opted-in space IDs; an empty set when neither is set, so by default
         no space strips titles.
     """
-    raw = os.environ.get("WIKI_STRIP_NAME_TITLES_SPACES", "")
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+    return space_settings.spaces_with("strip_name_titles")
 
 
 def lock_dir_path() -> Path:
