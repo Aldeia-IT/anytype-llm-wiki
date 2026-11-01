@@ -177,6 +177,33 @@ class TestExcerptScrub:
         assert out.endswith(" for more.")
 
 
+class TestRememberSourceScrub:
+    """R5: the agent Source's name and excerpt keep the note's text, lose the credential."""
+
+    def test_note_keeps_text_and_loses_credential(self):
+        from anytype_llm_wiki.wiki.remember import _create_remember_source
+
+        calls = []
+
+        class _Client:
+            def create_object(self, space_id, type_key, name, properties):
+                calls.append({"name": name, "properties": properties})
+                return {"id": "src-1"}
+
+        note = (
+            "Why did the #1426 rename happen? See "
+            "https://jan:pa55word@wiki.example/page?api_key=xyz for the thread."
+        )
+        assert _create_remember_source(_Client(), SPACE, note, {"warnings": []}, None) == "src-1"
+        (call,) = calls
+        excerpt = next(p["text"] for p in call["properties"] if p["key"] == "wiki_excerpt")
+        for value in (call["name"], excerpt):
+            assert value.startswith("Why did the #1426 rename happen? See "), value
+            assert "https://wiki.example/page" in value
+            assert "pa55word" not in value and "jan:" not in value and "xyz" not in value
+        assert excerpt.endswith(" for the thread.")
+
+
 class TestTruncationWarning:
     """AC4: ingest surfaces extract()'s truncation as a warning."""
 
