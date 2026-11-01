@@ -430,3 +430,71 @@ class TestUsableContentGate:
         assert result["status"] == "ok"
         assert "empty_source" in result["warnings"]
         assert len(fake.created_of("wiki_source")) == 1
+
+
+NAMES = {
+    "founding_date_conflict",
+    "associacao-de-capoeira-mestre-bimba",
+    "pt.wikipedia.org/wiki/Mestra_Janja",
+    "Mestre Bimba",
+    "bge-m3",
+}
+IDENTIFIER_LIKE = {
+    "founding_date_conflict",
+    "associacao-de-capoeira-mestre-bimba",
+    "pt.wikipedia.org/wiki/Mestra_Janja",
+}
+
+
+def _five_names():
+    return {"entities": [{"name": n, "description": "facts"} for n in sorted(NAMES)], "concepts": []}
+
+
+class TestIdentifierNameGate:
+    """AC10 (listed space refuses identifier-like names) and AC12 (unlisted keeps them)."""
+
+    @respx.mock
+    def test_listed_space_refuses_identifier_like_names(self, monkeypatch):
+        monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", f"other-space, {SPACE}")
+        fake = FakeWiki()
+        fake.install()
+        _stub_extract(monkeypatch, _five_names())
+        result = _ingest()
+        created = {p["name"] for p in fake.wiki_objects()}
+        assert created == {"Mestre Bimba", "bge-m3"}, created
+        warnings = [w for w in result["warnings"] if "identifier_like" in w]
+        assert sorted(warnings) == sorted(
+            f"name_policy_rejected: identifier_like: {n}" for n in IDENTIFIER_LIKE
+        ), warnings
+
+    @pytest.mark.parametrize("listed", [None, "", "other-space"])
+    @respx.mock
+    def test_unlisted_space_keeps_todays_naming(self, monkeypatch, listed):
+        if listed is None:
+            monkeypatch.delenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", raising=False)
+        else:
+            monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", listed)
+        fake = FakeWiki()
+        fake.install()
+        _stub_extract(monkeypatch, _five_names())
+        result = _ingest()
+        created = {p["name"] for p in fake.wiki_objects()}
+        assert created == NAMES, created
+        assert not [w for w in result["warnings"] if "identifier_like" in w]
+
+    @respx.mock
+    def test_url_named_fallback_is_refused_and_source_kept(self, monkeypatch):
+        monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", SPACE)
+        headingless = (
+            "<html><body><article><p>"
+            + "Capoeira Regional was created in Salvador by Mestre Bimba in the 1930s. " * 8
+            + "</p></article></body></html>"
+        )
+        fake = FakeWiki(page_body=headingless)
+        fake.install()
+        _stub_extract(monkeypatch, {"entities": [], "concepts": []})
+        result = _ingest()
+        assert fake.wiki_objects() == [], [p["name"] for p in fake.wiki_objects()]
+        (source,) = fake.created_of("wiki_source")
+        assert source["name"] == PAGE_URL, "the Source's own name is never gated"
+        assert f"name_policy_rejected: identifier_like: {PAGE_URL}" in result["warnings"]

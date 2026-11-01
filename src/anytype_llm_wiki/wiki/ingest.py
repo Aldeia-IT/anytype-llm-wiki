@@ -33,6 +33,7 @@ from .extraction import (
     _ollama_url,
     check_remote_endpoint_consent,
     extract,
+    is_identifier_like_name,
     sanitize_name,
     sanitize_property_value,
 )
@@ -938,10 +939,20 @@ def _run_ingest(
             if tag_ids:
                 domain_tag_prop = {"key": "wiki_domain_tags", "multi_select": tag_ids}
 
+        # #1427 AC10/AC12: identifier-like names (snake_case, slugs, URL-likes,
+        # paths) are refused only in spaces listed in
+        # WIKI_REFUSE_IDENTIFIER_NAMES_SPACES (opt-in, #1426). Heading and
+        # URL-named fallback candidates are gated too; the Source never is.
+        refuse_identifiers = space_id in config.refuse_identifier_names_spaces()
         for cand in candidates:
             clean_name = sanitize_name(cand["name"])
             if clean_name is None:
                 result["warnings"].append(f"name_policy_rejected: {cand['name']!r}")
+                continue
+            if refuse_identifiers and is_identifier_like_name(clean_name):
+                result["warnings"].append(
+                    f"name_policy_rejected: identifier_like: {clean_name}"
+                )
                 continue
             kind = cand.get("kind", "entity")
             facts = sanitize_property_value(cand.get("facts", "") or "")
