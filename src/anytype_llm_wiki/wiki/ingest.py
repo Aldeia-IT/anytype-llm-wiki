@@ -14,8 +14,10 @@ layer merged on top, never a hard dependency.
 
 import contextlib
 import json
+import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -34,12 +36,13 @@ from .extraction import (
     sanitize_name,
     sanitize_property_value,
 )
-from .fetch import fetch_url
+from .fetch import fetch_source
 from .util import (
     _existing_text,
     _relation_ids,
     normalize_title,
     scrub_credentials,
+    scrub_text_urls,
 )
 from .wiki_client import WikiClient
 
@@ -49,6 +52,10 @@ _WIKI_TYPE_KEYS = ("wiki_entity", "wiki_concept", "wiki_comparison", "wiki_query
 _UPSERT_THRESHOLD_TITLE = 0.92
 
 _HEADING_RE = re.compile(r"^(#{1,2})\s+(.*\S)\s*$")
+
+_DEGRADED_PREFIX = "extraction_degraded: "
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level seam so tests can monkeypatch reindex_anytype at
@@ -821,9 +828,16 @@ def _run_ingest(
         # 6. fetch. Any fetch [DATA ERROR] (ssrf_blocked, file_not_found,
         # file_read_failed, fetch_failed) short-circuits — never fabricate a junk
         # entity from an error string.
-        markdown = fetch_url(source)
+        fetched = fetch_source(source)
+        markdown = fetched["markdown"]
+        is_url = fetched["is_url"]
         if isinstance(markdown, str) and markdown.startswith("[DATA ERROR]"):
             return _error_result(markdown)
+        # #1427 AC9: a URL page with no usable content (empty, near-empty, bot
+        # challenge, JS shell) is refused before any Source or object is written.
+        # Local files and text keep the empty_source path below.
+        if fetched["unusable"]:
+            return _error_result(f"[DATA ERROR] no_usable_content: {fetched['unusable']}")
 
         # 7. derive candidates.
         candidates = _derive_candidates(markdown, fallback_name=_source_name(source))
@@ -846,6 +860,9 @@ def _run_ingest(
             return result
 
         # 8. enrich via best-effort extract().
+        extraction_error: str | None = None
+        extracted_cands: list[dict] = []
+        extract_started = time.monotonic()
         try:
             extracted = extract(markdown=markdown, space_id=space_id)
             # AC#11: ollama model not pulled must abort BEFORE Source creation.
@@ -856,7 +873,7 @@ def _run_ingest(
             if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
                 "[CONFIG ERROR]"
             ):
-                result["warnings"].append("extraction_degraded")
+                extraction_error = str(extracted["error"])
             else:
                 # v0.7.2: when LLM extraction yields real entities/concepts, use
                 # THOSE as the object set — the heading-derived candidates (the
@@ -867,14 +884,34 @@ def _run_ingest(
                 # dedup/relation noise) while preserving the "works without the LLM"
                 # guarantee. Building the extracted set via _merge_extraction([], …)
                 # reuses the same name/kind/facts mapping and dedup.
-                extracted_cands: list[dict] = []
                 _merge_extraction(extracted_cands, extracted)
                 if extracted_cands:
                     candidates = extracted_cands
                 if isinstance(extracted, dict) and extracted.get("error"):
-                    result["warnings"].append("extraction_degraded")
-        except Exception:  # noqa: BLE001 — enrichment is best-effort
+                    error = str(extracted["error"])
+                    extraction_error = error.removeprefix(_DEGRADED_PREFIX)
+                truncated = extracted.get("truncated") if isinstance(extracted, dict) else None
+                if isinstance(truncated, dict):
+                    result["warnings"].append(
+                        "extraction_input_truncated: "
+                        f"{truncated.get('kept_chars')}/{truncated.get('total_chars')} chars"
+                    )
+        except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
+            extraction_error = f"unexpected: {type(exc).__name__}"
+        if extraction_error is not None:
+            # #1427 AC5: callers match on the bare warning; the reason rides along.
             result["warnings"].append("extraction_degraded")
+            result["extraction_error"] = extraction_error
+            logger.warning(
+                "wiki_ingest extraction degraded for %s: %s (%.1fs)",
+                _source_name(source), extraction_error,
+                time.monotonic() - extract_started,
+            )
+            # #1427 AC11: a degraded URL ingest keeps only the Source and the
+            # WikiLog; a later re-ingest of the same URL fills it. Local files and
+            # text keep the heading fallback.
+            if is_url:
+                candidates = extracted_cands
 
         # 9. create Source object.
         source_id, was_resumed = _create_source(client, space_id, source, markdown, result)
@@ -1049,7 +1086,7 @@ def _create_source(
     # Scrub secrets before persisting the document excerpt to Qdrant, for symmetry
     # with the remember path (#346/CSO). sanitize_property_value strips control
     # chars; scrub_credentials removes secret-shaped tokens from the prose.
-    excerpt = sanitize_property_value(scrub_credentials((markdown or "")[:1000]))
+    excerpt = sanitize_property_value(scrub_text_urls((markdown or "")[:1000]))
     props = [
         {"key": "wiki_excerpt", "text": excerpt},
         {"key": "wiki_ingested_at", "date": datetime.now(timezone.utc).isoformat()},

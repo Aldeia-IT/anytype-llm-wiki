@@ -160,6 +160,23 @@ class TestExcerptIsTheArticle:
         assert "WHAT IS CAPOEIRA" not in excerpt
 
 
+class TestExcerptScrub:
+    """AC2/R1: credentials in embedded URLs go; headings and text after ``?`` stay."""
+
+    def test_credential_url_scrubbed_but_prose_survives(self):
+        from anytype_llm_wiki.wiki.util import scrub_text_urls
+
+        text = (
+            "# Title\n\nWho founded it? Mestre Bimba. See "
+            "https://user:hunter2@example.com/page?token=abc123 for more."
+        )
+        out = scrub_text_urls(text)
+        assert out.startswith("# Title\n\nWho founded it? Mestre Bimba. See ")
+        assert "hunter2" not in out and "abc123" not in out and "user:" not in out
+        assert "https://example.com/page" in out
+        assert out.endswith(" for more.")
+
+
 class TestTruncationWarning:
     """AC4: ingest surfaces extract()'s truncation as a warning."""
 
@@ -255,6 +272,7 @@ class TestNoHeadingObjectsFromDegradedUrl:
         fake.install()
         _stub_extract(monkeypatch, RuntimeError("boom"))
         result = _ingest()
+        assert result["extraction_error"] == "unexpected: RuntimeError"
         assert len(fake.created_of("wiki_source")) == 1
         assert fake.wiki_objects() == []
 

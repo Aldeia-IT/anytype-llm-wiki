@@ -58,6 +58,38 @@ def set_anytype_env(monkeypatch, request):
     monkeypatch.delenv("WIKI_EXTRACT_ENDPOINT", raising=False)
 
 
+# Aldeia-IT/aldeia-box#1427: URL ingest refuses pages without usable content
+# (AC9) and creates no heading/fallback objects when extraction degrades (AC11).
+# Tests that ingest an example.com URL serve this article-sized page, and the
+# ones that need wiki objects from a URL stub a succeeding extraction.
+_ARTICLE_HTML = (
+    "<html><body><article><h1>Example Article</h1><p>"
+    + "Capoeira is an Afro-Brazilian art that combines martial arts, music and dance. " * 8
+    + "</p></article></body></html>"
+)
+
+
+def _mock_article_page(prefix: str = "https://example.com/"):
+    """Serve ``_ARTICLE_HTML`` for every GET under ``prefix`` (register before catch-alls)."""
+    respx.get(url__startswith=prefix).mock(
+        return_value=httpx.Response(
+            200, text=_ARTICLE_HTML, headers={"content-type": "text/html"}
+        )
+    )
+
+
+def _stub_extract_entity(monkeypatch, name: str, kind: str = "entity"):
+    """Make extract() return one entity (or concept, ``kind="concept"``) called ``name``."""
+    import anytype_llm_wiki.wiki.ingest as _ingest
+
+    item = {"name": name, "description": "facts"}
+    if kind == "concept":
+        result = {"entities": [], "concepts": [item]}
+    else:
+        result = {"entities": [item], "concepts": []}
+    monkeypatch.setattr(_ingest, "extract", lambda **kw: result)
+
+
 def _make_schema_ok_response():
     """Return a mock list_objects response with a valid current-schema marker.
 
@@ -306,6 +338,7 @@ class TestReindexFailureWarning:
 
         Covers: §9.1 AC#9.
         """
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
         respx.post().mock(return_value=httpx.Response(201, json={
             "object": {"id": "src-001", "name": "Source"}
@@ -691,6 +724,8 @@ class TestUpdatePathNoBodyKey:
             # Non-search POST (Source create, etc.).
             return httpx.Response(201, json={"object": {"id": "src-001"}})
 
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
+        _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
         respx.post().mock(side_effect=capture_post)
         respx.patch().mock(side_effect=capture_patch)
@@ -737,6 +772,8 @@ class TestCreateWikiObjectEmptyBody:
                     pass
             return httpx.Response(201, json={"object": {"id": "new-obj-001", "name": "New Entity"}})
 
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
+        _stub_extract_entity(monkeypatch, "New Entity")  # #1427 AC11: URL objects come from extraction
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
         respx.post().mock(side_effect=capture_post)
 
@@ -1126,6 +1163,7 @@ class TestReingestIdempotencyWikilog:
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
         monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
@@ -1350,6 +1388,8 @@ class TestContradictionDetection:
         )
         monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
 
+        _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
@@ -1508,6 +1548,8 @@ class TestContradictionDetection:
         def on_patch(request, **kwargs):
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
+        _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
@@ -1872,6 +1914,8 @@ class TestContradictionDetection:
             patch_calls.append({"url": str(request.url), "payload": payload})
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
+        _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
@@ -2115,6 +2159,8 @@ class TestContradictionDetection:
             patch_calls.append({"url": str(request.url), "payload": payload})
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
+        _stub_extract_entity(monkeypatch, source_url, kind="concept")  # #1427 AC11: URL objects come from extraction
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
@@ -2253,6 +2299,8 @@ class TestContradictionDetection:
             patch_calls.append({"url": str(request.url), "payload": payload})
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
+        _stub_extract_entity(monkeypatch, source_url, kind="concept")  # #1427 AC11: URL objects come from extraction
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
@@ -2695,6 +2743,8 @@ class TestContradictionDetection:
             patch_calls.append({"url": str(request.url), "payload": payload})
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
+        _stub_extract_entity(monkeypatch, source_url, kind="concept")  # #1427 AC11: URL objects come from extraction
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
@@ -2981,6 +3031,8 @@ class TestReingestIdempotency:
         def on_patch(request, **kwargs):
             return httpx.Response(200, json={"object": {"id": "patched"}})
 
+        _stub_extract_entity(monkeypatch, "Idempotent Entity")  # #1427 AC11: URL objects come from extraction
+        _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
