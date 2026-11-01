@@ -339,6 +339,25 @@ def fetch_extra_ports() -> list[int]:
     return ports
 
 
+def refuse_identifier_names_spaces() -> frozenset[str]:
+    """Resolve WIKI_REFUSE_IDENTIFIER_NAMES_SPACES — comma-separated space IDs.
+
+    An optional per-space naming policy (Aldeia-IT/aldeia-box#1426 D5): in a
+    listed space, model-extracted names that ``is_identifier_like_name``
+    (snake_case labels, kebab slugs, URL-likes, file paths) are refused instead
+    of becoming objects. Example: a genealogy space where names are proper names
+    such as apelidos, so keys and labels never become objects. Elsewhere such
+    names are kept (a tool's docs space legitimately has ``wiki_query``).
+    Entries are stripped and empty entries dropped; read at call time.
+
+    Returns:
+        The listed space IDs; an empty set when unset or empty, so by default
+        nothing is refused in any space.
+    """
+    raw = os.environ.get("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 def lock_dir_path() -> Path:
     """Convenience: WIKI_LOCK_DIR resolved to a pathlib.Path at call time."""
     return Path(lock_dir())
