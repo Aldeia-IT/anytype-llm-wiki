@@ -265,8 +265,9 @@ def _plan_subjects(
     1. Build the extracted subjects.
     2. With a hint, fold (drop silently) every extracted subject that is the
        hinted subject under another spelling (``_same_subject``).
-    3. When ``refuse_identifiers``, drop every remaining extracted subject whose
-       name ``is_identifier_like_name`` and warn
+    3. When ``refuse_identifiers`` (the space opted in through
+       WIKI_REFUSE_IDENTIFIER_NAMES_SPACES), drop every remaining extracted
+       subject whose name ``is_identifier_like_name`` and warn
        ``name_policy_rejected: identifier_like: <name>``.
     4. With a hint, the hint is the primary subject, first in the list (kind from
        ``kind``, facts = the whole ``knowledge``; never refused by step 3), and
@@ -417,11 +418,11 @@ def wiki_remember(
 
         # Subjects are planned before the work-log append so a pending batch
         # already carries clean names (Aldeia-IT/aldeia-box#1426). The refusal
-        # warnings ride on base_warnings: drained, queued and degraded results
+        # applies only in opted-in spaces; its warnings ride on base_warnings: drained, queued and degraded results
         # all report them.
         new_subjects, batch_relations, name_warnings = _plan_subjects(
             extracted, knowledge, subject_hint, kind, relations,
-            refuse_identifiers=space_id not in config.identifier_names_allowed_spaces(),
+            refuse_identifiers=space_id in config.refuse_identifier_names_spaces(),
         )
 
         base_warnings = list(schema_warnings) + name_warnings

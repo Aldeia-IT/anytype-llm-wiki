@@ -321,19 +321,22 @@ def fetch_extra_ports() -> list[int]:
     return ports
 
 
-def identifier_names_allowed_spaces() -> frozenset[str]:
-    """Resolve WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES — comma-separated space IDs.
+def refuse_identifier_names_spaces() -> frozenset[str]:
+    """Resolve WIKI_REFUSE_IDENTIFIER_NAMES_SPACES — comma-separated space IDs.
 
-    In a listed space ``wiki_remember`` keeps model-extracted names that look
-    like keys, slugs, URLs or paths (``wiki_query``, ``anytype-llm-wiki``)
-    instead of refusing them (Aldeia-IT/aldeia-box#1426 D5). Entries are
-    stripped and empty entries dropped.
+    An optional per-space naming policy (Aldeia-IT/aldeia-box#1426 D5): in a
+    listed space, model-extracted names that ``is_identifier_like_name``
+    (snake_case labels, kebab slugs, URL-likes, file paths) are refused instead
+    of becoming objects. Example: a genealogy space where names are proper names
+    such as apelidos, so keys and labels never become objects. Elsewhere such
+    names are kept (a tool's docs space legitimately has ``wiki_query``).
+    Entries are stripped and empty entries dropped; read at call time.
 
     Returns:
-        The listed space IDs; an empty set when unset or empty, so the refusal
-        applies in every space by default.
+        The listed space IDs; an empty set when unset or empty, so by default
+        nothing is refused in any space.
     """
-    raw = os.environ.get("WIKI_IDENTIFIER_NAMES_ALLOWED_SPACES", "")
+    raw = os.environ.get("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "")
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
