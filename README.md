@@ -41,7 +41,7 @@ Give autonomous agents a **persistent, typed memory that survives sessions** and
 
 Researching a topic across many sessions means re-fetching the same facts from the web again and again. Ingest findings once and the wiki becomes a **local, cited cache**: future questions are answered from accumulated knowledge first, with a live web search reserved for genuine gaps — fewer tokens, faster answers, and a provenance trail.
 
-→ Concrete example: a **Capoeira genealogy** research project uses it as exactly this kind of buffer — caching lineage and history research so repeated LLM web-searches are avoided.
+→ Concrete example: a **Capoeira genealogy** research project uses it as exactly this kind of buffer — the wiki holds knowledge from external sources read during research, not the project's own published output, so repeated LLM web-searches are avoided.
 
 ## How it works
 
