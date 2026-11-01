@@ -228,7 +228,8 @@ _SUBJECT_BLOCK = (
     "\n## PRIMARY SUBJECT\n\n"
     'The caller says this page\'s primary subject is "{hint}". Name that entity '
     'exactly "{hint}" in `entities`, and add the top-level field '
-    '`"primary_subject"` to the JSON object, set to the name you gave it.\n'
+    '`"primary_subject"` to the JSON object, set to the name you gave it. '
+    "Extract every other entity and concept on the page as usual.\n"
 )
 
 

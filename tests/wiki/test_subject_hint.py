@@ -274,6 +274,7 @@ class TestExtractionPrompt:
         assert 'primary subject is "Mestre Bimba"' in prompt
         assert 'exactly "Mestre Bimba"' in prompt
         assert '"primary_subject"' in prompt
+        assert "Extract every other entity and concept on the page as usual." in prompt
         assert "{subject}" not in prompt and "{source}" not in prompt
 
     def test_hint_is_stripped_before_it_is_used(self, captured_prompts):
