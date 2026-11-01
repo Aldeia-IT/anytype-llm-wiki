@@ -27,7 +27,11 @@ import json
 import sys
 import time
 
-from anytype_llm_wiki.wiki.extraction import extract, is_identifier_like_name, sanitize_name
+from anytype_llm_wiki.wiki.extraction import (
+    extract,
+    is_identifier_like_name,
+    sanitize_name,
+)
 from anytype_llm_wiki.wiki.fetch import _to_markdown, fetch_source
 
 _EXCERPT_CHARS = 1000
