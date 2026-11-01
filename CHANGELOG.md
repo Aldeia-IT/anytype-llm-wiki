@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extraction, `plan_primary_subject` folds entities that are the subject under another spelling
   (`same_subject`, moved from `remember` to `wiki/util.py` and shared), else renames the entity
   the model marked, else warns `subject_hint_unmatched`. The primary is never refused by the
-  identifier-name policy and relations point at the renamed object. A blank hint is no hint; a
+  identifier-name policy and relations point at the renamed object. A candidate that is the hint once
+  one leading title word is removed ("Mestre Bimba" for "Bimba") also matches, in every space; the
+  hint block asks the model to record a legal or full name as a fact, not a separate entity. A blank hint is no hint; a
   rejected one returns `[CONFIG ERROR] invalid_subject_hint` before the fetch.
   `scripts/ingest_dry_run.py --subject-hint NAME` reports `primary_name` and `hint_warnings`.
 - **Per-space settings file (Aldeia-IT/aldeia-box#1430).** `spaces.toml` (`WIKI_SPACES_CONFIG`, else

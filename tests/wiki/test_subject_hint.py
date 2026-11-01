@@ -167,6 +167,32 @@ class TestPlanPrimarySubject:
         assert [c.get("primary") for c in out].count(True) == 1
         assert warnings == []
 
+    def test_titled_candidate_matches_the_bare_hint_in_every_space(self):
+        cands = [_cand("Salvador"), _cand("Mestre Bimba", facts="about"), _cand("mestre bimba")]
+        out, warnings = util.plan_primary_subject(cands, "Bimba", None)
+        assert [c["name"] for c in out] == ["Salvador", "Bimba"]
+        assert out[1]["primary"] is True and out[1]["facts"] == "about"
+        assert warnings == []
+
+    def test_title_stripped_name_that_differs_from_the_hint_does_not_match(self):
+        out, warnings = util.plan_primary_subject([_cand("Mestre Pastinha")], "Bimba", None)
+        assert [c["name"] for c in out] == ["Mestre Pastinha"]
+        assert len(warnings) == 1 and warnings[0].startswith("subject_hint_unmatched")
+
+    def test_parenthesised_names_stay_distinct(self):
+        cands = [_cand("Bimba (Rio)"), _cand("Mestre Bimba (Salvador)")]
+        out, warnings = util.plan_primary_subject(cands, "Bimba (Salvador)", None)
+        assert [c["name"] for c in out] == ["Bimba (Rio)", "Bimba (Salvador)"]
+        assert out[1].get("primary") is True and "primary" not in out[0]
+        out, warnings = util.plan_primary_subject(cands, "Bimba", None)
+        assert [c["name"] for c in out] == ["Bimba (Rio)", "Mestre Bimba (Salvador)"]
+        assert len(warnings) == 1
+
+    def test_title_override_applies_to_the_hint_match(self, monkeypatch):
+        monkeypatch.setattr(root_config, "NAME_TIER_TITLE_WORDS", ("dom",))
+        out, _ = util.plan_primary_subject([_cand("Mestre Bimba")], "Bimba", None)
+        assert out[0]["name"] == "Mestre Bimba"
+
     def test_fold_keeps_the_facts_of_the_first_match(self):
         cands = [_cand("mestre bimba", facts="first"), _cand("Mestre Bimba", facts="second")]
         out, _ = util.plan_primary_subject(cands, "Mestre Bimba", None)
@@ -283,6 +309,10 @@ class TestExtractionPrompt:
         assert 'exactly "Mestre Bimba"' in prompt
         assert '"primary_subject"' in prompt
         assert "Extract every other entity and concept on the page as usual." in prompt
+        assert (
+            "If the page gives the primary subject's legal or full name, record it as a "
+            "fact of the primary subject, not as a separate entity."
+        ) in prompt
         assert "{subject}" not in prompt and "{source}" not in prompt
 
     def test_hint_is_stripped_before_it_is_used(self, captured_prompts):

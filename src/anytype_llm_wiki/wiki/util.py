@@ -129,7 +129,9 @@ def plan_primary_subject(
     hint:
 
     1. every candidate that is the hinted subject under another spelling
-       (``same_subject``) is a match; the first becomes the primary, named exactly
+       (``same_subject``), or whose name is the hint once one leading title word
+       is removed ("Mestre Bimba" for the hint "Bimba", in every space), is a
+       match; the first becomes the primary, named exactly
        as the hint, and the others are dropped;
     2. else the candidate named by ``marked`` (the model's ``primary_subject``,
        ``normalize_title`` equal) becomes the primary, renamed to the hint;
@@ -169,7 +171,11 @@ def plan_primary_subject(
         return planned, []
 
     hint = strip(hint)
-    matches = [i for i, c in enumerate(planned) if same_subject(c["name"], hint)]
+    strip_one = _title_stripper(True)
+    matches = [
+        i for i, c in enumerate(planned)
+        if same_subject(c["name"], hint) or same_subject(strip_one(c["name"]), hint)
+    ]
     if not matches and isinstance(marked, str) and marked.strip():
         key = normalize_title(strip(marked.strip()))
         matches = [
