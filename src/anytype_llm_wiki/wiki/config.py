@@ -28,16 +28,22 @@ DEFAULT_WIKI_EXTRACT_MODEL = "qwen2.5:7b"
 # without improving structured extraction. Harmless (no-op) for non-thinking models.
 DEFAULT_WIKI_EXTRACT_THINK = False
 
-# Default per-request read timeout (seconds) for the extraction model call.
-# 600s (10 min): large local models routinely take several minutes on a sizable
-# source on reference hardware; a lower value trips the read timeout mid-generation.
+# Default read timeout (seconds) for the streamed extraction model call: the
+# longest silence allowed before the first chunk and between chunks, not a cap on
+# the whole generation. 600s (10 min) covers queue wait, a cold model load and the
+# prompt evaluation of a large source, all of which happen before the first chunk.
 DEFAULT_WIKI_EXTRACT_TIMEOUT = 600.0
 
 # Default log level for wiki operations.
 DEFAULT_WIKI_LOG_LEVEL = "info"
 
-# Default cap on extraction/synthesis input tokens (token estimate: len // 4).
+# Default cap on extraction/synthesis input tokens. Extraction sizes its source at
+# 3 chars per token; synthesis estimates len // 4.
 DEFAULT_WIKI_EXTRACT_MAX_INPUT_TOKENS = 8192
+
+# Default output budget (tokens) for extraction-family calls. Sent as
+# ``num_predict``; ``num_ctx`` = max input tokens + this (12288 with the defaults).
+DEFAULT_WIKI_EXTRACT_OUTPUT_TOKENS = 4096
 
 # v0.4.0 wiki_query tiered-retrieval / synthesis defaults.
 DEFAULT_WIKI_INDEX_THRESHOLD = 200
@@ -147,6 +153,18 @@ def extract_max_input_tokens() -> int:
     )
 
 
+def extract_output_tokens() -> int:
+    """Resolve WIKI_EXTRACT_OUTPUT_TOKENS — the extraction output budget (default 4096).
+
+    Sent as ``num_predict`` on every extraction-family call; ``num_ctx`` is
+    ``extract_max_input_tokens() + extract_output_tokens()``. Non-numeric or
+    non-positive values fall back to the default.
+    """
+    return _positive_int(
+        "WIKI_EXTRACT_OUTPUT_TOKENS", DEFAULT_WIKI_EXTRACT_OUTPUT_TOKENS
+    )
+
+
 def index_threshold() -> int:
     """Resolve WIKI_INDEX_THRESHOLD — Tier-1/Tier-2 object-count flip (default 200)."""
     return _positive_int("WIKI_INDEX_THRESHOLD", DEFAULT_WIKI_INDEX_THRESHOLD)
@@ -209,14 +227,14 @@ def extract_model() -> str:
 
 
 def extract_timeout() -> float:
-    """Resolve WIKI_EXTRACT_TIMEOUT — the per-request read timeout (seconds) for
-    the extraction model call.
+    """Resolve WIKI_EXTRACT_TIMEOUT — the read timeout (seconds) of the streamed
+    extraction model call.
 
-    Defaults to 600s (10 min) — large local models (e.g. a ~20GB model) routinely
-    take several minutes on a sizable source; a lower timeout would trip the read
-    timeout mid-generation and silently degrade extraction to heading-derived
-    candidates only. Lower it for a fast model if you want quicker failure on a
-    hung endpoint. Non-numeric or non-positive values fall back to the default.
+    Extraction calls stream their answer, so this is the longest silence allowed
+    before the first chunk (queue wait, model load, prompt evaluation) and between
+    chunks; a long generation that keeps streaming never trips it. Defaults to
+    600s (10 min). Lower it for quicker failure on a hung endpoint. Non-numeric or
+    non-positive values fall back to the default.
     """
     raw = os.environ.get("WIKI_EXTRACT_TIMEOUT")
     if raw is None:

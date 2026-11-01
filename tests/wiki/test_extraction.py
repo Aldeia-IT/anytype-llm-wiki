@@ -891,7 +891,7 @@ class TestConsolidateDeterministicOptsUsed:
             return_value=httpx.Response(200, json={"message": {"content": "{}"}, "done": True})
         )
 
-        from anytype_llm_wiki.wiki.extraction import consolidate, _DETERMINISTIC_OPTS
+        from anytype_llm_wiki.wiki.extraction import consolidate, _model_options
         consolidate(
             existing_text=_EXISTING_ENTITY_FACTS,
             new_facts="- Some fact",
@@ -901,8 +901,9 @@ class TestConsolidateDeterministicOptsUsed:
 
         assert captured, "consolidate() must call the Ollama endpoint"
         actual_opts = captured[0].get("options")
-        assert actual_opts == _DETERMINISTIC_OPTS, (
-            f"consolidate() options must equal _DETERMINISTIC_OPTS={_DETERMINISTIC_OPTS!r}; "
+        # Aldeia-IT/aldeia-box#1427 AC4: _DETERMINISTIC_OPTS plus num_ctx/num_predict.
+        assert actual_opts == _model_options(), (
+            f"consolidate() options must equal _model_options()={_model_options()!r}; "
             f"got {actual_opts!r}"
         )
 
@@ -1062,9 +1063,12 @@ class TestExtractRequestPayloadUnchangedAfterRefactor:
         MUST PASS against current source.
         """
         import json as _json
-        from anytype_llm_wiki.wiki.extraction import _DETERMINISTIC_OPTS
+        from anytype_llm_wiki.wiki.extraction import _model_options
         from anytype_llm_wiki.wiki import config as wiki_config
 
+        # Aldeia-IT/aldeia-box#1427 AC4: options are _DETERMINISTIC_OPTS plus
+        # num_ctx/num_predict (_model_options()).
+        _DETERMINISTIC_OPTS = _model_options()
         generate_calls = []
         chat_calls = []
 

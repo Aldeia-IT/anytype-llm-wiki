@@ -41,6 +41,10 @@ _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"}  # nosec B1
 # makes extraction reproducible so re-ingest is idempotent.
 _DETERMINISTIC_OPTS = {"temperature": 0, "seed": 0, "top_p": 1}
 
+# Conservative chars-per-token estimate for sizing the extraction source (AC4).
+# Measured ~3.3 on a real capoeira page; ``len // 4`` undercounts.
+_CHARS_PER_TOKEN = 3
+
 
 def _load_prompt() -> str:
     try:
@@ -67,14 +71,8 @@ def _ollama_url() -> str:
     return getattr(root_config, "OLLAMA_URL", "http://127.0.0.1:11434")
 
 
-def _parse_json_response(payload: dict) -> dict | None:
-    """Pull the model's text out of an Ollama generate/chat response and parse it."""
-    text = None
-    if isinstance(payload, dict):
-        if "response" in payload:
-            text = payload.get("response")
-        elif "message" in payload and isinstance(payload["message"], dict):
-            text = payload["message"].get("content")
+def _parse_json_text(text: str | None) -> dict | None:
+    """Parse the model's text as a JSON object (tolerating a fenced block)."""
     if not text:
         return None
     text = text.strip()
@@ -89,6 +87,23 @@ def _parse_json_response(payload: dict) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _chunk_text(chunk: dict) -> str:
+    """The text one generate/chat payload carries (``response`` or ``message.content``)."""
+    if "response" in chunk:
+        return chunk.get("response") or ""
+    message = chunk.get("message")
+    if isinstance(message, dict):
+        return message.get("content") or ""
+    return ""
+
+
+def _parse_json_response(payload: dict) -> dict | None:
+    """Pull the model's text out of an Ollama generate/chat response and parse it."""
+    if not isinstance(payload, dict):
+        return None
+    return _parse_json_text(_chunk_text(payload))
+
+
 def _is_model_not_pulled(resp: httpx.Response) -> bool:
     if resp.status_code != 404:
         return False
@@ -96,70 +111,157 @@ def _is_model_not_pulled(resp: httpx.Response) -> bool:
     return "not found" in body or "pull it first" in body or "model" in body
 
 
+def _model_options() -> dict:
+    """Decoding options for every extraction-family call (AC4).
+
+    ``num_ctx`` is the input cap plus the output budget and ``num_predict`` the
+    output budget. Both are fixed per config, not per prompt, so Ollama never
+    reloads the model runner between calls.
+    """
+    output_tokens = config.extract_output_tokens()
+    return {
+        **_DETERMINISTIC_OPTS,
+        "num_ctx": config.extract_max_input_tokens() + output_tokens,
+        "num_predict": output_tokens,
+    }
+
+
+def _read_stream(resp: httpx.Response) -> tuple[str | None, str | None, str | None]:
+    """Assemble a streamed Ollama NDJSON body until ``done: true``.
+
+    Returns ``(text, done_reason, failure)``. ``failure`` is set (and ``text`` is
+    None) when the stream carries an ``{"error": ...}`` line, a line that is not
+    a JSON object, or ends without ``done: true``. A read timeout between chunks
+    propagates as ``httpx.TimeoutException``.
+    """
+    parts: list[str] = []
+    for line in resp.iter_lines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            chunk = json.loads(line)
+        except ValueError:
+            return None, None, "stream_error: invalid chunk"
+        if not isinstance(chunk, dict):
+            return None, None, "stream_error: invalid chunk"
+        if chunk.get("error"):
+            message = scrub_credentials(strip_control_chars(str(chunk["error"])))
+            return None, None, f"stream_error: {message[:200]}"
+        parts.append(_chunk_text(chunk))
+        if chunk.get("done"):
+            return "".join(parts), chunk.get("done_reason"), None
+    return None, None, "stream_error: stream ended before done"
+
+
+def _call_ollama_prompt_detailed(
+    base: str, prompt: str
+) -> tuple[dict | None, httpx.Response | None, str | None]:
+    """Stream a pre-built ``prompt`` to {base}/api/generate, then /api/chat.
+
+    Both calls send ``"stream": true``; the httpx read timeout
+    (``WIKI_EXTRACT_TIMEOUT``) therefore caps the silence between chunks, not the
+    whole generation. A 404 model-not-pulled answer is detected from the status
+    before any stream is parsed and returned at once. Returns
+    ``(parsed_or_None, last_resp, failure_reason)``; ``failure_reason`` is the
+    last call's reason (``http_error: <status>``, ``stream_error: <msg>``,
+    ``output_truncated`` or ``malformed_json``) when nothing parsed. Transport
+    errors (timeouts included) propagate to the caller.
+    """
+    model = config.extract_model()
+    think = config.extract_think()
+    options = _model_options()
+    timeout = httpx.Timeout(connect=5, read=config.extract_timeout(), write=10, pool=5)
+    last_resp: httpx.Response | None = None
+    reason: str | None = None
+    requests = (
+        ("/api/generate", {"prompt": prompt}),
+        ("/api/chat", {"messages": [{"role": "user", "content": prompt}]}),
+    )
+
+    with httpx.Client(timeout=timeout) as client:
+        for path, body in requests:
+            payload = {
+                "model": model,
+                **body,
+                "stream": True,
+                "format": "json",
+                "think": think,
+                "options": options,
+            }
+            with client.stream("POST", f"{base}{path}", json=payload) as resp:
+                last_resp = resp
+                if resp.status_code != 200:
+                    resp.read()
+                    if _is_model_not_pulled(resp):
+                        return None, resp, None
+                    reason = f"http_error: {resp.status_code}"
+                    continue
+                text, done_reason, failure = _read_stream(resp)
+            if failure is not None:
+                reason = failure
+                continue
+            parsed = _parse_json_text(text)
+            if parsed is not None:
+                return parsed, resp, None
+            reason = "output_truncated" if done_reason == "length" else "malformed_json"
+
+    return None, last_resp, reason
+
+
 def _call_ollama_prompt(
     base: str, prompt: str
 ) -> tuple[dict | None, httpx.Response | None]:
     """POST a pre-built ``prompt`` to {base}/api/generate then /api/chat.
 
-    Identical generate→chat→model-not-pulled wire behavior as ``_call_ollama``,
-    but takes a ready prompt string (no ``{source}`` substitution). Returns
+    Same streamed generate→chat→model-not-pulled wire behaviour as
+    ``_call_ollama_prompt_detailed`` without the failure reason. Returns
     ``(parsed_or_None, last_resp)``.
     """
-    model = config.extract_model()
-    think = config.extract_think()
-    timeout = httpx.Timeout(connect=5, read=config.extract_timeout(), write=10, pool=5)
-    last_resp: httpx.Response | None = None
-
-    with httpx.Client(timeout=timeout) as client:
-        gen_resp = client.post(
-            f"{base}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "think": think,
-                "options": _DETERMINISTIC_OPTS,
-            },
-        )
-        last_resp = gen_resp
-        if _is_model_not_pulled(gen_resp):
-            return None, gen_resp
-        if gen_resp.status_code == 200:
-            parsed = _parse_json_response(gen_resp.json())
-            if parsed is not None:
-                return parsed, gen_resp
-
-        chat_resp = client.post(
-            f"{base}/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "format": "json",
-                "think": think,
-                "options": _DETERMINISTIC_OPTS,
-            },
-        )
-        last_resp = chat_resp
-        if _is_model_not_pulled(chat_resp):
-            return None, chat_resp
-        if chat_resp.status_code == 200:
-            parsed = _parse_json_response(chat_resp.json())
-            if parsed is not None:
-                return parsed, chat_resp
-
-    return None, last_resp
+    parsed, resp, _reason = _call_ollama_prompt_detailed(base, prompt)
+    return parsed, resp
 
 
-def _call_ollama(base: str, markdown: str) -> tuple[dict | None, httpx.Response | None]:
-    """POST to {base}/api/generate then /api/chat. Returns (parsed_or_None, last_resp).
+def _fit_source(markdown: str, template: str) -> tuple[str, dict | None]:
+    """Cut ``markdown`` so the whole prompt fits ``extract_max_input_tokens()`` (AC4).
 
-    Delegates to ``_call_ollama_prompt`` after the ``{source}`` substitution so
-    the extraction wire behavior is byte-identical to the pre-refactor path.
+    Estimates 3 chars per token (conservative for prose; ``len // 4``
+    undercounts) and cuts at the last paragraph break, else line break, inside
+    the budget. Returns ``(source, truncated)`` where ``truncated`` is
+    ``{"kept_chars", "total_chars"}`` or None when nothing was cut.
+    """
+    budget = config.extract_max_input_tokens() * _CHARS_PER_TOKEN - (
+        len(template) - len("{source}")
+    )
+    budget = max(budget, 0)
+    total = len(markdown)
+    if total <= budget:
+        return markdown, None
+    cut = markdown.rfind("\n\n", 0, budget + 1)
+    if cut <= budget // 2:
+        cut = markdown.rfind("\n", 0, budget + 1)
+    if cut <= budget // 2:
+        cut = budget
+    kept = markdown[:cut]
+    return kept, {"kept_chars": len(kept), "total_chars": total}
+
+
+def _call_ollama(
+    base: str, markdown: str
+) -> tuple[dict | None, httpx.Response | None, str | None]:
+    """Substitute ``{source}`` into the extraction prompt and stream it.
+
+    Returns ``(parsed_or_None, last_resp, failure_reason)``.
     """
     prompt = _load_prompt().replace("{source}", markdown)
-    return _call_ollama_prompt(base, prompt)
+    return _call_ollama_prompt_detailed(base, prompt)
+
+
+def _transport_reason(exc: httpx.HTTPError) -> str:
+    """Map a transport error to a degraded reason without its message (AC5)."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    return f"http_error: {type(exc).__name__}"
 
 
 def extract(markdown: str, space_id: str, **kw) -> dict:
@@ -167,44 +269,49 @@ def extract(markdown: str, space_id: str, **kw) -> dict:
 
     Returns a dict with at least ``entities`` and ``concepts`` keys. On a
     not-pulled Ollama model returns a dict whose str() contains
-    ``[CONFIG ERROR] ollama_model_not_pulled``.
+    ``[CONFIG ERROR] ollama_model_not_pulled``. A degraded run sets ``error`` to
+    ``extraction_degraded: <reason>``, reason one of ``timeout``,
+    ``http_error: <ExceptionClass or status>``, ``malformed_json``,
+    ``output_truncated`` or ``stream_error: <msg>``. When the source had to be cut
+    to fit the input cap, ``truncated`` is ``{"kept_chars", "total_chars"}``.
     """
     base = os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()
     base = base.rstrip("/")
+    source, truncated = _fit_source(markdown, _load_prompt())
 
-    try:
-        parsed, resp = _call_ollama(base, markdown)
-    except httpx.HTTPError as exc:
-        return {"entities": [], "concepts": [], "error": f"extraction_degraded: {exc}"}
+    def _done(result: dict) -> dict:
+        if truncated is not None:
+            result["truncated"] = truncated
+        return result
 
-    if resp is not None and _is_model_not_pulled(resp):
-        return {
-            "entities": [],
-            "concepts": [],
-            "error": "[CONFIG ERROR] ollama_model_not_pulled: the extraction model "
-            f"'{config.extract_model()}' is not available — pull it first",
-        }
+    def _degraded(reason: str) -> dict:
+        return _done(
+            {"entities": [], "concepts": [], "error": f"extraction_degraded: {reason}"}
+        )
 
-    if parsed is not None:
-        return filter_extraction_output(parsed)
+    reason = "malformed_json"
+    # One repair round: a second identical call when the first parses nothing.
+    for attempt in range(2):
+        try:
+            parsed, resp, failure = _call_ollama(base, source)
+        except httpx.HTTPError as exc:
+            return _degraded(_transport_reason(exc))
 
-    # Malformed JSON on the first round-trip → one repair attempt (second call).
-    try:
-        parsed2, resp2 = _call_ollama(base, markdown)
-    except httpx.HTTPError as exc:
-        return {"entities": [], "concepts": [], "error": f"extraction_degraded: {exc}"}
+        if resp is not None and _is_model_not_pulled(resp):
+            error = "[CONFIG ERROR] ollama_model_not_pulled"
+            if attempt == 0:
+                error += (
+                    f": the extraction model '{config.extract_model()}' is not "
+                    "available — pull it first"
+                )
+            return {"entities": [], "concepts": [], "error": error}
 
-    if resp2 is not None and _is_model_not_pulled(resp2):
-        return {
-            "entities": [],
-            "concepts": [],
-            "error": "[CONFIG ERROR] ollama_model_not_pulled",
-        }
-    if parsed2 is not None:
-        return filter_extraction_output(parsed2)
+        if parsed is not None:
+            return _done(filter_extraction_output(parsed))
+        reason = failure or "malformed_json"
 
-    # Still malformed after repair → graceful empty result.
-    return {"entities": [], "concepts": [], "error": "extraction_degraded: malformed_json"}
+    # Still nothing usable after the repair round → graceful empty result.
+    return _degraded(reason)
 
 
 def _degraded_consolidation(existing_text: str, reason: str) -> dict:
