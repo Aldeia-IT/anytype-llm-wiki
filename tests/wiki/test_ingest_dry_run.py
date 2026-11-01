@@ -202,3 +202,28 @@ class TestDryRunSubjectHint:
         assert page["primary_name"] is None and page["hint_warnings"] == []
         assert page["marked"] is None
         assert "PRIMARY SUBJECT" not in json.loads(generate.calls[0].request.content)["prompt"]
+
+
+def test_a_hinted_run_with_title_strip_does_not_import_the_indexer():
+    """The hint planning and the title strip need no indexer (and so no Qdrant)."""
+    code = (
+        "import importlib.util, sys;"
+        f"spec = importlib.util.spec_from_file_location('h', {str(SCRIPT)!r});"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "m.fetch_source = lambda url: {'markdown': 'x' * 400, 'is_url': True, 'unusable': None,"
+        " 'raw': None, 'content_type': 'text/html'};"
+        "m._to_markdown = lambda *a, **k: 'x' * 400;"
+        "m.extract = lambda **kw: {'entities': [{'name': 'Mestre Bimba', 'description': 'd'}],"
+        " 'concepts': [], 'primary_subject': 'Mestre Bimba'};"
+        "r = m.dry_run('https://e.x/p', False, 'Bimba', True);"
+        "assert r['primary_name'] == 'Bimba', r;"
+        "bad = [n for n in sys.modules if n.startswith('qdrant_client') or n in ("
+        "'anytype_llm_wiki.indexer', 'anytype_llm_wiki.wiki.ingest',"
+        "'anytype_llm_wiki.wiki.remember')];"
+        "print(','.join(bad))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "", out.stdout

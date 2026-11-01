@@ -23,6 +23,7 @@ from urllib.parse import unquote_plus, urlparse, urlsplit, urlunparse, urlunspli
 
 from ..textfold import fold
 from . import config
+from .names import strip_display_title
 
 # ---------------------------------------------------------------------------
 # normalize_title — exact implementation from the spec
@@ -77,16 +78,8 @@ def _slug_form(name: str) -> str:
 
 
 def _title_stripper(strip_titles: bool):
-    """Return ``indexer.strip_display_title`` when ``strip_titles``, else identity.
-
-    The indexer is imported lazily: it loads the vector-store client, which the
-    dry-run harness and callers that never strip titles must not pay for.
-    """
-    if not strip_titles:
-        return lambda name: name
-    from .. import indexer
-
-    return indexer.strip_display_title
+    """Return ``names.strip_display_title`` when ``strip_titles``, else identity."""
+    return strip_display_title if strip_titles else (lambda name: name)
 
 
 def same_subject(name: str, hint: str, *, strip_titles: bool = False) -> bool:

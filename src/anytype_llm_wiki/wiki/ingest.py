@@ -46,6 +46,7 @@ from .util import (
     scrub_credentials,
     scrub_text_urls,
 )
+from .names import strip_display_title
 from .wiki_client import WikiClient
 
 # Wiki object types authored by ingest (created with EMPTY body — AC-P7/AC-L1).
@@ -256,7 +257,7 @@ def resolve_entity(
 
     With ``strip_titles`` (the space is in WIKI_STRIP_NAME_TITLES_SPACES,
     Aldeia-IT/aldeia-box#1430) step 1 also matches a same-type object whose
-    title-stripped ``normalize_title`` equals the candidate's (a trailing
+    title-stripped (``names.strip_display_title``) ``normalize_title`` equals the candidate's (a trailing
     parenthetical is kept, so "Bimba (Rio)" is not "Bimba (Salvador)"), so "Mestre Moraes" and
     "Moraes" resolve to one object.
     """
@@ -279,11 +280,9 @@ def resolve_entity(
         if normalize_title(obj.get("name", "")) == normalized:
             return {"action": "update", "target": obj}
     if strip_titles:
-        from .. import indexer
-
-        candidate_key = normalize_title(indexer.strip_display_title(candidate_title))
+        candidate_key = normalize_title(strip_display_title(candidate_title))
         for obj in same_type:
-            stored = normalize_title(indexer.strip_display_title(obj.get("name", "")))
+            stored = normalize_title(strip_display_title(obj.get("name", "")))
             if candidate_key and stored == candidate_key:
                 return {"action": "update", "target": obj}
 
