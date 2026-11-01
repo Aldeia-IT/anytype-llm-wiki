@@ -242,7 +242,10 @@ class TestPlanPrimarySubject:
 @pytest.fixture
 def captured_prompts(monkeypatch):
     """Replace the model call; record each prompt and return a canned parse."""
-    prompts: list[str] = []
+    class _Prompts(list):
+        state: dict
+
+    prompts = _Prompts()
     state = {"parsed": {"entities": [], "concepts": []}}
 
     def fake(base, prompt):
@@ -251,7 +254,7 @@ def captured_prompts(monkeypatch):
 
     monkeypatch.setattr(extraction, "_call_ollama_prompt_detailed", fake)
     monkeypatch.delenv("WIKI_EXTRACT_ENDPOINT", raising=False)
-    prompts.state = state  # type: ignore[attr-defined]
+    prompts.state = state
     return prompts
 
 
@@ -299,7 +302,8 @@ class TestExtractionPrompt:
         plain = extraction._fit_source(source, extraction._load_prompt())[1]["kept_chars"]
         assert result["truncated"]["kept_chars"] < plain, "the hint block takes budget"
 
-    def test_fit_source_measures_the_filled_template(self):
+    def test_fit_source_measures_the_filled_template(self, monkeypatch):
+        monkeypatch.setenv("WIKI_EXTRACT_MAX_INPUT_TOKENS", "1000")
         template = "A{source}B{subject}C"
         kept, truncated = extraction._fit_source("x" * 10_000, template, subject_block="y" * 500)
         base, _ = extraction._fit_source("x" * 10_000, template)

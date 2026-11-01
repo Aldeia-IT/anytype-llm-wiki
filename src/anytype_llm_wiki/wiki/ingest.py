@@ -42,6 +42,7 @@ from .util import (
     _existing_text,
     _relation_ids,
     normalize_title,
+    plan_primary_subject,
     scrub_credentials,
     scrub_text_urls,
 )
@@ -245,12 +246,18 @@ def resolve_entity(
     candidate_title: str,
     candidate_embedding=None,
     candidate_facts: str = "",
+    strip_titles: bool = False,
 ) -> dict:
     """Resolve a candidate to an existing object or signal a create.
 
     Returns ``{"action": "update", "target": <obj>}`` or ``{"action": "create"}``.
     Type filtering is client-side; NO ``filter={"type_key":...}`` is sent to
     the search API (the API filter is a no-op — AC-L2/SF8).
+
+    With ``strip_titles`` (the space is in WIKI_STRIP_NAME_TITLES_SPACES,
+    Aldeia-IT/aldeia-box#1430) step 1 also matches a same-type object whose
+    ``indexer.strip_name`` key equals the candidate's, so "Mestre Moraes" and
+    "Moraes" resolve to one object.
     """
     normalized = normalize_title(candidate_title)
 
@@ -270,6 +277,13 @@ def resolve_entity(
     for obj in same_type:
         if normalize_title(obj.get("name", "")) == normalized:
             return {"action": "update", "target": obj}
+    if strip_titles:
+        from .. import indexer
+
+        candidate_key = indexer.strip_name(candidate_title)
+        for obj in same_type:
+            if candidate_key and indexer.strip_name(obj.get("name", "")) == candidate_key:
+                return {"action": "update", "target": obj}
 
     # Step 2 — fuzzy title match over same-type results.
     for obj in same_type:
@@ -724,8 +738,29 @@ def _domain_taxonomy(client: WikiClient, space_id: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> dict:
-    """Ingest a source URL/file into the wiki, creating/updating typed objects."""
+def wiki_ingest(
+    source: str,
+    space_id: str,
+    domain_hint: str | None = None,
+    subject_hint: str | None = None,
+) -> dict:
+    """Ingest a source URL/file into the wiki, creating/updating typed objects.
+
+    ``subject_hint`` names the page's primary subject (Aldeia-IT/aldeia-box#1430):
+    the extraction prompt carries it, and the extracted entity that is that
+    subject is named exactly as the hint. A blank hint counts as none; a hint the
+    name policy rejects returns ``[CONFIG ERROR] invalid_subject_hint`` before
+    any client is built or anything is fetched.
+    """
+    if isinstance(subject_hint, str) and subject_hint.strip():
+        subject_hint = sanitize_name(subject_hint)
+        if subject_hint is None:
+            return _error_result(
+                "[CONFIG ERROR] invalid_subject_hint: the name policy rejects the hint "
+                "(control characters, a prompt-like prefix or more than 200 characters)"
+            )
+    else:
+        subject_hint = None
     client = WikiClient()
     try:
         # 2. schema-compat (AC-M4).
@@ -782,7 +817,10 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
             # A queued-remember drain failure must not block an operator ingest.
             with contextlib.suppress(Exception):
                 _drain_pending(client, space_id, [])
-            return _run_ingest(client, source, space_id, domain_hint, schema_warnings)
+            return _run_ingest(
+                client, source, space_id, domain_hint, schema_warnings,
+                subject_hint=subject_hint,
+            )
 
         result = _acquire_and_run(
             space_id, source, _locked_ingest,
@@ -810,8 +848,10 @@ def _run_ingest(
     space_id: str,
     domain_hint: str | None,
     schema_warnings: list[str],
+    subject_hint: str | None = None,
 ) -> dict:
     result = _empty_result()
+    strip_titles = space_id in config.strip_name_titles_spaces()
     result["warnings"].extend(schema_warnings)
     status = "ok"
 
@@ -864,8 +904,10 @@ def _run_ingest(
         extraction_error: str | None = None
         extracted_cands: list[dict] = []
         extract_started = time.monotonic()
+        extracted: dict | None = None
         try:
-            extracted = extract(markdown=markdown, space_id=space_id)
+            extract_kwargs = {"subject_hint": subject_hint} if subject_hint else {}
+            extracted = extract(markdown=markdown, space_id=space_id, **extract_kwargs)
             # AC#11: ollama model not pulled must abort BEFORE Source creation.
             if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
                 "[CONFIG ERROR] ollama_model_not_pulled"
@@ -914,6 +956,19 @@ def _run_ingest(
             if is_url:
                 candidates = extracted_cands
 
+        # Aldeia-IT/aldeia-box#1430: name the hinted primary subject and, in an
+        # opted-in space, drop leading title words, before any policy refusal or
+        # resolution. A degraded URL run has no candidates: it reports only the
+        # degradation. The marker is read only when the caller gave a hint.
+        if not (extraction_error is not None and is_url):
+            marked = extracted.get("primary_subject") if (
+                subject_hint and isinstance(extracted, dict) and extracted_cands
+            ) else None
+            candidates, plan_warnings = plan_primary_subject(
+                candidates, subject_hint, marked, strip_titles=strip_titles
+            )
+            result["warnings"].extend(plan_warnings)
+
         # 9. create Source object.
         source_id, was_resumed = _create_source(client, space_id, source, markdown, result)
         result["source_object_id"] = source_id
@@ -949,7 +1004,11 @@ def _run_ingest(
             if clean_name is None:
                 result["warnings"].append(f"name_policy_rejected: {cand['name']!r}")
                 continue
-            if refuse_identifiers and is_identifier_like_name(clean_name):
+            if (
+                refuse_identifiers
+                and not cand.get("primary")
+                and is_identifier_like_name(clean_name)
+            ):
                 result["warnings"].append(
                     f"name_policy_rejected: identifier_like: {clean_name}"
                 )
@@ -971,7 +1030,8 @@ def _run_ingest(
                 props.append(domain_tag_prop)
             try:
                 resolution = resolve_entity(
-                    client, space_id, type_key, clean_name, candidate_facts=facts
+                    client, space_id, type_key, clean_name, candidate_facts=facts,
+                    **({"strip_titles": True} if strip_titles else {}),
                 )
                 if resolution["action"] == "update":
                     target = resolution["target"]

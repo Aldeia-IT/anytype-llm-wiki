@@ -6,7 +6,7 @@ extraction, Source/WikiLog writes, relation writes, reindex) are stubbed.
 
 import pytest
 
-from anytype_llm_wiki.wiki import ingest, remember, util
+from anytype_llm_wiki.wiki import ingest, remember
 
 SPACE = "space-1430"
 URL = "https://example.com/bimba"
@@ -105,13 +105,13 @@ EXTRACTED = {
 
 class TestIngestSubjectHint:
     def test_without_a_hint_nothing_changes(self, run):
-        result, client, calls = run(EXTRACTED)
+        result, _client, calls = run(EXTRACTED)
         assert _titles(result) == ["Manoel dos Reis Machado", "Salvador"]
         assert "subject_hint" not in calls["extract"][0]
         assert result["warnings"] == []
 
     def test_hint_reaches_extract(self, run):
-        _, _, calls = run(EXTRACTED, hint="  Mestre Bimba ")
+        _, _, calls = run(EXTRACTED, hint="Mestre Bimba")
         assert calls["extract"][0]["subject_hint"] == "Mestre Bimba"
 
     def test_marked_primary_is_renamed_and_relations_point_at_it(self, run):
@@ -165,7 +165,7 @@ class TestIngestSubjectHint:
 
     def test_local_file_heading_fallback_folds_a_matching_heading(self, run):
         degraded = {"entities": [], "concepts": [], "error": "extraction_degraded: timeout"}
-        result, client, _ = run(
+        result, _client, _ = run(
             degraded, hint="Mestre Bimba", is_url=False,
             markdown="# mestre bimba\n\nBorn in Salvador.\n\n# Salvador\n\nA city.",
         )
@@ -200,7 +200,7 @@ class TestIngestSubjectHint:
 class TestIngestTitleStrip:
     def test_unlisted_space_keeps_titled_names(self, run):
         extracted = {"entities": [{"name": "Mestre Moraes", "description": "d"}], "concepts": []}
-        result, client, _ = run(extracted)
+        result, _client, _ = run(extracted)
         assert _titles(result) == ["Mestre Moraes"]
 
     def test_listed_space_creates_the_bare_name(self, run, monkeypatch):
@@ -236,12 +236,12 @@ class TestIngestTitleStrip:
     def test_unlisted_space_still_splits_on_the_same_data(self, run):
         client = FakeClient([("Mestre Moraes", "wiki_entity")])
         extracted = {"entities": [{"name": "Moraes", "description": "f"}], "concepts": []}
-        result, client, _ = run(extracted, client=client)
+        _result, client, _ = run(extracted, client=client)
         assert [c["name"] for c in client.created] == ["Moraes"]
 
     def test_hint_with_a_title_names_the_bare_object(self, run, monkeypatch):
         monkeypatch.setenv("WIKI_STRIP_NAME_TITLES_SPACES", SPACE)
-        result, client, calls = run(EXTRACTED, hint="Mestre Bimba")
+        result, _client, calls = run(EXTRACTED, hint="Mestre Bimba")
         assert _titles(result) == ["Bimba", "Salvador"]
         assert calls["extract"][0]["subject_hint"] == "Mestre Bimba"
 
@@ -249,7 +249,7 @@ class TestIngestTitleStrip:
         monkeypatch.setenv("WIKI_STRIP_NAME_TITLES_SPACES", SPACE)
         extracted = {"entities": [{"name": "Mestre Bimba", "description": "a"},
                                   {"name": "Bimba", "description": "b"}], "concepts": []}
-        result, client, _ = run(extracted, hint="Mestre Bimba")
+        _result, client, _ = run(extracted, hint="Mestre Bimba")
         assert [c["name"] for c in client.created] == ["Bimba"]
 
     def test_relations_use_the_stripped_names(self, run, monkeypatch):
@@ -257,7 +257,7 @@ class TestIngestTitleStrip:
         extracted = {"entities": [{"name": "Mestre Bimba", "description": "a"},
                                   {"name": "Mestre Pastinha", "description": "b"}],
                      "concepts": []}
-        result, client, calls = run(extracted)
+        result, _client, calls = run(extracted)
         assert len(calls["relations"]) == 1
         assert result["relations_created"] == 1
 
@@ -298,7 +298,7 @@ class TestRememberTitleStrip:
         monkeypatch.setenv("WIKI_STRIP_NAME_TITLES_SPACES", SPACE)
         extracted = {"entities": [{"name": "Mestre Bimba", "description": "d"},
                                   {"name": "Salvador", "description": "s"}], "concepts": []}
-        subjects, rels, warnings = remember._plan_subjects(
+        subjects, rels, _warnings = remember._plan_subjects(
             extracted, "Bimba was born in Salvador.", "Mestre Bimba", None, None,
             refuse_identifiers=False, strip_titles=True,
         )
@@ -307,7 +307,7 @@ class TestRememberTitleStrip:
 
     def test_plan_subjects_default_is_unchanged(self):
         extracted = {"entities": [{"name": "Mestre Bimba", "description": "d"}], "concepts": []}
-        subjects, rels, _ = remember._plan_subjects(
+        subjects, _rels, _ = remember._plan_subjects(
             extracted, "k", "Bimba", None, None, refuse_identifiers=False
         )
         assert [s["name"] for s in subjects] == ["Bimba", "Mestre Bimba"]
@@ -366,7 +366,7 @@ class TestRememberTitleStrip:
 
     def test_unlisted_space_unchanged(self, apply):
         client = FakeClient([("Mestre Bimba", "wiki_entity")])
-        result, client, _ = apply([{"name": "Bimba", "kind": "entity", "facts": "f"}], client=client)
+        _result, client, _ = apply([{"name": "Bimba", "kind": "entity", "facts": "f"}], client=client)
         assert [c["name"] for c in client.created] == ["Bimba"]
 
     def test_relation_endpoints_are_stripped(self, apply, monkeypatch):

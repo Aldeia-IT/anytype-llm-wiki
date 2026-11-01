@@ -358,6 +358,25 @@ def refuse_identifier_names_spaces() -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
+def strip_name_titles_spaces() -> frozenset[str]:
+    """Resolve WIKI_STRIP_NAME_TITLES_SPACES — comma-separated space IDs.
+
+    An optional per-space naming policy (Aldeia-IT/aldeia-box#1430 N1): in a
+    listed space, ingest and remember drop one leading title word
+    (``NAME_TIER_TITLE_WORDS``: "Mestre Bimba" becomes "Bimba") before they
+    resolve or create an object, so a person has one object under the bare name.
+    Elsewhere names are kept as written. Entries are stripped and empty entries
+    dropped; read at call time. This is the only reader of the variable, so a
+    later move to per-space config stays local to this function.
+
+    Returns:
+        The listed space IDs; an empty set when unset or empty, so by default
+        no space strips titles.
+    """
+    raw = os.environ.get("WIKI_STRIP_NAME_TITLES_SPACES", "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 def lock_dir_path() -> Path:
     """Convenience: WIKI_LOCK_DIR resolved to a pathlib.Path at call time."""
     return Path(lock_dir())

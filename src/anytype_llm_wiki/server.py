@@ -151,7 +151,12 @@ def wiki_bootstrap(space_id: str, domain_tags: list[str] | None = None) -> dict:
 
 
 @mcp.tool()
-def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> dict:
+def wiki_ingest(
+    source: str,
+    space_id: str,
+    domain_hint: str | None = None,
+    subject_hint: str | None = None,
+) -> dict:
     """Ingest a source (URL or local file) into the wiki compile pipeline.
 
     Fetches the source, extracts/derives entities and concepts, resolves them
@@ -163,6 +168,12 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
         source: An http(s) URL or an absolute local file path.
         space_id: Target Anytype space ID.
         domain_hint: Optional domain tag; must be in the space's taxonomy.
+        subject_hint: Optional name of the page's primary subject (an apelido or
+            group name). The extraction prompt names it, the entity that is the
+            subject is created or updated under exactly that name, and
+            ``warnings`` carries ``subject_hint_unmatched`` when no extracted
+            entity is it. A hint the name policy rejects returns ``[CONFIG
+            ERROR] invalid_subject_hint``.
 
     A URL page with no usable content (empty, under 300 visible chars, a bot
     challenge or a JavaScript shell) is refused with ``[DATA ERROR]
@@ -180,7 +191,12 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
     """
     from .wiki.ingest import wiki_ingest as _wiki_ingest
 
-    return _wiki_ingest(source=source, space_id=space_id, domain_hint=domain_hint)
+    return _wiki_ingest(
+        source=source,
+        space_id=space_id,
+        domain_hint=domain_hint,
+        subject_hint=subject_hint,
+    )
 
 
 @mcp.tool()

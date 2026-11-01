@@ -450,6 +450,35 @@ def strip_name(text: str) -> str:
     return _strip_title(_split_name(text)[0], _title_words())
 
 
+def strip_display_title(name: str) -> str:
+    """Remove one leading title word from a display name, keeping the rest as written.
+
+    The display counterpart of ``strip_name`` (same title list, ``_title_words()``,
+    so ``config.NAME_TIER_TITLE_WORDS`` applies): "Mestre Bimba" gives "Bimba",
+    "Contra-Mestre Fulano" gives "Fulano", "Mestre Zé do Lenço" gives "Zé do
+    Lenço". A name that is only a title ("Mestre", "Mestre (Salvador)"), a name
+    without a leading title and a non-string stay as they are.
+
+    Args:
+        name: an object name as extracted or given by a caller.
+
+    Returns:
+        The name without its leading title word; the input when nothing applies.
+    """
+    if not isinstance(name, str):
+        return name
+    base = _split_name(name)[0]
+    title = next((t for t in _title_words() if base.startswith(t + " ")), None)
+    if title is None:
+        return name
+    tokens = list(re.finditer(r"[^\W_]+", name))
+    needed = len(title.split())
+    if len(tokens) <= needed:
+        return name
+    rest = name[tokens[needed - 1].end():].lstrip(" \t-_.,:;")
+    return rest if rest.strip() else name
+
+
 def _keys_of(base: str, paren: str, titles: tuple[str, ...]) -> set[str]:
     """The D13 keys of a split name: its stripped base and, if any, its stripped parenthetical."""
     keys = {_strip_title(base, titles)}
