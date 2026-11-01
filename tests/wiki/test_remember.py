@@ -2611,7 +2611,7 @@ class TestCorePipeline:
         # resolve_entity call, append a second batch, then behave normally.
         injected = {"done": False}
 
-        def resolve_side_effect(client, space_id, type_key, name):
+        def resolve_side_effect(client, space_id, type_key, name, strip_titles=False):
             if not injected["done"]:
                 injected["done"] = True
                 worklog.begin(space_id, [{"name": "LateArrival", "kind": "entity", "facts": "g"}],

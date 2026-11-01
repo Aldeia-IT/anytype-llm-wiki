@@ -222,17 +222,51 @@ def _call_ollama_prompt(
     return parsed, resp
 
 
-def _fit_source(markdown: str, template: str) -> tuple[str, dict | None]:
+_PLACEHOLDER_RE = re.compile(r"\{source\}|\{subject\}")
+
+_SUBJECT_BLOCK = (
+    "\n## PRIMARY SUBJECT\n\n"
+    'The caller says this page\'s primary subject is "{hint}". Name that entity '
+    'exactly "{hint}" in `entities`, and add the top-level field '
+    '`"primary_subject"` to the JSON object, set to the name you gave it. '
+    "Extract every other entity and concept on the page as usual. "
+    "If the page gives the primary subject's legal or full name, record it as a "
+    "fact of the primary subject, not as a separate entity.\n"
+)
+
+
+def _subject_block(subject_hint: str | None) -> str:
+    """The prompt block that names the caller's primary subject; empty without a hint.
+
+    Without a hint the ``{subject}`` placeholder becomes an empty string, so the
+    prompt is byte-identical to the one built before the hint existed.
+    """
+    if not isinstance(subject_hint, str) or not subject_hint.strip():
+        return ""
+    return _SUBJECT_BLOCK.replace("{hint}", subject_hint.strip())
+
+
+def _fill_prompt(template: str, source: str, subject_block: str) -> str:
+    """Fill ``{source}`` and ``{subject}`` in one pass, so text inside the page or
+    the hint that looks like a placeholder is never substituted."""
+    values = {"{source}": source, "{subject}": subject_block}
+    return _PLACEHOLDER_RE.sub(lambda m: values[m.group(0)], template)
+
+
+def _fit_source(
+    markdown: str, template: str, subject_block: str = ""
+) -> tuple[str, dict | None]:
     """Cut ``markdown`` so the whole prompt fits ``extract_max_input_tokens()`` (AC4).
+
+    The budget is measured on the template with ``subject_block`` filled in.
 
     Estimates 3 chars per token (conservative for prose; ``len // 4``
     undercounts) and cuts at the last paragraph break, else line break, inside
     the budget. Returns ``(source, truncated)`` where ``truncated`` is
     ``{"kept_chars", "total_chars"}`` or None when nothing was cut.
     """
-    budget = config.extract_max_input_tokens() * _CHARS_PER_TOKEN - (
-        len(template) - len("{source}")
-    )
+    filled = _fill_prompt(template, "", subject_block)
+    budget = config.extract_max_input_tokens() * _CHARS_PER_TOKEN - len(filled)
     budget = max(budget, 0)
     total = len(markdown)
     if total <= budget:
@@ -247,13 +281,13 @@ def _fit_source(markdown: str, template: str) -> tuple[str, dict | None]:
 
 
 def _call_ollama(
-    base: str, markdown: str
+    base: str, markdown: str, subject_block: str = ""
 ) -> tuple[dict | None, httpx.Response | None, str | None]:
-    """Substitute ``{source}`` into the extraction prompt and stream it.
+    """Fill ``{source}`` and ``{subject}`` into the extraction prompt and stream it.
 
     Returns ``(parsed_or_None, last_resp, failure_reason)``.
     """
-    prompt = _load_prompt().replace("{source}", markdown)
+    prompt = _fill_prompt(_load_prompt(), markdown, subject_block)
     return _call_ollama_prompt_detailed(base, prompt)
 
 
@@ -264,7 +298,9 @@ def _transport_reason(exc: httpx.HTTPError) -> str:
     return f"http_error: {type(exc).__name__}"
 
 
-def extract(markdown: str, space_id: str, **kw) -> dict:
+def extract(
+    markdown: str, space_id: str, subject_hint: str | None = None, **kw
+) -> dict:
     """Run LLM extraction. Best-effort; degrades to empty entities/concepts.
 
     Returns a dict with at least ``entities`` and ``concepts`` keys. On a
@@ -274,10 +310,16 @@ def extract(markdown: str, space_id: str, **kw) -> dict:
     ``http_error: <ExceptionClass or status>``, ``malformed_json``,
     ``output_truncated`` or ``stream_error: <msg>``. When the source had to be cut
     to fit the input cap, ``truncated`` is ``{"kept_chars", "total_chars"}``.
+
+    ``subject_hint`` (Aldeia-IT/aldeia-box#1430) names the page's primary subject:
+    the prompt then asks the model to name that entity exactly so and to return its
+    name as the top-level ``primary_subject``, which survives the output filter. A
+    blank hint is no hint.
     """
     base = os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()
     base = base.rstrip("/")
-    source, truncated = _fit_source(markdown, _load_prompt())
+    subject_block = _subject_block(subject_hint)
+    source, truncated = _fit_source(markdown, _load_prompt(), subject_block)
 
     def _done(result: dict) -> dict:
         if truncated is not None:
@@ -293,7 +335,7 @@ def extract(markdown: str, space_id: str, **kw) -> dict:
     # One repair round: a second identical call when the first parses nothing.
     for attempt in range(2):
         try:
-            parsed, resp, failure = _call_ollama(base, source)
+            parsed, resp, failure = _call_ollama(base, source, subject_block)
         except httpx.HTTPError as exc:
             return _degraded(_transport_reason(exc))
 

@@ -144,3 +144,86 @@ class TestDryRunHarness:
             [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, check=True
         )
         assert out.stdout.strip() == "", out.stdout
+
+
+class TestDryRunSubjectHint:
+    """Aldeia-IT/aldeia-box#1430: --subject-hint reports primary_name and hint_warnings."""
+
+    def _run(self, args, extracted, capsys):
+        with respx.mock:
+            respx.get("https://lalaue.example/acmb").mock(
+                return_value=httpx.Response(
+                    200, text=LALAUE, headers={"content-type": "text/html"}
+                )
+            )
+            generate = respx.post(f"{OLLAMA}/api/generate").mock(
+                return_value=httpx.Response(200, content=_stream(json.dumps(extracted)))
+            )
+            assert _load().main([*args, "https://lalaue.example/acmb"]) == 0
+        return json.loads(capsys.readouterr().out.strip()), generate
+
+    def test_marked_entity_is_renamed_and_the_hint_reaches_the_prompt(self, capsys):
+        extracted = {
+            "entities": [{"name": "Manoel dos Reis Machado", "description": "d"}],
+            "concepts": [],
+            "primary_subject": "Manoel dos Reis Machado",
+        }
+        page, generate = self._run(["--subject-hint", "Mestre Bimba"], extracted, capsys)
+        assert page["primary_name"] == "Mestre Bimba"
+        assert page["marked"] == "Manoel dos Reis Machado"
+        assert page["hint_warnings"] == []
+        assert [e["name"] for e in page["entities"]] == ["Mestre Bimba"]
+        assert 'primary subject is "Mestre Bimba"' in json.loads(
+            generate.calls[0].request.content
+        )["prompt"]
+
+    def test_unmatched_hint_is_reported(self, capsys):
+        extracted = {"entities": [{"name": "Salvador", "description": "d"}], "concepts": []}
+        page, _ = self._run(["--subject-hint", "Mestre Bimba"], extracted, capsys)
+        assert page["primary_name"] is None
+        assert page["marked"] is None
+        assert page["hint_warnings"] == [
+            'subject_hint_unmatched: no extracted entity is the primary subject "Mestre Bimba"'
+        ]
+
+    def test_strip_name_titles_mirrors_a_listed_space(self, capsys):
+        extracted = {
+            "entities": [{"name": "Mestre Bimba", "description": "d"}],
+            "concepts": [],
+        }
+        page, _ = self._run(
+            ["--subject-hint", "Mestre Bimba", "--strip-name-titles"], extracted, capsys
+        )
+        assert page["primary_name"] == "Bimba"
+
+    def test_without_a_hint_the_report_has_null_primary_and_no_warnings(self, capsys):
+        extracted = {"entities": [{"name": "Salvador", "description": "d"}], "concepts": []}
+        page, generate = self._run([], extracted, capsys)
+        assert page["primary_name"] is None and page["hint_warnings"] == []
+        assert page["marked"] is None
+        assert "PRIMARY SUBJECT" not in json.loads(generate.calls[0].request.content)["prompt"]
+
+
+def test_a_hinted_run_with_title_strip_does_not_import_the_indexer():
+    """The hint planning and the title strip need no indexer (and so no Qdrant)."""
+    code = (
+        "import importlib.util, sys;"
+        f"spec = importlib.util.spec_from_file_location('h', {str(SCRIPT)!r});"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "m.fetch_source = lambda url: {'markdown': 'x' * 400, 'is_url': True, 'unusable': None,"
+        " 'raw': None, 'content_type': 'text/html'};"
+        "m._to_markdown = lambda *a, **k: 'x' * 400;"
+        "m.extract = lambda **kw: {'entities': [{'name': 'Mestre Bimba', 'description': 'd'}],"
+        " 'concepts': [], 'primary_subject': 'Mestre Bimba'};"
+        "r = m.dry_run('https://e.x/p', False, 'Bimba', True);"
+        "assert r['primary_name'] == 'Bimba', r;"
+        "bad = [n for n in sys.modules if n.startswith('qdrant_client') or n in ("
+        "'anytype_llm_wiki.indexer', 'anytype_llm_wiki.wiki.ingest',"
+        "'anytype_llm_wiki.wiki.remember')];"
+        "print(','.join(bad))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "", out.stdout

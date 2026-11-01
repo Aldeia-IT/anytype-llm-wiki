@@ -151,7 +151,12 @@ def wiki_bootstrap(space_id: str, domain_tags: list[str] | None = None) -> dict:
 
 
 @mcp.tool()
-def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> dict:
+def wiki_ingest(
+    source: str,
+    space_id: str,
+    domain_hint: str | None = None,
+    subject_hint: str | None = None,
+) -> dict:
     """Ingest a source (URL or local file) into the wiki compile pipeline.
 
     Fetches the source, extracts/derives entities and concepts, resolves them
@@ -163,6 +168,12 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
         source: An http(s) URL or an absolute local file path.
         space_id: Target Anytype space ID.
         domain_hint: Optional domain tag; must be in the space's taxonomy.
+        subject_hint: Optional name of the page's primary subject (an apelido or
+            group name). The extraction prompt names it, the entity that is the
+            subject is created or updated under exactly that name, and
+            ``warnings`` carries ``subject_hint_unmatched`` when no extracted
+            entity is it. A hint the name policy rejects returns ``[CONFIG
+            ERROR] invalid_subject_hint``.
 
     A URL page with no usable content (empty, under 300 visible chars, a bot
     challenge or a JavaScript shell) is refused with ``[DATA ERROR]
@@ -180,7 +191,12 @@ def wiki_ingest(source: str, space_id: str, domain_hint: str | None = None) -> d
     """
     from .wiki.ingest import wiki_ingest as _wiki_ingest
 
-    return _wiki_ingest(source=source, space_id=space_id, domain_hint=domain_hint)
+    return _wiki_ingest(
+        source=source,
+        space_id=space_id,
+        domain_hint=domain_hint,
+        subject_hint=subject_hint,
+    )
 
 
 @mcp.tool()
@@ -270,8 +286,11 @@ def wiki_query(
     Args:
         question: Natural-language question.
         space_id: Target Anytype space ID (must be bootstrapped at the current schema).
-        file_back: True forces filing; False suppresses; None uses the default gate
-            (>= 3 cited sources AND >= 100-word answer).
+        file_back: True forces filing; False suppresses; None uses the space's
+            ``file_back_default`` from the per-space settings file (``false`` =
+            never file back unless the call asks) and otherwise the default gate
+            (>= 3 cited sources AND >= 100-word answer). An explicit True/False
+            always wins over the space default.
         types: Optional subset of wiki type keys to scope retrieval. Intersected with
             the wiki type set; an empty intersection is a config error.
         ingested_after: Optional ISO-8601 datetime lower bound on last_modified_date, inclusive.

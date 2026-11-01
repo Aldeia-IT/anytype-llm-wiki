@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`wiki_ingest` takes a `subject_hint` (Aldeia-IT/aldeia-box#1430).** `wiki_ingest(source,
+  space_id, domain_hint=None, subject_hint=None)` and `wiki-ingest --subject-hint NAME` name the
+  page's primary subject. The extraction prompt gets a `{subject}` block (empty without a hint, so
+  the prompt is byte-identical to before) asking the model to name that entity exactly and to
+  return a top-level `primary_subject`; `_fit_source` measures the filled template. After
+  extraction, `plan_primary_subject` folds entities that are the subject under another spelling
+  (`same_subject`, moved from `remember` to `wiki/util.py` and shared), else renames the entity
+  the model marked, else warns `subject_hint_unmatched`. The primary is never refused by the
+  identifier-name policy and relations point at the renamed object. A candidate that is the hint once
+  one leading title word is removed ("Mestre Bimba" for "Bimba") also matches, in every space; the
+  hint block asks the model to record a legal or full name as a fact, not a separate entity. A blank hint is no hint; a
+  rejected one returns `[CONFIG ERROR] invalid_subject_hint` before the fetch.
+  `scripts/ingest_dry_run.py --subject-hint NAME` reports `primary_name` and `hint_warnings`.
+- **Per-space settings file (Aldeia-IT/aldeia-box#1430).** `spaces.toml` (`WIKI_SPACES_CONFIG`, else
+  `$XDG_CONFIG_HOME/anytype-llm-wiki/spaces.toml`, else `~/.config/...`) with `[spaces."<id>"]`
+  tables holding `refuse_identifier_names` and `strip_name_titles` booleans, resolved in
+  `wiki/space_settings.py`; `config.refuse_identifier_names_spaces()` and
+  `config.strip_name_titles_spaces()` delegate to it. The list variables
+  `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` / `WIKI_STRIP_NAME_TITLES_SPACES` stay and, when set and
+  non-empty, override the file for their setting. A malformed file logs a warning on each read and counts as
+  absent; a missing file is silent; no file and no variables leaves every space off.
+- **Per-space `file_back_default` for `wiki_query` (Aldeia-IT/aldeia-box#1430).** In `spaces.toml`,
+  `file_back_default = false` stops a space from filing answers back unless the call passes
+  `file_back=True`; `"gate"` (the default) keeps today's gate. It applies only when `file_back` is
+  `None`: an explicit `True`/`False` always wins. Any other value makes the file malformed. No env
+  override; WikiLog is unchanged (`config.file_back_default(space_id)`). `WIKI_SPACES_CONFIG` is
+  the way to point several server users with different `$HOME`s at one shared file.
+  `scripts/ingest_dry_run.py` also reports the model's raw `primary_subject` as `marked`.
+- **Opt-in title strip for person names (Aldeia-IT/aldeia-box#1430).** In spaces listed in
+  `WIKI_STRIP_NAME_TITLES_SPACES` (read by `config.strip_name_titles_spaces()`), `wiki_ingest` and
+  `wiki_remember` drop one leading title word (`NAME_TIER_TITLE_WORDS`, via the new
+  `indexer.strip_display_title`) from names, hints and relation endpoints before resolving or
+  creating, and `resolve_entity(..., strip_titles=True)` matches stored names that differ only by
+  a title, so "Mestre Bimba" and "Bimba" stop splitting into two objects. Default empty: no
+  space changes. Existing split pairs are not merged.
+
 - **`wiki_ingest` works on real web pages (Aldeia-IT/aldeia-box#1427).**
   - HTML (URL or local `.html`) is reduced to its main content before markdownify: `script`,
     `style`, `noscript`, `template`, `svg`, `iframe`, `form`, `nav`, `header`, `footer`,

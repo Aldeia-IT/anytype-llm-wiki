@@ -21,7 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote_plus, urlparse, urlsplit, urlunparse, urlunsplit
 
+from ..textfold import fold
 from . import config
+from .names import strip_display_title
 
 # ---------------------------------------------------------------------------
 # normalize_title — exact implementation from the spec
@@ -54,6 +56,131 @@ def normalize_title(raw: str) -> str:
     casefolded = dash_folded.casefold()
     collapsed = _WS_RE.sub(" ", casefolded)
     return collapsed.strip()
+
+
+# ---------------------------------------------------------------------------
+# Subject matching and the primary-subject plan (Aldeia-IT/aldeia-box#1426, #1430)
+# ---------------------------------------------------------------------------
+
+_NON_ALNUM_RUN_RE = re.compile(r"[\W_]+")
+
+
+def _slug_form(name: str) -> str:
+    """Fold a name to its slug form: accents and case folded, every run of
+    non-alphanumerics replaced by one ``-``, ends stripped.
+
+    ``"Associação de Capoeira Mestre Bimba"``,
+    ``"associacao-de-capoeira-mestre-bimba"`` and
+    ``"associacao_de_capoeira_mestre_bimba"`` share one slug form. Comparing the
+    ``_``-separated forms as well would add nothing: both sides fold the same way.
+    """
+    return _NON_ALNUM_RUN_RE.sub("-", fold(name)).strip("-")
+
+
+def _title_stripper(strip_titles: bool):
+    """Return ``names.strip_display_title`` when ``strip_titles``, else identity."""
+    return strip_display_title if strip_titles else (lambda name: name)
+
+
+def same_subject(name: str, hint: str, *, strip_titles: bool = False) -> bool:
+    """True when ``name`` is the hinted subject under another spelling.
+
+    Equal ``normalize_title`` or equal slug form (Aldeia-IT/aldeia-box#1426 D1).
+    With ``strip_titles`` (a space in WIKI_STRIP_NAME_TITLES_SPACES) one leading
+    title word is removed from both sides first, so "Mestre Bimba" is "Bimba".
+
+    Args:
+        name: an extracted or stored name; a non-string is never the subject.
+        hint: the caller's subject name.
+        strip_titles: compare title-stripped forms.
+
+    Returns:
+        Whether the two are the same subject.
+    """
+    if not isinstance(name, str):
+        return False
+    strip = _title_stripper(strip_titles)
+    name, hint = strip(name), strip(hint)
+    if normalize_title(name) == normalize_title(hint):
+        return True
+    slug = _slug_form(name)
+    return bool(slug) and slug == _slug_form(hint)
+
+
+def plan_primary_subject(
+    candidates: list[dict],
+    hint: str | None,
+    marked: str | None,
+    *,
+    strip_titles: bool = False,
+) -> tuple[list[dict], list[str]]:
+    """Name the hinted primary subject among extracted candidates (Aldeia-IT/aldeia-box#1430 D1).
+
+    Shared by ``wiki_ingest`` and the dry-run harness. With ``strip_titles`` the
+    candidate names, the hint and the marker lose one leading title word first,
+    and candidates that become equal are collapsed (the first stays). Then, with a
+    hint:
+
+    1. every candidate that is the hinted subject under another spelling
+       (``same_subject``), or whose name is the hint once one leading title word
+       is removed ("Mestre Bimba" for the hint "Bimba", in every space), is a
+       match; the first becomes the primary, named exactly
+       as the hint, and the others are dropped;
+    2. else the candidate named by ``marked`` (the model's ``primary_subject``,
+       ``normalize_title`` equal) becomes the primary, renamed to the hint;
+    3. else nothing is renamed and the warning
+       ``subject_hint_unmatched: no extracted entity is the primary subject "<hint>"``
+       is returned.
+
+    The primary candidate carries ``"primary": True`` so callers can exempt it
+    from the identifier-name policy. Without a hint the candidates are returned
+    as they are (after the optional title strip).
+
+    Args:
+        candidates: dicts with ``name``, ``facts``, ``kind``; not mutated.
+        hint: the caller's subject name; blank counts as none.
+        marked: the model's ``primary_subject`` field, any type (ignored unless a
+            non-empty string).
+        strip_titles: the space strips leading title words.
+
+    Returns:
+        ``(candidates, warnings)``: new candidate dicts in their original order.
+    """
+    strip = _title_stripper(strip_titles)
+    planned = [dict(c, name=strip(c["name"])) for c in candidates]
+    if strip_titles:
+        # Names that become equal once stripped collapse; the first one wins.
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for cand in planned:
+            key = normalize_title(cand["name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cand)
+        planned = deduped
+    hint = hint.strip() if isinstance(hint, str) else ""
+    if not hint:
+        return planned, []
+
+    hint = strip(hint)
+    strip_one = _title_stripper(True)
+    matches = [
+        i for i, c in enumerate(planned)
+        if same_subject(c["name"], hint) or same_subject(strip_one(c["name"]), hint)
+    ]
+    if not matches and isinstance(marked, str) and marked.strip():
+        key = normalize_title(strip(marked.strip()))
+        matches = [
+            i for i, c in enumerate(planned) if normalize_title(c["name"]) == key
+        ][:1]
+    if not matches:
+        return planned, [
+            f'subject_hint_unmatched: no extracted entity is the primary subject "{hint}"'
+        ]
+    first, extras = matches[0], set(matches[1:])
+    planned[first].update(name=hint, primary=True)
+    return [c for i, c in enumerate(planned) if i not in extras], []
 
 
 # ---------------------------------------------------------------------------

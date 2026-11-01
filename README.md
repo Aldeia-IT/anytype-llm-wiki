@@ -41,7 +41,7 @@ Give autonomous agents a **persistent, typed memory that survives sessions** and
 
 Researching a topic across many sessions means re-fetching the same facts from the web again and again. Ingest findings once and the wiki becomes a **local, cited cache**: future questions are answered from accumulated knowledge first, with a live web search reserved for genuine gaps — fewer tokens, faster answers, and a provenance trail.
 
-→ Concrete example: a **Capoeira genealogy** research project uses it as exactly this kind of buffer — caching lineage and history research so repeated LLM web-searches are avoided.
+→ Concrete example: a **Capoeira genealogy** research project uses it as exactly this kind of buffer — the wiki holds knowledge from external sources read during research, not the project's own published output, so repeated LLM web-searches are avoided.
 
 ## How it works
 
@@ -157,6 +157,8 @@ anytype-llm-wiki wiki-query --space-id <id> \
 wiki_remember(space_id, "Qdrant 1.12 added native multi-tenancy via payload partitioning.", subject_hint="Qdrant")
 wiki_query(space_id, "What do we know about Qdrant multi-tenancy?")
 ```
+`wiki_ingest` takes the same hint: `wiki_ingest(source, space_id, subject_hint="Mestre Bimba")` (CLI `wiki-ingest --subject-hint "Mestre Bimba"`) tells the extractor which entity the page is about, and the extracted entity that is that subject is created or updated under exactly that name instead of whatever spelling the model picked. When no extracted entity is the subject, the result carries `warnings: ["subject_hint_unmatched: ..."]` and nothing is renamed; a hint the name policy rejects returns `[CONFIG ERROR] invalid_subject_hint`.
+
 `subject_hint` names the primary object even when extraction finds other subjects; those are linked to it as `related`. Write `knowledge` as plain facts, with no keys, slugs, file names, URLs or internal labels, and cite sources through `source`. An optional per-space naming policy (`WIKI_REFUSE_IDENTIFIER_NAMES_SPACES`) refuses extracted names shaped like identifiers, e.g. a genealogy space where names are proper names such as apelidos, so keys and labels never become objects.
 
 ## The MCP tools
@@ -166,7 +168,7 @@ wiki_query(space_id, "What do we know about Qdrant multi-tenancy?")
 | `semantic_search` | Search the vault by meaning and keywords, name matches first (hybrid only with `space_id`; pass it for name lookups). `query`, `space_id?`, `types?`, `ingested_after?`, `ingested_before?`, `source_type?`, `domain_tags?`, `limit?` (default results exclude `wiki_source` excerpts unless `types=["wiki_source"]` or `source_type` is given; hits from sources ingested from a URL carry `wiki_url`) |
 | `reindex_anytype` | Trigger an incremental reindex. `space_id?` |
 | `wiki_bootstrap` | Provision the typed wiki schema in a space. `space_id`, `domain_tags?` |
-| `wiki_ingest` | Compile a source (URL or file) into curated, interlinked Objects with provenance; auto-reindex. `source`, `space_id`, `domain_hint?` |
+| `wiki_ingest` | Compile a source (URL or file) into curated, interlinked Objects with provenance; auto-reindex. `source`, `space_id`, `domain_hint?`, `subject_hint?` |
 | `wiki_remember` | Consolidate an agent's natural-language narration into typed Objects (LLM merge/dedup/conflict-flag). Fleet-safe **queue-submit**: concurrent writers never block or lose writes (no read-after-write). `space_id`, `knowledge`, `subject_hint?`, `kind?`, `relations?`, `domain_tags?`, `source?`. `subject_hint` names the primary object (extracted subjects link to it); opted-in spaces refuse identifier-like extracted names |
 | `wiki_query` | Query the wiki for a synthesized, source-cited answer (tiered retrieval + local synthesis); optionally file the answer back. `question`, `space_id`, `file_back?`, `types?`, `ingested_after?`, `ingested_before?`, `source_type?` (no-op — accepted for API symmetry), `domain_tags?` |
 | `wiki_lint` | Read-only structural health check (contradictions, orphans, staleness, asymmetric relations, …), ranked by severity. `space_id`, `severity_threshold?`, `include_duplicates?` |
@@ -210,7 +212,9 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_EXTRACT_OUTPUT_TOKENS` | `4096` | Output budget of extraction calls, sent as `num_predict`; `num_ctx` is sent as max input + output tokens (12288 by default) |
 | `WIKI_ALIAS_ADJUDICATION` | `off` | **⚠️ EXPERIMENTAL — enable at your own risk.** LLM alias-merge in entity resolution (Step 3). Off by default. Only runs on a vetted model; **enabling it on an unvetted model makes the MCP server refuse to start** (loud `[CONFIG ERROR]`). See the warning below. |
 | `WIKI_ALIAS_VETTED_MODELS` | _(empty)_ | Comma-separated extra extraction-model **prefixes** trusted for alias adjudication, unioned with the built-in `qwen3.5-mlx`. Adding your model here is the override (there is no force flag). |
-| `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` | _(empty)_ | Optional per-space naming policy: comma-separated space IDs where `wiki_remember` and `wiki_ingest` refuse extracted names that look like keys, slugs, URLs, file names or snake_case labels, e.g. a genealogy space where names are proper names such as apelidos, so keys and labels never become objects. Empty: nothing is refused in any space. |
+| `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` | _(empty)_ | Optional per-space naming policy: comma-separated space IDs where `wiki_remember` and `wiki_ingest` refuse extracted names that look like keys, slugs, URLs, file names or snake_case labels, e.g. a genealogy space where names are proper names such as apelidos, so keys and labels never become objects. Overrides the `refuse_identifier_names` setting of the [per-space config file](#per-space-settings) when set and non-empty. Empty: the file decides; with no file nothing is refused in any space. |
+| `WIKI_STRIP_NAME_TITLES_SPACES` | _(empty)_ | Optional per-space naming policy: comma-separated space IDs where `wiki_ingest` and `wiki_remember` drop one leading title word (the `NAME_TIER_TITLE_WORDS` list: mestre, mestra, contra-mestre, professor, ... by default) from a name before they look it up or create it, so "Mestre Bimba" and "Bimba" are one object named "Bimba" (the title stays in the facts text). Overrides the `strip_name_titles` setting of the [per-space config file](#per-space-settings) when set and non-empty. Empty: the file decides; with no file names are kept as written in every space. |
+| `WIKI_SPACES_CONFIG` | _(unset)_ | Path of the per-space settings file; default `$XDG_CONFIG_HOME/anytype-llm-wiki/spaces.toml`, else `~/.config/anytype-llm-wiki/spaces.toml`. See [Per-space settings](#per-space-settings). 
 
 > **⚠️ `WIKI_ALIAS_ADJUDICATION` is experimental — leave it off unless you accept the risk.**
 > *What it does:* on a write, when exact- and fuzzy-title matching don't find an existing object, it asks a local LLM whether the new entity is the **same real-world entity** as a lexically-similar existing one (an alias / abbreviation / rename) and, if so, **merges** into it instead of creating a duplicate — automatically catching dupes like `k8s` → `Kubernetes`.
@@ -223,6 +227,21 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_LOCK_DIR` / `WIKI_WORKLOG_DIR` | `~/.local/share/anytype-llm-wiki/{locks,worklog}` | Host-local lock + durable subject work-log. A same-host agent fleet writing one shared vault **must share both** (see [known limitations §10](docs/known-limitations.md)); the work-log holds narrated content transiently — treat as sensitive ([data flow](docs/security-and-data-flow.md)) |
 
 Additional `WIKI_SYNTH_*` and `WIKI_LINT_*` tuning knobs exist with sensible defaults — you won't normally need them.
+
+## Per-space settings
+
+Naming policies are opt-in per space. Put them in a TOML file (`WIKI_SPACES_CONFIG`, else `$XDG_CONFIG_HOME/anytype-llm-wiki/spaces.toml`, else `~/.config/anytype-llm-wiki/spaces.toml`):
+
+```toml
+[spaces."<space id>"]
+refuse_identifier_names = true   # wiki_remember / wiki_ingest refuse key-, slug-, URL- and path-shaped extracted names
+strip_name_titles = true         # drop one leading title word: "Mestre Bimba" becomes the object "Bimba"
+file_back_default = false        # wiki_query: never file the answer back unless the call asks; "gate" (default) = the usual gate
+```
+
+A space or key that is not listed is off (`file_back_default`: `"gate"`). `file_back_default` accepts only `"gate"` or `false`, has no environment override, and applies only when a `wiki_query` call leaves `file_back` unset: an explicit `file_back=True`/`False` always wins. Unknown keys are ignored. The file is read on every call. A file that is not valid TOML, or whose values are not `true`/`false` (for `file_back_default`: not `"gate"` or `false`), logs a warning on each read and is treated as absent (everything off); a missing file is silent. The list variables `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` and `WIKI_STRIP_NAME_TITLES_SPACES` still work and, when set and non-empty, are the answer for their setting (the file is not consulted for it).
+
+The server may run as several users with different `$HOME`s (for example an interactive user and a pipeline user). Point them all at one shared file with `WIKI_SPACES_CONFIG=/path/to/spaces.toml` instead of keeping a per-user copy in `~/.config`.
 
 ## Architecture
 
@@ -270,6 +289,7 @@ Maintained by [Aldeia IT](https://github.com/Aldeia-IT) for our own use and publ
 ## License
 
 MIT. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution licensing (inbound = outbound).
+
 
 ## Trademarks
 

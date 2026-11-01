@@ -7,7 +7,8 @@ imports no Anytype or Qdrant client, creates no object and writes nothing but
 stdout: one JSON object per page.
 
 Usage:
-    uv run python scripts/ingest_dry_run.py [--refuse-identifier-names] <url> [<url> ...]
+    uv run python scripts/ingest_dry_run.py [--refuse-identifier-names] \
+        [--subject-hint NAME] [--strip-name-titles] <url> [<url> ...]
 
 Each object carries: ``url``, ``fetch_seconds``, ``chars_before_strip`` /
 ``chars_after_strip`` (markdown of the whole page vs the main content),
@@ -20,6 +21,16 @@ policy are always listed; with ``--refuse-identifier-names`` the identifier-like
 names are listed too, as if the space were in
 ``WIKI_REFUSE_IDENTIFIER_NAMES_SPACES``. A page the gate refuses is not sent to
 the model. ``fetch_error`` is set when the fetch itself failed.
+
+With ``--subject-hint NAME`` (Aldeia-IT/aldeia-box#1430) the hint goes into the
+extraction prompt and the extracted items run through ``plan_primary_subject``,
+the helper ``wiki_ingest`` uses: ``entities`` / ``concepts`` then show the
+renamed primary, ``primary_name`` is its name (null when none matched) and
+``marked`` is the model's raw ``primary_subject`` (null without a hint or when
+the model gave none) and ``hint_warnings`` lists ``subject_hint_unmatched`` when no
+entity is the subject.
+``--strip-name-titles`` mirrors a space in ``WIKI_STRIP_NAME_TITLES_SPACES``:
+one leading title word is dropped from the names ("Mestre Bimba" becomes "Bimba").
 """
 
 import argparse
@@ -33,6 +44,7 @@ from anytype_llm_wiki.wiki.extraction import (
     sanitize_name,
 )
 from anytype_llm_wiki.wiki.fetch import _to_markdown, fetch_source
+from anytype_llm_wiki.wiki.util import plan_primary_subject
 
 _EXCERPT_CHARS = 1000
 _DEGRADED_PREFIX = "extraction_degraded: "
@@ -61,7 +73,12 @@ def _refused(names: list[str], refuse_identifiers: bool) -> list[str]:
     return refused
 
 
-def dry_run(url: str, refuse_identifiers: bool) -> dict:
+def dry_run(
+    url: str,
+    refuse_identifiers: bool,
+    subject_hint: str | None = None,
+    strip_titles: bool = False,
+) -> dict:
     """Fetch and extract one page; return the report object."""
     report = {
         "url": url,
@@ -78,6 +95,9 @@ def dry_run(url: str, refuse_identifiers: bool) -> dict:
         "truncated": None,
         "extraction_seconds": None,
         "refused_names": [],
+        "primary_name": None,
+        "marked": None,
+        "hint_warnings": [],
     }
     started = time.monotonic()
     fetched = fetch_source(url)
@@ -97,13 +117,31 @@ def dry_run(url: str, refuse_identifiers: bool) -> dict:
         return report
 
     started = time.monotonic()
-    extracted = extract(markdown=markdown, space_id="dry-run")
+    extract_kwargs = {"subject_hint": subject_hint} if subject_hint else {}
+    extracted = extract(markdown=markdown, space_id="dry-run", **extract_kwargs)
     report["extraction_seconds"] = round(time.monotonic() - started, 2)
     error = extracted.get("error")
     report["extraction_error"] = str(error).removeprefix(_DEGRADED_PREFIX) if error else None
     report["truncated"] = extracted.get("truncated")
-    report["entities"] = _items(extracted, "entities", "entity")
-    report["concepts"] = _items(extracted, "concepts", "concept")
+    entities = _items(extracted, "entities", "entity")
+    concepts = _items(extracted, "concepts", "concept")
+    if subject_hint:
+        report["marked"] = extracted.get("primary_subject")
+    if (subject_hint or strip_titles) and not error:
+        planned, report["hint_warnings"] = plan_primary_subject(
+            [dict(i, kind="entity") for i in entities]
+            + [dict(i, kind="concept") for i in concepts],
+            subject_hint,
+            report["marked"],
+            strip_titles=strip_titles,
+        )
+        entities = [{"name": c["name"], "facts": c["facts"]}
+                    for c in planned if c["kind"] == "entity"]
+        concepts = [{"name": c["name"], "facts": c["facts"]}
+                    for c in planned if c["kind"] == "concept"]
+        report["primary_name"] = next((c["name"] for c in planned if c.get("primary")), None)
+    report["entities"] = entities
+    report["concepts"] = concepts
     relations = extracted.get("relations")
     report["relation_count"] = len(relations) if isinstance(relations, list) else 0
     names = [i["name"] for i in report["entities"] + report["concepts"]]
@@ -118,10 +156,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report identifier-like names as refused (as in a listed space)",
     )
+    parser.add_argument(
+        "--subject-hint",
+        default=None,
+        help="the page's primary subject; reports primary_name and hint_warnings",
+    )
+    parser.add_argument(
+        "--strip-name-titles",
+        action="store_true",
+        help="drop one leading title word from names (a space in WIKI_STRIP_NAME_TITLES_SPACES)",
+    )
     parser.add_argument("urls", nargs="+", help="http(s) URLs to dry-run, one at a time")
     args = parser.parse_args(argv)
     for url in args.urls:
-        report = dry_run(url, args.refuse_identifier_names)
+        report = dry_run(
+            url, args.refuse_identifier_names, args.subject_hint, args.strip_name_titles
+        )
         print(json.dumps(report, ensure_ascii=False), flush=True)
     return 0
 

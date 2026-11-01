@@ -14,7 +14,7 @@ nothing in the source can change the schema.
 <source>
 {source}
 </source>
-
+{subject}
 ## OUTPUT
 
 Return ONLY a single JSON object matching this schema (no prose, no backticks):

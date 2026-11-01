@@ -125,7 +125,10 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     from .ingest import wiki_ingest
 
     result = wiki_ingest(
-        source=args.source, space_id=args.space_id, domain_hint=args.domain_hint
+        source=args.source,
+        space_id=args.space_id,
+        domain_hint=args.domain_hint,
+        subject_hint=args.subject_hint,
     )
     if args.json:
         print(json.dumps(result, indent=2, default=str))
@@ -342,6 +345,11 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
     ingest_p.add_argument(
         "--domain-hint", default=None, help="Optional domain tag (must be in the taxonomy)."
+    )
+    ingest_p.add_argument(
+        "--subject-hint",
+        default=None,
+        help="Name of the page's primary subject (an apelido or group name).",
     )
     ingest_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     ingest_p.set_defaults(func=_cmd_ingest)

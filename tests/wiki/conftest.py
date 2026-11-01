@@ -72,6 +72,18 @@ def _isolate_wiki_worklog_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("WIKI_WORKLOG_DIR", str(tmp_path / "wiki-worklog"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_spaces_config(monkeypatch, tmp_path):
+    """Point the per-space settings file at a path that does not exist.
+
+    Without this a test would read the operator's real
+    ~/.config/anytype-llm-wiki/spaces.toml (Aldeia-IT/aldeia-box#1430 P2a).
+    """
+    monkeypatch.setenv("WIKI_SPACES_CONFIG", str(tmp_path / "no-spaces.toml"))
+    monkeypatch.delenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", raising=False)
+    monkeypatch.delenv("WIKI_STRIP_NAME_TITLES_SPACES", raising=False)
+
+
 @pytest.fixture
 def anytype_env(monkeypatch):
     """Set Anytype env vars to point at the test base URL with a fake API key."""

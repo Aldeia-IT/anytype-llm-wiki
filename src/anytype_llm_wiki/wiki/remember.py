@@ -20,13 +20,11 @@ check_remote_endpoint_consent, _write_bidirectional_relations, _maybe_reindex).
 """
 
 import os
-import re
 import time
 from datetime import datetime, timezone
 
 import httpx
 
-from ..textfold import fold
 from . import types_schema
 from . import bootstrap as _bootstrap
 from . import config
@@ -53,6 +51,8 @@ from .ingest import _maybe_reindex as _ingest_maybe_reindex
 from .util import (
     _existing_text,
     normalize_title,
+    _title_stripper,
+    same_subject,
     scrub_credentials,
     scrub_text_urls,
     space_ingest_lock,
@@ -227,32 +227,6 @@ def _build_subjects(extracted: dict) -> list[dict]:
     return subjects
 
 
-_NON_ALNUM_RUN_RE = re.compile(r"[\W_]+")
-
-
-def _slug_form(name: str) -> str:
-    """Fold a name to its slug form: accents and case folded, every run of
-    non-alphanumerics replaced by one ``-``, ends stripped.
-
-    ``"Associação de Capoeira Mestre Bimba"``,
-    ``"associacao-de-capoeira-mestre-bimba"`` and
-    ``"associacao_de_capoeira_mestre_bimba"`` share one slug form. Comparing the
-    ``_``-separated forms as well would add nothing: both sides fold the same way.
-    """
-    return _NON_ALNUM_RUN_RE.sub("-", fold(name)).strip("-")
-
-
-def _same_subject(name: str, hint: str) -> bool:
-    """True when an extracted name is the hinted subject under another spelling:
-    equal ``normalize_title`` or equal slug form (Aldeia-IT/aldeia-box#1426 D1)."""
-    if not isinstance(name, str):
-        return False
-    if normalize_title(name) == normalize_title(hint):
-        return True
-    slug = _slug_form(name)
-    return bool(slug) and slug == _slug_form(hint)
-
-
 def _plan_subjects(
     extracted: dict,
     knowledge: str,
@@ -260,12 +234,13 @@ def _plan_subjects(
     kind: str | None,
     relations: list[dict] | None,
     refuse_identifiers: bool,
+    strip_titles: bool = False,
 ) -> tuple[list[dict], list[dict], list[str]]:
     """Decide the subjects and relations of one remember batch (Aldeia-IT/aldeia-box#1426).
 
     1. Build the extracted subjects.
     2. With a hint, fold (drop silently) every extracted subject that is the
-       hinted subject under another spelling (``_same_subject``).
+       hinted subject under another spelling (``same_subject``).
     3. When ``refuse_identifiers`` (the space opted in through
        WIKI_REFUSE_IDENTIFIER_NAMES_SPACES), drop every remaining extracted
        subject whose name ``is_identifier_like_name`` and warn
@@ -276,15 +251,24 @@ def _plan_subjects(
        caller's ``relations``, unless the caller already gave that pair (either
        direction, by ``normalize_title``).
 
+    With ``strip_titles`` (the space opted in through WIKI_STRIP_NAME_TITLES_SPACES,
+    Aldeia-IT/aldeia-box#1430) one leading title word is removed from the hint,
+    from every extracted name, and the fold and the "caller already linked this
+    pair" check compare the stripped forms: "Mestre Bimba" is "Bimba".
+
     Returns:
         ``(subjects, relations, warnings)``. Without a hint and with no
         surviving subject, ``subjects`` is empty and nothing is created.
     """
     hint = subject_hint if isinstance(subject_hint, str) and subject_hint.strip() else None
-    extracted_subjects = _build_subjects(extracted)
+    strip = _title_stripper(strip_titles)
+    extracted_subjects = [
+        dict(s, name=strip(s["name"])) for s in _build_subjects(extracted)
+    ]
     if hint:
+        hint = strip(hint)
         extracted_subjects = [
-            s for s in extracted_subjects if not _same_subject(s["name"], hint)
+            s for s in extracted_subjects if not same_subject(s["name"], hint)
         ]
 
     warnings: list[str] = []
@@ -304,8 +288,8 @@ def _plan_subjects(
 
     def _pair(a: object, b: object) -> tuple[str, str]:
         return (
-            normalize_title(a) if isinstance(a, str) else "",
-            normalize_title(b) if isinstance(b, str) else "",
+            normalize_title(strip(a)) if isinstance(a, str) else "",
+            normalize_title(strip(b)) if isinstance(b, str) else "",
         )
 
     linked: set[tuple[str, str]] = set()
@@ -424,6 +408,7 @@ def wiki_remember(
         new_subjects, batch_relations, name_warnings = _plan_subjects(
             extracted, knowledge, subject_hint, kind, relations,
             refuse_identifiers=space_id in config.refuse_identifier_names_spaces(),
+            strip_titles=space_id in config.strip_name_titles_spaces(),
         )
 
         base_warnings = list(schema_warnings) + name_warnings
@@ -614,6 +599,9 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
     carries this batch's ``source``/``relations``/``subject``.
     """
     source = meta.get("source")
+    # Aldeia-IT/aldeia-box#1430: in an opted-in space titled names are created
+    # and looked up bare, whenever the batch was queued.
+    strip_titles = space_id in config.strip_name_titles_spaces()
     relations = list(meta.get("relations") or [])
     subject = meta.get("subject") or ""
 
@@ -653,8 +641,11 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         result["source_object_id"] = sid
         return sid
 
+    strip = _title_stripper(strip_titles)
     for subj in items:
         clean_name = sanitize_name(subj["name"])
+        if clean_name is not None:
+            clean_name = strip(clean_name)
         if clean_name is None:
             result["warnings"].append(f"name_policy_rejected: {subj['name']!r}")
             continue
@@ -673,7 +664,9 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         }
 
         try:
-            resolution = resolve_entity(client, space_id, type_key, clean_name)
+            resolution = resolve_entity(
+                client, space_id, type_key, clean_name, strip_titles=strip_titles
+            )
 
             if resolution.get("action") == "update":
                 normalized = normalize_title(clean_name)
@@ -802,18 +795,20 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         for rel in relations:
             if not isinstance(rel, dict):
                 continue
-            from_name = rel.get("from", "")
-            to_name = rel.get("to", "")
+            from_name = strip(rel.get("from", ""))
+            to_name = strip(rel.get("to", ""))
             label = rel.get("label", "related")
             from_id = name_to_id.get(normalize_title(from_name))
             to_id = name_to_id.get(normalize_title(to_name))
             if from_id is None:
                 from_id = _resolve_existing_endpoint(
-                    client, space_id, from_name, name_to_id, kind_by_id
+                    client, space_id, from_name, name_to_id, kind_by_id,
+                    strip_titles=strip_titles,
                 )
             if to_id is None:
                 to_id = _resolve_existing_endpoint(
-                    client, space_id, to_name, name_to_id, kind_by_id
+                    client, space_id, to_name, name_to_id, kind_by_id,
+                    strip_titles=strip_titles,
                 )
             if from_id and to_id:
                 rel_tuples.append((from_id, to_id, label))
@@ -865,12 +860,18 @@ def _resolve_existing_endpoint(
     name: str,
     name_to_id: dict[str, str],
     kind_by_id: dict[str, str],
+    strip_titles: bool,
 ) -> str | None:
     """Resolve a relation-endpoint name to an EXISTING object id (entity or
     concept) for cross-batch / resume relations whose endpoint was written by a
     prior run. Returns the id or None; caches a hit into name_to_id/kind_by_id so
     the unresolved-warning check and _write_bidirectional_relations see it.
+
+    ``strip_titles`` (the space is in WIKI_STRIP_NAME_TITLES_SPACES,
+    Aldeia-IT/aldeia-box#1430): the name loses its leading title word and the
+    lookup also matches stored names that differ only by one.
     """
+    name = _title_stripper(strip_titles)(name)
     if not name:
         return None
     key = normalize_title(name)
@@ -878,7 +879,9 @@ def _resolve_existing_endpoint(
         return name_to_id[key]
     for type_key, subj_kind in (("wiki_entity", "entity"), ("wiki_concept", "concept")):
         try:
-            res = resolve_entity(client, space_id, type_key, name)
+            res = resolve_entity(
+                client, space_id, type_key, name, strip_titles=strip_titles
+            )
         except (httpx.HTTPError, KeyError, ValueError, TypeError):
             continue
         if res.get("action") == "update":
