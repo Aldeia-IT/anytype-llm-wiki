@@ -214,6 +214,7 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_ALIAS_VETTED_MODELS` | _(empty)_ | Comma-separated extra extraction-model **prefixes** trusted for alias adjudication, unioned with the built-in `qwen3.5-mlx`. Adding your model here is the override (there is no force flag). |
 | `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` | _(empty)_ | Optional per-space naming policy: comma-separated space IDs where `wiki_remember` and `wiki_ingest` refuse extracted names that look like keys, slugs, URLs, file names or snake_case labels, e.g. a genealogy space where names are proper names such as apelidos, so keys and labels never become objects. Overrides the `refuse_identifier_names` setting of the [per-space config file](#per-space-settings) when set and non-empty. Empty: the file decides; with no file nothing is refused in any space. |
 | `WIKI_STRIP_NAME_TITLES_SPACES` | _(empty)_ | Optional per-space naming policy: comma-separated space IDs where `wiki_ingest` and `wiki_remember` drop one leading title word (the `NAME_TIER_TITLE_WORDS` list: mestre, mestra, contra-mestre, professor, ... by default) from a name before they look it up or create it, so "Mestre Bimba" and "Bimba" are one object named "Bimba" (the title stays in the facts text). Overrides the `strip_name_titles` setting of the [per-space config file](#per-space-settings) when set and non-empty. Empty: the file decides; with no file names are kept as written in every space. |
+| `WIKI_SPACES_CONFIG` | _(unset)_ | Path of the per-space settings file; default `$XDG_CONFIG_HOME/anytype-llm-wiki/spaces.toml`, else `~/.config/anytype-llm-wiki/spaces.toml`. See [Per-space settings](#per-space-settings). 
 
 > **⚠️ `WIKI_ALIAS_ADJUDICATION` is experimental — leave it off unless you accept the risk.**
 > *What it does:* on a write, when exact- and fuzzy-title matching don't find an existing object, it asks a local LLM whether the new entity is the **same real-world entity** as a lexically-similar existing one (an alias / abbreviation / rename) and, if so, **merges** into it instead of creating a duplicate — automatically catching dupes like `k8s` → `Kubernetes`.
@@ -226,6 +227,18 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_LOCK_DIR` / `WIKI_WORKLOG_DIR` | `~/.local/share/anytype-llm-wiki/{locks,worklog}` | Host-local lock + durable subject work-log. A same-host agent fleet writing one shared vault **must share both** (see [known limitations §10](docs/known-limitations.md)); the work-log holds narrated content transiently — treat as sensitive ([data flow](docs/security-and-data-flow.md)) |
 
 Additional `WIKI_SYNTH_*` and `WIKI_LINT_*` tuning knobs exist with sensible defaults — you won't normally need them.
+
+## Per-space settings
+
+Naming policies are opt-in per space. Put them in a TOML file (`WIKI_SPACES_CONFIG`, else `$XDG_CONFIG_HOME/anytype-llm-wiki/spaces.toml`, else `~/.config/anytype-llm-wiki/spaces.toml`):
+
+```toml
+[spaces."<space id>"]
+refuse_identifier_names = true   # wiki_remember / wiki_ingest refuse key-, slug-, URL- and path-shaped extracted names
+strip_name_titles = true         # drop one leading title word: "Mestre Bimba" becomes the object "Bimba"
+```
+
+A space or key that is not listed is off. Unknown keys are ignored. The file is read on every call. A file that is not valid TOML, or whose values are not `true`/`false`, logs a warning on each read and is treated as absent (everything off); a missing file is silent. The list variables `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` and `WIKI_STRIP_NAME_TITLES_SPACES` still work and, when set and non-empty, are the answer for their setting (the file is not consulted for it).
 
 ## Architecture
 
@@ -275,20 +288,6 @@ Maintained by [Aldeia IT](https://github.com/Aldeia-IT) for our own use and publ
 MIT. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution licensing (inbound = outbound).
 
 
-## Per-space settings
-
-Naming policies are opt-in per space. Put them in a TOML file (`WIKI_SPACES_CONFIG`, else `$XDG_CONFIG_HOME/anytype-llm-wiki/spaces.toml`, else `~/.config/anytype-llm-wiki/spaces.toml`):
-
-```toml
-[spaces."<space id>"]
-refuse_identifier_names = true   # wiki_remember / wiki_ingest refuse key-, slug-, URL- and path-shaped extracted names
-strip_name_titles = true         # drop one leading title word: "Mestre Bimba" becomes the object "Bimba"
-```
-
-A space or key that is not listed is off. Unknown keys are ignored. The file is read on every call. A file that is not valid TOML, or whose values are not `true`/`false`, logs one warning and is treated as absent (everything off); a missing file is silent. The list variables `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` and `WIKI_STRIP_NAME_TITLES_SPACES` still work and, when set and non-empty, are the answer for their setting (the file is not consulted for it).
-
 ## Trademarks
 
 Anytype is a trademark of Any Association. This project is not affiliated with, sponsored by, or endorsed by Any Association or the Anytype project; the name is used solely to identify the platform this software integrates with.
-
-| `WIKI_SPACES_CONFIG` | _(unset)_ | Path of the per-space settings file; default `$XDG_CONFIG_HOME/anytype-llm-wiki/spaces.toml`, else `~/.config/anytype-llm-wiki/spaces.toml`. See [Per-space settings](#per-space-settings). |

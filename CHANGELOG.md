@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wiki/space_settings.py`; `config.refuse_identifier_names_spaces()` and
   `config.strip_name_titles_spaces()` delegate to it. The list variables
   `WIKI_REFUSE_IDENTIFIER_NAMES_SPACES` / `WIKI_STRIP_NAME_TITLES_SPACES` stay and, when set and
-  non-empty, override the file for their setting. A malformed file logs one warning and counts as
+  non-empty, override the file for their setting. A malformed file logs a warning on each read and counts as
   absent; a missing file is silent; no file and no variables leaves every space off.
 - **Opt-in title strip for person names (Aldeia-IT/aldeia-box#1430).** In spaces listed in
   `WIKI_STRIP_NAME_TITLES_SPACES` (read by `config.strip_name_titles_spaces()`), `wiki_ingest` and

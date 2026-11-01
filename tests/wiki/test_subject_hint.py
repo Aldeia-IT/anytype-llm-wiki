@@ -38,12 +38,20 @@ class TestStripNameTitlesSpaces:
         monkeypatch.setenv("WIKI_STRIP_NAME_TITLES_SPACES", "sp-b")
         assert config.strip_name_titles_spaces() == frozenset({"sp-b"})
 
-    def test_is_the_only_reader_of_the_env_var(self):
+    @pytest.mark.parametrize(
+        "var",
+        [
+            "WIKI_STRIP_NAME_TITLES_SPACES",
+            "WIKI_REFUSE_IDENTIFIER_NAMES_SPACES",
+            "WIKI_SPACES_CONFIG",
+        ],
+    )
+    def test_is_the_only_reader_of_the_env_var(self, var):
         """Env list and file resolve in one module (space_settings), config delegates."""
         readers = [
             p.relative_to(SRC).as_posix()
             for p in SRC.rglob("*.py")
-            if re.search(r"""["']WIKI_STRIP_NAME_TITLES_SPACES["']""", p.read_text(encoding="utf-8"))
+            if re.search(rf"""["']{var}["']""", p.read_text(encoding="utf-8"))
         ]
         assert readers == ["wiki/space_settings.py"]
 

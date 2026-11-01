@@ -284,7 +284,7 @@ def resolve_entity(
         candidate_key = normalize_title(indexer.strip_display_title(candidate_title))
         for obj in same_type:
             stored = normalize_title(indexer.strip_display_title(obj.get("name", "")))
-            if stored == candidate_key:
+            if candidate_key and stored == candidate_key:
                 return {"action": "update", "target": obj}
 
     # Step 2 — fuzzy title match over same-type results.
