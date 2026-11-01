@@ -279,3 +279,69 @@ class TestFetchSource:
         assert fetched["is_url"] is False
         assert fetched["unusable"] is None
         assert fetched["markdown"] == ""
+
+
+class TestReviewR1:
+    """Coordinator diff review r1 (Aldeia-IT/aldeia-box#1427): B1, B2, N2."""
+
+    def test_b1_header_inside_article_keeps_the_title(self):
+        """WordPress layout: the post title sits in <article><header>."""
+        from anytype_llm_wiki.wiki.fetch import _to_markdown
+
+        html = (
+            "<html><body><header class='site'><nav>Home Blog Contact</nav>"
+            "<p>Site tagline here</p></header>"
+            "<main><article><header><h1>Grupo Real Title</h1>"
+            "<p class='meta'>Posted on 2024-05-01</p></header>"
+            f"<p>{_ARTICLE_TEXT * 3}</p>"
+            "<footer><p>Tags: capoeira, roda</p></footer></article></main>"
+            "<footer class='site'>Copyright site footer</footer></body></html>"
+        )
+        md = _to_markdown(html, "text/html")
+        assert md.startswith("# Grupo Real Title"), md[:120]
+        assert "Tags: capoeira" in md, "an article footer is content"
+        assert "Site tagline" not in md and "Home Blog" not in md
+        assert "Copyright site footer" not in md
+
+    def test_b1_page_header_outside_root_still_removed_without_main(self):
+        from anytype_llm_wiki.wiki.fetch import _to_markdown
+
+        md = _to_markdown(LALAUE, "text/html")
+        assert md.startswith("# Associação De Capoeira Mestre Bimba")
+        assert "OUR MISSION" not in md and "Copyright" not in md
+
+    def test_b2_page_wrapped_in_one_form_keeps_its_content(self):
+        """ASP.NET WebForms wraps the whole body in <form id='aspnetForm'>."""
+        from anytype_llm_wiki.wiki.fetch import _to_markdown, usable_content_verdict
+
+        html = (
+            "<html><body><form id='aspnetForm' method='post'>"
+            "<input type='hidden' name='__VIEWSTATE' value='x'>"
+            "<div class='search'><form><input name='q'>Search the site</form></div>"
+            f"<div><h1>Mestre Bimba</h1><p>{_ARTICLE_TEXT * 3}</p></div>"
+            "</form></body></html>"
+        )
+        md = _to_markdown(html, "text/html")
+        assert md.startswith("# Mestre Bimba"), md[:120]
+        assert "graduation system" in md
+        assert usable_content_verdict(html, md) is None
+
+    def test_b2_small_forms_still_removed(self):
+        from anytype_llm_wiki.wiki.fetch import strip_boilerplate
+
+        html = (
+            f"<html><body><article><h1>Roda</h1><p>{_ARTICLE_TEXT * 3}</p>"
+            "<form class='contact'><label>Your message</label><textarea></textarea>"
+            "<button>Send us a message</button></form></article></body></html>"
+        )
+        out = strip_boilerplate(html)
+        assert "graduation system" in out
+        assert "Send us a message" not in out and "Your message" not in out
+
+    def test_n2_fetch_url_delegates_to_fetch_source(self, monkeypatch):
+        from anytype_llm_wiki.wiki import fetch as fetch_mod
+
+        monkeypatch.setattr(
+            fetch_mod, "fetch_source", lambda source: {"markdown": f"md for {source}"}
+        )
+        assert fetch_mod.fetch_url("https://x.example/") == "md for https://x.example/"

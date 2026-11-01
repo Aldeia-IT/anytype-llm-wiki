@@ -176,6 +176,19 @@ class TestExcerptScrub:
         assert "https://example.com/page" in out
         assert out.endswith(" for more.")
 
+    def test_n1_url_match_stops_at_closing_delimiters(self):
+        from anytype_llm_wiki.wiki.util import scrub_text_urls
+
+        text = (
+            "[x](https://u:pw@ex.org/a?t=1) and <https://ex.org/b?k=2> and "
+            "\"https://ex.org/c?s=3\" and 'https://ex.org/d?s=4' and [https://ex.org/e?s=5]"
+        )
+        out = scrub_text_urls(text)
+        assert out == (
+            "[x](https://ex.org/a) and <https://ex.org/b> and "
+            "\"https://ex.org/c\" and 'https://ex.org/d' and [https://ex.org/e]"
+        ), out
+
 
 class TestRememberSourceScrub:
     """R5: the agent Source's name and excerpt keep the note's text, lose the credential."""
