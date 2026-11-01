@@ -20,11 +20,13 @@ check_remote_endpoint_consent, _write_bidirectional_relations, _maybe_reindex).
 """
 
 import os
+import re
 import time
 from datetime import datetime, timezone
 
 import httpx
 
+from ..textfold import fold
 from . import types_schema
 from . import bootstrap as _bootstrap
 from . import config
@@ -33,6 +35,7 @@ from .extraction import (
     check_remote_endpoint_consent,
     consolidate,
     extract,
+    is_identifier_like_name,
     sanitize_name,
     sanitize_property_value,
 )
@@ -223,6 +226,102 @@ def _build_subjects(extracted: dict) -> list[dict]:
     return subjects
 
 
+_NON_ALNUM_RUN_RE = re.compile(r"[\W_]+")
+
+
+def _slug_form(name: str) -> str:
+    """Fold a name to its slug form: accents and case folded, every run of
+    non-alphanumerics replaced by one ``-``, ends stripped.
+
+    ``"Associação de Capoeira Mestre Bimba"``,
+    ``"associacao-de-capoeira-mestre-bimba"`` and
+    ``"associacao_de_capoeira_mestre_bimba"`` share one slug form. Comparing the
+    ``_``-separated forms as well would add nothing: both sides fold the same way.
+    """
+    return _NON_ALNUM_RUN_RE.sub("-", fold(name)).strip("-")
+
+
+def _same_subject(name: str, hint: str) -> bool:
+    """True when an extracted name is the hinted subject under another spelling:
+    equal ``normalize_title`` or equal slug form (Aldeia-IT/aldeia-box#1426 D1)."""
+    if not isinstance(name, str):
+        return False
+    if normalize_title(name) == normalize_title(hint):
+        return True
+    slug = _slug_form(name)
+    return bool(slug) and slug == _slug_form(hint)
+
+
+def _plan_subjects(
+    extracted: dict,
+    knowledge: str,
+    subject_hint: str | None,
+    kind: str | None,
+    relations: list[dict] | None,
+    refuse_identifiers: bool,
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Decide the subjects and relations of one remember batch (Aldeia-IT/aldeia-box#1426).
+
+    1. Build the extracted subjects.
+    2. With a hint, fold (drop silently) every extracted subject that is the
+       hinted subject under another spelling (``_same_subject``).
+    3. When ``refuse_identifiers`` (the space opted in through
+       WIKI_REFUSE_IDENTIFIER_NAMES_SPACES), drop every remaining extracted
+       subject whose name ``is_identifier_like_name`` and warn
+       ``name_policy_rejected: identifier_like: <name>``.
+    4. With a hint, the hint is the primary subject, first in the list (kind from
+       ``kind``, facts = the whole ``knowledge``; never refused by step 3), and
+       each surviving secondary gets a ``related`` relation from it, after the
+       caller's ``relations``, unless the caller already gave that pair (either
+       direction, by ``normalize_title``).
+
+    Returns:
+        ``(subjects, relations, warnings)``. Without a hint and with no
+        surviving subject, ``subjects`` is empty and nothing is created.
+    """
+    hint = subject_hint if isinstance(subject_hint, str) and subject_hint.strip() else None
+    extracted_subjects = _build_subjects(extracted)
+    if hint:
+        extracted_subjects = [
+            s for s in extracted_subjects if not _same_subject(s["name"], hint)
+        ]
+
+    warnings: list[str] = []
+    secondaries: list[dict] = []
+    for subj in extracted_subjects:
+        if refuse_identifiers and is_identifier_like_name(subj["name"]):
+            warnings.append(f"name_policy_rejected: identifier_like: {subj['name']}")
+            continue
+        secondaries.append(subj)
+
+    batch_relations = list(relations or [])
+    if not hint:
+        return secondaries, batch_relations, warnings
+
+    hint_kind = "concept" if kind == "concept" else "entity"
+    primary = {"name": hint, "kind": hint_kind, "facts": knowledge}
+
+    def _pair(a: object, b: object) -> tuple[str, str]:
+        return (
+            normalize_title(a) if isinstance(a, str) else "",
+            normalize_title(b) if isinstance(b, str) else "",
+        )
+
+    linked: set[tuple[str, str]] = set()
+    for rel in batch_relations:
+        if isinstance(rel, dict):
+            pair = _pair(rel.get("from"), rel.get("to"))
+            linked.update({pair, pair[::-1]})
+    for subj in secondaries:
+        pair = _pair(hint, subj["name"])
+        if pair in linked:
+            continue
+        batch_relations.append({"from": hint, "to": subj["name"], "label": "related"})
+        linked.update({pair, pair[::-1]})
+
+    return [primary, *secondaries], batch_relations, warnings
+
+
 def _type_for_kind(kind: str) -> tuple[str, str, str]:
     """Return (type_key, type_label, property_key) for a subject kind.
 
@@ -317,16 +416,18 @@ def wiki_remember(
         ):
             return _error_remember_result(str(extracted["error"]))
 
-        new_subjects = _build_subjects(extracted)
-        if not new_subjects and subject_hint:
-            hint_kind = "concept" if kind == "concept" else "entity"
-            new_subjects = [
-                {"name": subject_hint, "kind": hint_kind, "facts": knowledge}
-            ]
+        # Subjects are planned before the work-log append so a pending batch
+        # already carries clean names (Aldeia-IT/aldeia-box#1426). The refusal
+        # applies only in opted-in spaces; its warnings ride on base_warnings:
+        # drained, queued and degraded results all report them.
+        new_subjects, batch_relations, name_warnings = _plan_subjects(
+            extracted, knowledge, subject_hint, kind, relations,
+            refuse_identifiers=space_id in config.refuse_identifier_names_spaces(),
+        )
 
-        base_warnings = list(schema_warnings)
+        base_warnings = list(schema_warnings) + name_warnings
         meta = {
-            "relations": relations or [],
+            "relations": batch_relations,
             "source": source,
             "subject": knowledge[:50],
             "domain_tags": domain_tags or [],  # #336 D3: thread into meta (bug fix)

@@ -355,11 +355,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--knowledge", required=True, help="Natural-language narration to remember."
     )
     remember_p.add_argument(
-        "--subject-hint", default=None, help="Optional entity/concept title nudge."
+        "--subject-hint", default=None,
+        help=(
+            "Optional title of the primary subject: names the object even when "
+            "extraction finds subjects, which are linked to it as related. Keep "
+            "keys, slugs, file names, URLs and internal labels out of --knowledge "
+            "(cite sources via --source); spaces listed in "
+            "WIKI_REFUSE_IDENTIFIER_NAMES_SPACES refuse extracted names shaped "
+            "like them."
+        ),
     )
     remember_p.add_argument(
         "--kind", default=None, choices=["entity", "concept"],
-        help="Optional kind hint for the subject_hint fallback.",
+        help="Kind of the --subject-hint primary (default entity).",
     )
     remember_p.add_argument(
         "--source", default=None, help="Optional descriptive provenance note."

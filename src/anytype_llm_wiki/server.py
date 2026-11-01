@@ -194,11 +194,26 @@ def wiki_remember(
     contradictions are flagged (wiki_status=needs-review, never silently
     overwritten). Re-asserting the same knowledge converges to a no-op.
 
+    Naming: subject_hint names the primary subject even when extraction finds
+    subjects; the primary gets the whole knowledge text. Extracted subjects that
+    are the hinted subject under another spelling fold into it; the others are
+    created too and linked to it with a "related" relation. Optional per-space
+    naming policy: in spaces listed in WIKI_REFUSE_IDENTIFIER_NAMES_SPACES,
+    extracted names that look like keys, slugs, URLs, file names or snake_case
+    labels are refused (warning "name_policy_rejected: identifier_like: <name>"),
+    e.g. a genealogy space where names are proper names such as apelidos, so keys
+    and labels never become objects. Write knowledge as plain external facts: no
+    keys, slugs, file names, URLs or internal labels in it; cite sources through
+    `source`.
+
     Args:
         space_id: Target Anytype space ID (must be bootstrapped at schema >= 0.3.1).
         knowledge: Natural-language narration (non-empty; <= 32000 characters).
-        subject_hint: Optional title to seed entity resolution if extraction is empty.
-        kind: Optional "entity" or "concept" hint for the subject_hint fallback.
+        subject_hint: Optional title of the primary subject; it names the object
+            even when extraction finds subjects, and is never refused by the
+            naming policy.
+        kind: Optional "concept" makes the subject_hint primary a concept;
+            anything else makes it an entity.
         relations: Optional [{"from", "to", "label"}] links between named subjects.
         domain_tags: Optional domain tags; each must exist in the space taxonomy.
         source: Optional provenance note; "conversation" in it selects the
