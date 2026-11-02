@@ -32,6 +32,10 @@ dependencies = [
     # Lexical BM25 signal for hybrid retrieval (Aldeia-IT/aldeia-box#327). Apache-2.0; 8.6 kB wheel;
     # numpy-only (already a transitive dep of qdrant-client). Zero new downloads.
     "rank-bm25>=0.2.2,<1.0.0",
+    # Main-content extraction for fetched pages (Aldeia-IT/aldeia-box#1432). Apache-2.0;
+    # strip_boilerplate stays as the recovery pass and fallback. Its tree (lxml, justext,
+    # htmldate, courlan, tld …) is recorded in NOTICE.
+    "trafilatura>=2.3.1,<3",
 ]
 
 [project.urls]

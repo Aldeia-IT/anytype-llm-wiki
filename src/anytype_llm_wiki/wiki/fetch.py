@@ -3,7 +3,9 @@
 Adapts the master spec's reference SSRF implementation (§SSRF protections).
 URL fetches and every redirect hop are validated against the RESOLVED IP
 (categorical private/loopback/link-local/reserved check — addendum item 4),
-NOT textual host matching. HTML is converted to markdown via ``markdownify``.
+NOT textual host matching. HTML is reduced to its main content with
+``trafilatura`` (``strip_boilerplate`` recovers what it drops and is the
+fallback) and converted to markdown (Aldeia-IT/aldeia-box#1432).
 
 All rejections surface to the caller as a ``[DATA ERROR] ssrf_blocked: ...``
 string; the function never raises for an unsafe URL — it returns the marker
@@ -11,6 +13,7 @@ string so the ingest pipeline can short-circuit cleanly.
 """
 
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -20,6 +23,8 @@ import httpx
 
 from .. import __version__
 from . import config
+
+_log = logging.getLogger(__name__)
 
 # Descriptive User-Agent sent on every fetch hop. Wikimedia's bot policy (and
 # other sites) reject the default ``python-httpx/x.y`` with a 403.
@@ -161,8 +166,12 @@ _CHALLENGE_MARKERS = (
 # challenge only on a page with no usable text of its own.
 _CAPTCHA_MARKERS = ("g-recaptcha", "h-captcha", "cf-turnstile")
 _JS_MOUNT_IDS = re.compile(r"^(root|app|__next)$")
-_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
-_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# A markdown link/image target: an <angle-bracketed> URL (trafilatura) or one that
+# may hold balanced parentheses (Wikipedia "Santo_Amaro_(Bahia)"), plus an optional
+# "title" (markdownify), so the label is all that stays visible.
+_MD_TARGET = r'\((?:<[^>]*>|(?:[^()\s]|\([^()\s]*\))*)(?:\s+"[^"]*")?\)'
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]" + _MD_TARGET)
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]" + _MD_TARGET)
 _MD_BARE_URL_RE = re.compile(r"<?https?://\S+>?")
 _MD_SYNTAX_RE = re.compile(r"[#*_>`|~=\[\]-]+")
 
@@ -242,16 +251,24 @@ def strip_boilerplate(html: str) -> str:
 def _to_markdown(text: str, content_type: str, *, strip: bool = True) -> str:
     """Convert HTML to markdown; pass plain text/markdown through unchanged.
 
-    HTML is reduced to its main content first (``strip_boilerplate``) unless
-    ``strip`` is False (the dry-run harness measures the unstripped size).
+    HTML is reduced to its main content first (``extract_main_markdown``)
+    unless ``strip`` is False (the dry-run harness measures the unstripped size).
     """
     if "html" in (content_type or "").lower() or _looks_like_html(text):
-        from markdownify import markdownify as _md
-
-        html = strip_boilerplate(text) if strip else text
-        md = _md(html, heading_style="ATX")
-        return re.sub(r"\n{3,}", "\n\n", md).strip()
+        return extract_main_markdown(text) if strip else _html_to_markdown(text)
     return text
+
+
+def _html_to_markdown(html: str) -> str:
+    """Convert ``html`` to ATX markdown with runs of blank lines collapsed."""
+    from markdownify import markdownify as _md
+
+    return _collapse_blank_lines(_md(html, heading_style="ATX"))
+
+
+def _collapse_blank_lines(markdown: str) -> str:
+    """Collapse runs of blank lines in ``markdown`` to one and strip its ends."""
+    return re.sub(r"\n{3,}", "\n\n", markdown).strip()
 
 
 def markdown_visible_text(markdown: str) -> str:
@@ -307,6 +324,150 @@ def usable_content_verdict(raw: str, markdown: str) -> str | None:
     if len(visible) < _MIN_VISIBLE_CHARS:
         return f"too_little_text ({len(visible)} chars)"
     return None
+
+
+# Aldeia-IT/aldeia-box#1432 D10: trafilatura leads; strip_boilerplate lines it
+# lacks are appended, so no body text the old path kept is lost (D9).
+# There is deliberately no length floor (D11a): recall comes first, and short lines
+# can be body text (captions, dates, a mestre's name line, short interview answers).
+# A missing baseline line whose visible text is at least this share link labels is
+# navigation, so it is not recovered.
+_RECOVER_MAX_LINK_SHARE = 0.5
+# A baseline line counts as present only when its whole word sequence occurs in
+# trafilatura's text on word boundaries: a check on part of the line misses text
+# trafilatura cut from its middle (<time>, <label>, <button>), and a check without
+# boundaries finds a short line ("Sim.") inside another word ("simples").
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+# A "](target)" left on a line after whole links are removed: the end of a link
+# that spans several lines (a card wrapped in <a>), whose target is not body text.
+_MD_DANGLING_TARGET_RE = re.compile(r"\]" + _MD_TARGET)
+_MD_H1_RE = re.compile(r"^#\s+(.+?)[\s#]*$")
+
+
+def _words(markdown: str) -> str:
+    """Lower-cased visible words of ``markdown``, space-joined with a space at
+    each end so that ``f" {key} " in text`` matches on word boundaries only.
+
+    Inline HTML tags and dangling link targets are dropped first, so text the two
+    extractors render differently (``<sup>`` footnotes, multi-line links) compares
+    equal.
+    """
+    text = _MD_LINK_RE.sub(r"\1", _MD_IMAGE_RE.sub(r"\1", markdown or ""))
+    text = _MD_DANGLING_TARGET_RE.sub(" ", _HTML_TAG_RE.sub(" ", text))
+    words = re.findall(r"\w+", markdown_visible_text(text).lower())
+    return " " + " ".join(words) + " "
+
+
+def _is_chrome_line(line: str) -> bool:
+    """True for a markdown line that is navigation-like: no visible text, or at
+    least ``_RECOVER_MAX_LINK_SHARE`` of it is link labels."""
+    visible = markdown_visible_text(line)
+    if not visible:
+        return True
+    labels = _MD_LINK_RE.findall(_MD_IMAGE_RE.sub(r"\1", line))
+    link_chars = sum(len(markdown_visible_text(label)) for label in labels)
+    return link_chars >= _RECOVER_MAX_LINK_SHARE * len(visible)
+
+
+def _recover_missing_lines(primary: str, baseline: str) -> str:
+    """Append to ``primary`` every ``baseline`` line it lacks, in baseline order.
+
+    A line is present when its whole word sequence occurs in ``primary``
+    (``_words``). Chrome-like lines (``_is_chrome_line``) and repeats are skipped;
+    images keep only their alt text. Recovered lines go at the end because their
+    position relative to ``primary``'s text is unknown.
+
+    :param primary: trafilatura's markdown.
+    :param baseline: ``strip_boilerplate``'s markdown for the same page.
+    :returns: ``primary``, followed by the recovered lines when there are any.
+    """
+    present = _words(primary)
+    appended: set[str] = set()
+    missing: list[str] = []
+    for line in baseline.splitlines():
+        key = _words(line)
+        if not key.strip() or _is_chrome_line(line) or key in present or key in appended:
+            continue
+        appended.add(key)
+        missing.append(_MD_IMAGE_RE.sub(r"\1", line).strip())
+    if not missing:
+        return primary
+    return primary + "\n\n" + "\n\n".join(missing)
+
+
+def _trafilatura_extract(html: str) -> tuple[str, str | None]:
+    """Run trafilatura in recall mode on ``html``; return ``(markdown, title)``.
+
+    ``include_images=True`` keeps trafilatura from pruning every block whose class
+    contains "caption" (a gallery overlay swallowed an interview on a trial page);
+    the image markdown is then removed. The page is parsed once; the metadata is
+    read before ``extract`` prunes the tree. Works on the string only: no network.
+    Any trafilatura failure yields ``("", None)`` so the caller falls back.
+    """
+    import trafilatura
+
+    try:
+        tree = trafilatura.load_html(html)
+    except Exception as exc:  # noqa: BLE001 — untrusted HTML must never fail a fetch
+        _log.debug("trafilatura.load_html failed, using strip_boilerplate: %s", exc)
+        return "", None
+    if tree is None:
+        return "", None
+    try:
+        title = getattr(trafilatura.extract_metadata(tree), "title", None)
+    except Exception as exc:  # noqa: BLE001 — a title is optional
+        _log.debug("trafilatura.extract_metadata failed: %s", exc)
+        title = None
+    try:
+        body = trafilatura.extract(
+            tree,
+            output_format="markdown",
+            favor_recall=True,
+            include_images=True,
+            include_links=True,
+            include_formatting=True,
+            include_tables=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — untrusted HTML must never fail a fetch
+        _log.debug("trafilatura.extract failed, using strip_boilerplate: %s", exc)
+        return "", None
+    body = _collapse_blank_lines(_MD_IMAGE_RE.sub("", body or ""))
+    return body, (title or "").strip() or None
+
+
+def _prepend_title(markdown: str, title: str | None) -> str:
+    """Prefix ``# {title}`` (D5) unless there is no title or ``markdown`` already
+    opens with an H1 of the same text (compared case- and spacing-insensitively)."""
+    if not title:
+        return markdown
+    first = next((line.strip() for line in markdown.splitlines() if line.strip()), "")
+    heading = _MD_H1_RE.match(first)
+    if heading and _words(heading.group(1)) == _words(title):
+        return markdown
+    return f"# {title}\n\n{markdown}"
+
+
+def extract_main_markdown(html: str) -> str:
+    """Main-content markdown of an HTML page (Aldeia-IT/aldeia-box#1432 D10).
+
+    trafilatura (``_trafilatura_extract``) leads, with the metadata title
+    prepended (``_prepend_title``); the ``strip_boilerplate`` lines the titled text
+    lacks are then appended (``_recover_missing_lines``), so a heading equal to the
+    title is not recovered a second time. ``strip_boilerplate``'s markdown is returned
+    unchanged when trafilatura yields nothing or the usable-content gate refuses
+    the merged text (D8).
+
+    :param html: the raw page.
+    :returns: markdown.
+    """
+    baseline = _html_to_markdown(strip_boilerplate(html))
+    body, title = _trafilatura_extract(html)
+    if not body:
+        return baseline
+    merged = _recover_missing_lines(_prepend_title(body, title), baseline)
+    if usable_content_verdict(html, merged) is not None:
+        return baseline
+    return merged
 
 
 def _is_js_shell(raw: str) -> bool:

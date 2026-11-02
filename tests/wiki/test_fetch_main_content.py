@@ -52,7 +52,8 @@ class TestStripBoilerplate:
             "logo.png",
             "dataLayer",
             "trackPageView",
-            "Share this page",
+            # "Share this page" dropped: trafilatura keeps that widget line and leftover
+            # chrome is acceptable (Aldeia-IT/aldeia-box#1432 D9).
             "Capoeira School",  # the <title> text is not body content
         ):
             assert junk not in md, f"{junk!r} leaked into the markdown:\n{md}"
