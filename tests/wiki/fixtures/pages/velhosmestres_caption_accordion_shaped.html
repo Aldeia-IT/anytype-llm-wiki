@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<!-- Shaped test fixture (Aldeia-IT/aldeia-box#1432). Source shape: velhosmestres.com/br/waldemar-1989-2 (trial page 01). Unclosed div.caption__overlay in a photo gallery swallows the interview accordion (ul#toggle-view, three panels); trafilatura prunes class*=caption blocks when images are off. Text rewritten; structure kept. -->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Entrevista com um velho mestre | Velhos Mestres (shaped)</title>
+</head>
+<body>
+<header id="header"><ul id="main-menu" class="clearfix">
+<li><a href="index">INÍCIO</a></li><li><a href="pastinha">PASTINHA</a></li><li><a href="besouro">BESOURO</a></li>
+<li><a href="pesquisa">PESQUISA</a></li><li><a href="noticias">NOTÍCIAS</a></li>
+</ul></header>
+<div class="container">
+<article class="clearfix">
+<h1 class="entry-title">Entrevista com um velho mestre</h1>
+<p>Este texto de exemplo reproduz a forma de uma página de entrevista: uma introdução, uma galeria de fotos com legendas e a transcrição dividida em três abas que o leitor abre uma de cada vez.</p>
+<p>A introdução explica de onde vem a gravação e quem a transcreveu, para que o leitor saiba que a fonte primária é a própria voz do mestre e não um resumo feito depois.</p>
+<h2 class="entry-title">Galeria de fotos</h2>
+<div class="flexslider blogpost-slider">
+<ul class="slides">
+<li>
+<article class="caption">
+<img class="caption__media" src="../albums/1.jpg" />
+<div class="caption__overlay">
+<p class="caption__overlay__content">
+<p>O mestre na porta de casa
+<br>Acervo particular
+</article>
+</li>
+<li>
+<article class="caption">
+<img class="caption__media" src="../albums/2.jpg" />
+<div class="caption__overlay">
+<p class="caption__overlay__content">
+<p>O mestre com alunos no barracão
+</article>
+</li>
+</ul>
+</div>
+<h2 class="entry-title">A entrevista</h2>
+<div class="span6 mb-20">
+<ul id="toggle-view">
+<li class="clearfix active">
+<h3>página 1</h3>
+<div class="panel clearfix" style="display:block">
+<p>Primeira aba da entrevista: aprendi capoeira ainda menino na beira da praia, olhando os mais velhos jogarem no domingo depois da pescaria.</p>
+<p>Tive quatro mestres de exemplo e de cada um deles pedi para ensinar, porque naquele tempo ninguém dava aula, a gente aprendia vendo e perguntando.</p>
+</div>
+</li>
+<li class="clearfix">
+<h3>página 2</h3>
+<div class="panel clearfix">
+<p>Segunda aba da entrevista: na minha roda nunca teve barulho, porque quando eu chegava cantando a rapaziada vinha toda prestar atenção e respeitar.</p>
+<p>O segredo dos valentes de antigamente era a roupa: camisa curta, calça de boca larga cobrindo o sapato, e cada um com a sua história contada no bar.</p>
+</div>
+</li>
+<li class="clearfix">
+<h3>página 3</h3>
+<div class="panel clearfix">
+<p>Terceira aba da entrevista: o finado dono da roda tomava conta de tudo, abria o jogo, fechava o jogo e ninguém discutia com ele no meio da festa.</p>
+<p>Para uma boa roda primeiro vem o berimbau bem tocado, três berimbaus afinados um com o outro, e só depois o pandeiro e o canto do coro.</p>
+</div>
+</li>
+</ul>
+</div>
+</article>
+</div>
+<footer id="footer"><p>Exemplo de rodapé com direitos reservados e contato do site.</p></footer>
+</body>
+</html>
