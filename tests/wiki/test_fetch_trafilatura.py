@@ -2,7 +2,7 @@
 
 Aldeia-IT/aldeia-box#1432 D10: trafilatura (favor_recall, include_images, image
 markdown removed) is the primary extractor; every strip_boilerplate line it lacks is
-appended unless it is short or link-heavy; strip_boilerplate's markdown is the
+appended unless it is link-heavy (D11a: no length cut-off); strip_boilerplate's markdown is the
 fallback when trafilatura returns nothing or the usable-content gate refuses the
 merged text (D8); the metadata title is prepended as an H1 (D5). The Wikipedia
 head must be clean (D6, Aldeia-IT/aldeia-box#1429).
@@ -11,7 +11,6 @@ The fixtures are shaped pages: the markup that made trafilatura lose body text o
 the trial pages, with rewritten text (see the comment at the top of each file).
 """
 
-import re
 import socket
 from pathlib import Path
 
@@ -32,12 +31,9 @@ def _visible(markdown: str) -> str:
 
 def _baseline(html: str) -> str:
     """strip_boilerplate's markdown, the pre-#1432 output and today's fallback."""
-    from markdownify import markdownify
+    from anytype_llm_wiki.wiki.fetch import _html_to_markdown, strip_boilerplate
 
-    from anytype_llm_wiki.wiki.fetch import strip_boilerplate
-
-    md = markdownify(strip_boilerplate(html), heading_style="ATX")
-    return re.sub(r"\n{3,}", "\n\n", md).strip()
+    return _html_to_markdown(strip_boilerplate(html))
 
 
 @pytest.fixture(autouse=True)
@@ -76,8 +72,8 @@ TRIAL_PAGES = [
         "capoeirahub_outside_main_shaped.html",
         [
             "a short hero text inside the main landmark",
-            "Personal Lineage Graphs",
-            "The World Map of Capoeira",
+            "Family Tree Sheets",
+            "Atlas of Rodas",
         ],
         id="19-capoeirahub-outside-main",
     ),
@@ -89,10 +85,10 @@ TRIAL_PAGES = [
     pytest.param(
         "sinha_carousel_faq_shaped.html",
         [
-            "As a parent of three energetic kids",
-            "The school is a safe place to learn",
-            "never taken any kind of martial arts or dance classes",
-            "forty years of experience",
+            "As the mother of two lively children",
+            "both feel safe there",
+            "I have no background in dance or fighting sports",
+            "who has trained for four decades",
         ],
         id="41-sinha-carousel-faq",
     ),
@@ -112,10 +108,49 @@ class TestTrialPagesKeepBody:
 
     @pytest.mark.parametrize("fixture, phrases", TRIAL_PAGES)
     def test_trafilatura_text_leads(self, fixture, phrases):
-        """The output is trafilatura's text plus recovered lines, not the baseline."""
+        """The output opens with trafilatura's titled text; recovered lines follow."""
+        from anytype_llm_wiki.wiki.fetch import (
+            _prepend_title,
+            _to_markdown,
+            _trafilatura_extract,
+        )
+
+        html = _page(fixture)
+        body, title = _trafilatura_extract(html)
+        assert body, "trafilatura returned nothing on the fixture"
+        assert _to_markdown(html, "text/html").startswith(_prepend_title(body, title))
+
+    def test_title_is_the_only_h1_when_trafilatura_drops_the_heading(self):
+        """Review r1 S2: the baseline's H1 equals the prepended title; not recovered twice."""
         from anytype_llm_wiki.wiki.fetch import _to_markdown
 
-        assert _to_markdown(_page(fixture), "text/html") != _baseline(_page(fixture))
+        md = _to_markdown(_page("sinha_carousel_faq_shaped.html"), "text/html")
+        h1_lines = [line for line in md.splitlines() if line.startswith("# ")]
+        assert len(h1_lines) == 1, h1_lines
+        assert md.startswith(h1_lines[0])
+
+    def test_card_link_paragraphs_are_not_duplicated(self):
+        """Review r1 S3: a paragraph inside a multi-line link is already present."""
+        from anytype_llm_wiki.wiki.fetch import _to_markdown
+
+        md = _to_markdown(_page("capoeirahub_card_links_shaped.html"), "text/html")
+        body_lines = [line for line in md.splitlines() if len(line.strip()) > 40]
+        assert len(body_lines) == len(set(body_lines)), body_lines
+
+    def test_date_inside_a_long_paragraph_survives(self):
+        """Review r1 B1: trafilatura drops <time> text mid-paragraph; the line is recovered."""
+        from anytype_llm_wiki.wiki.fetch import _to_markdown
+
+        filler = (
+            "This paragraph is long on purpose so that its beginning and its end are both "
+            "kept by trafilatura while an inline element in the middle is removed by it. "
+        )
+        html = (
+            "<html><head><title>T</title></head><body><article><h1>T</h1>"
+            f"<p>{filler}Ele nasceu em <time>12 de maio de 1920 no Recôncavo</time> e depois "
+            f"{filler}</p><p>{filler * 2}</p></article></body></html>"
+        )
+        assert "12 de maio de 1920" in _to_markdown(html, "text/html")
 
     def test_fetch_url_on_a_local_html_file_uses_the_same_path(self, tmp_path):
         from anytype_llm_wiki.wiki.fetch import _to_markdown, fetch_url
@@ -336,6 +371,42 @@ class TestRecoverMissingLines:
         )
         baseline = self.PRIMARY + "\n\n" + nav
         assert _recover_missing_lines(self.PRIMARY, baseline) == self.PRIMARY
+
+    def test_short_line_found_inside_a_longer_word_is_still_recovered(self):
+        """Review r1 S1: presence is judged on word boundaries ("Sim." vs "simples")."""
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        primary = "A resposta foi simples: Mestre Bimbalino ensinava em 19745 lugares."
+        baseline = f"{primary}\n\nSim.\n\nBimba\n\n1974"
+        merged = _recover_missing_lines(primary, baseline)
+        assert merged.endswith("Sim.\n\nBimba\n\n1974"), merged
+
+    def test_whole_line_must_be_present(self):
+        """Review r1 B1: a line whose middle is missing from the primary is recovered."""
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        head = "The opening words of a long paragraph that both extractors keep intact here,"
+        tail = "and the closing words of the same paragraph that both of them keep as well."
+        primary = f"{head} {tail}"
+        line = f"{head} on 12 May 1920 in the Recôncavo, {tail}"
+        assert _recover_missing_lines(primary, line).endswith(line)
+
+    def test_recovered_images_keep_only_their_alt_text(self):
+        """Review r1 N1: image markdown is removed from recovered lines as from trafilatura's."""
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        baseline = f"{self.PRIMARY}\n\n![Mestre Ana at the roda, 1974](https://x.test/a.jpg)"
+        merged = _recover_missing_lines(self.PRIMARY, baseline)
+        assert merged.endswith("Mestre Ana at the roda, 1974"), merged
+        assert "x.test" not in merged
+
+    def test_a_repeated_missing_line_is_appended_once(self):
+        """Review r1 N2."""
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        line = "Learn more about the classes of this group and its teachers."
+        merged = _recover_missing_lines(self.PRIMARY, f"{line}\n\n{self.PRIMARY}\n\n{line}")
+        assert merged.count(line) == 1, merged
 
     def test_short_headings_are_recovered(self):
         """A card or section title is short but it is content, not chrome."""

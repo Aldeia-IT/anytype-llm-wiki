@@ -263,7 +263,12 @@ def _html_to_markdown(html: str) -> str:
     """Convert ``html`` to ATX markdown with runs of blank lines collapsed."""
     from markdownify import markdownify as _md
 
-    return re.sub(r"\n{3,}", "\n\n", _md(html, heading_style="ATX")).strip()
+    return _collapse_blank_lines(_md(html, heading_style="ATX"))
+
+
+def _collapse_blank_lines(markdown: str) -> str:
+    """Collapse runs of blank lines in ``markdown`` to one and strip its ends."""
+    return re.sub(r"\n{3,}", "\n\n", markdown).strip()
 
 
 def markdown_visible_text(markdown: str) -> str:
@@ -328,19 +333,29 @@ def usable_content_verdict(raw: str, markdown: str) -> str | None:
 # A missing baseline line whose visible text is at least this share link labels is
 # navigation, so it is not recovered.
 _RECOVER_MAX_LINK_SHARE = 0.5
-# A baseline line counts as present when its first and last this-many compact chars
-# occur in trafilatura's text: the two render links, footnotes and wrapping
-# differently, so whole-line equality would re-append text that is already there.
-_PRESENCE_KEY_CHARS = 60
+# A baseline line counts as present only when its whole word sequence occurs in
+# trafilatura's text on word boundaries: a check on part of the line misses text
+# trafilatura cut from its middle (<time>, <label>, <button>), and a check without
+# boundaries finds a short line ("Sim.") inside another word ("simples").
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+# A "](target)" left on a line after whole links are removed: the end of a link
+# that spans several lines (a card wrapped in <a>), whose target is not body text.
+_MD_DANGLING_TARGET_RE = re.compile(r"\]" + _MD_TARGET)
 _MD_H1_RE = re.compile(r"^#\s+(.+?)[\s#]*$")
 
 
-def _compact(markdown: str) -> str:
-    """Lower-cased visible text of ``markdown`` with inline HTML tags and every
-    non-word character removed; used to compare text across extractors."""
-    visible = markdown_visible_text(_HTML_TAG_RE.sub("", markdown or ""))
-    return re.sub(r"\W+", "", visible.lower())
+def _words(markdown: str) -> str:
+    """Lower-cased visible words of ``markdown``, space-joined with a space at
+    each end so that ``f" {key} " in text`` matches on word boundaries only.
+
+    Inline HTML tags and dangling link targets are dropped first, so text the two
+    extractors render differently (``<sup>`` footnotes, multi-line links) compares
+    equal.
+    """
+    text = _MD_LINK_RE.sub(r"\1", _MD_IMAGE_RE.sub(r"\1", markdown or ""))
+    text = _MD_DANGLING_TARGET_RE.sub(" ", _HTML_TAG_RE.sub(" ", text))
+    words = re.findall(r"\w+", markdown_visible_text(text).lower())
+    return " " + " ".join(words) + " "
 
 
 def _is_chrome_line(line: str) -> bool:
@@ -357,28 +372,27 @@ def _is_chrome_line(line: str) -> bool:
 def _recover_missing_lines(primary: str, baseline: str) -> str:
     """Append to ``primary`` every ``baseline`` line it lacks, in baseline order.
 
-    Chrome-like lines (``_is_chrome_line``) are skipped. Recovered lines go at the
-    end because their position relative to ``primary``'s text is unknown.
+    A line is present when its whole word sequence occurs in ``primary``
+    (``_words``). Chrome-like lines (``_is_chrome_line``) and repeats are skipped;
+    images keep only their alt text. Recovered lines go at the end because their
+    position relative to ``primary``'s text is unknown.
 
     :param primary: trafilatura's markdown.
     :param baseline: ``strip_boilerplate``'s markdown for the same page.
     :returns: ``primary``, followed by the recovered lines when there are any.
     """
-    present = _compact(primary)
-    n = _PRESENCE_KEY_CHARS
-
-    def _is_present(line: str) -> bool:
-        key = _compact(line)
-        return key[:n] in present and key[-n:] in present
-
-    missing = [
-        line
-        for line in baseline.splitlines()
-        if not _is_chrome_line(line) and not _is_present(line)
-    ]
+    present = _words(primary)
+    appended: set[str] = set()
+    missing: list[str] = []
+    for line in baseline.splitlines():
+        key = _words(line)
+        if not key.strip() or _is_chrome_line(line) or key in present or key in appended:
+            continue
+        appended.add(key)
+        missing.append(_MD_IMAGE_RE.sub(r"\1", line).strip())
     if not missing:
         return primary
-    return primary + "\n\n" + "\n\n".join(line.strip() for line in missing)
+    return primary + "\n\n" + "\n\n".join(missing)
 
 
 def _trafilatura_extract(html: str) -> tuple[str, str | None]:
@@ -386,14 +400,27 @@ def _trafilatura_extract(html: str) -> tuple[str, str | None]:
 
     ``include_images=True`` keeps trafilatura from pruning every block whose class
     contains "caption" (a gallery overlay swallowed an interview on a trial page);
-    the image markdown is then removed. Works on the string only: no network.
+    the image markdown is then removed. The page is parsed once; the metadata is
+    read before ``extract`` prunes the tree. Works on the string only: no network.
     Any trafilatura failure yields ``("", None)`` so the caller falls back.
     """
     import trafilatura
 
     try:
+        tree = trafilatura.load_html(html)
+    except Exception as exc:  # noqa: BLE001 — untrusted HTML must never fail a fetch
+        _log.debug("trafilatura.load_html failed, using strip_boilerplate: %s", exc)
+        return "", None
+    if tree is None:
+        return "", None
+    try:
+        title = getattr(trafilatura.extract_metadata(tree), "title", None)
+    except Exception as exc:  # noqa: BLE001 — a title is optional
+        _log.debug("trafilatura.extract_metadata failed: %s", exc)
+        title = None
+    try:
         body = trafilatura.extract(
-            html,
+            tree,
             output_format="markdown",
             favor_recall=True,
             include_images=True,
@@ -404,12 +431,7 @@ def _trafilatura_extract(html: str) -> tuple[str, str | None]:
     except Exception as exc:  # noqa: BLE001 — untrusted HTML must never fail a fetch
         _log.debug("trafilatura.extract failed, using strip_boilerplate: %s", exc)
         return "", None
-    body = re.sub(r"\n{3,}", "\n\n", _MD_IMAGE_RE.sub("", body or "")).strip()
-    try:
-        title = getattr(trafilatura.extract_metadata(html), "title", None)
-    except Exception as exc:  # noqa: BLE001 — a title is optional
-        _log.debug("trafilatura.extract_metadata failed: %s", exc)
-        title = None
+    body = _collapse_blank_lines(_MD_IMAGE_RE.sub("", body or ""))
     return body, (title or "").strip() or None
 
 
@@ -420,7 +442,7 @@ def _prepend_title(markdown: str, title: str | None) -> str:
         return markdown
     first = next((line.strip() for line in markdown.splitlines() if line.strip()), "")
     heading = _MD_H1_RE.match(first)
-    if heading and _compact(heading.group(1)) == _compact(title):
+    if heading and _words(heading.group(1)) == _words(title):
         return markdown
     return f"# {title}\n\n{markdown}"
 
@@ -428,9 +450,10 @@ def _prepend_title(markdown: str, title: str | None) -> str:
 def extract_main_markdown(html: str) -> str:
     """Main-content markdown of an HTML page (Aldeia-IT/aldeia-box#1432 D10).
 
-    trafilatura (``_trafilatura_extract``) leads; the ``strip_boilerplate`` lines
-    it lacks are appended (``_recover_missing_lines``) and the metadata title is
-    prepended (``_prepend_title``). ``strip_boilerplate``'s markdown is returned
+    trafilatura (``_trafilatura_extract``) leads, with the metadata title
+    prepended (``_prepend_title``); the ``strip_boilerplate`` lines the titled text
+    lacks are then appended (``_recover_missing_lines``), so a heading equal to the
+    title is not recovered a second time. ``strip_boilerplate``'s markdown is returned
     unchanged when trafilatura yields nothing or the usable-content gate refuses
     the merged text (D8).
 
@@ -441,10 +464,10 @@ def extract_main_markdown(html: str) -> str:
     body, title = _trafilatura_extract(html)
     if not body:
         return baseline
-    merged = _recover_missing_lines(body, baseline)
+    merged = _recover_missing_lines(_prepend_title(body, title), baseline)
     if usable_content_verdict(html, merged) is not None:
         return baseline
-    return _prepend_title(merged, title)
+    return merged
 
 
 def _is_js_shell(raw: str) -> bool:
