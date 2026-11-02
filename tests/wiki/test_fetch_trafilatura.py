@@ -254,7 +254,8 @@ class TestTitle:
 
     def test_title_match_ignores_case_and_spacing(self, monkeypatch):
         md = self._run(monkeypatch, "#  roda de  domingo\n\n" + self.BODY, "Roda de Domingo")
-        assert md.lower().count("roda de domingo") == 1, md
+        assert md.startswith("#  roda de  domingo\n\n"), md[:200]
+        assert sum(line.startswith("#") for line in md.splitlines()) == 1, md
 
     @pytest.mark.parametrize("title", [None, "", "   "])
     def test_no_title_no_heading(self, monkeypatch, title):
@@ -313,11 +314,18 @@ class TestRecoverMissingLines:
         )
         assert _recover_missing_lines(primary, baseline) == primary
 
-    def test_short_lines_are_skipped(self):
+    def test_short_body_lines_are_recovered_and_link_lines_still_skipped(self):
+        """D11a: no length floor; a caption or name line is body, a link list is not."""
         from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
 
-        baseline = self.PRIMARY + "\n\nSkip to content\n\nMenu Toggle"
-        assert _recover_missing_lines(self.PRIMARY, baseline) == self.PRIMARY
+        date = "Salvador, 1974"  # a photo caption, 14 visible chars
+        name = "Mestre Ana"
+        nav = "[Home](/) [Masters](/masters)"
+        merged = _recover_missing_lines(
+            self.PRIMARY, f"{self.PRIMARY}\n\n{date}\n\n{nav}\n\n{name}"
+        )
+        assert merged.endswith(f"{date}\n\n{name}"), merged
+        assert "[Home]" not in merged
 
     def test_link_heavy_lines_are_skipped(self):
         from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
