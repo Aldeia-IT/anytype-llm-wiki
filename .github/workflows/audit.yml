@@ -63,7 +63,13 @@ jobs:
         # matters for this network-served MCP). The waiver is per-package and auditable; the
         # --fail-on token set is intentionally NOT broadened. Upstream COPYING:
         # https://docutils.sourceforge.io/COPYING.html
-        run: uv run --frozen --with pip-licenses==5.5.5 python -m piplicenses --from=mixed --partial-match --fail-on="GPL;AGPL;SSPL;EUPL" --ignore-packages docutils
+        #
+        # tld WAIVER (--ignore-packages tld; Aldeia-IT/aldeia-box#1432 D1): tld (via
+        # trafilatura -> courlan) is triple-licensed "MPL-1.1 OR GPL-2.0-only OR
+        # LGPL-2.1-or-later"; --partial-match flags the GPL alternative. The project uses
+        # it under MPL-1.1 (file-level copyleft, MIT-compatible, unmodified), as recorded
+        # in NOTICE. Per-package waiver; the --fail-on token set is NOT broadened.
+        run: uv run --frozen --with pip-licenses==5.5.5 python -m piplicenses --from=mixed --partial-match --fail-on="GPL;AGPL;SSPL;EUPL" --ignore-packages docutils tld
 
       - name: Secret scan (gitleaks)
         # `gitleaks git` scans the full commit HISTORY (requires fetch-depth: 0 on checkout);
