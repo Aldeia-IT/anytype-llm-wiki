@@ -20,6 +20,7 @@ from collections.abc import Callable
 
 from pypdf import PdfReader
 
+from .extraction import source_budget_chars
 from .util import normalize_title
 
 _log = logging.getLogger(__name__)
@@ -233,6 +234,36 @@ def _mention_pages(name: str, window: list[Page]) -> list[int]:
 
 
 _FACT_FIELDS = {"entities": ("description", "definition"), "concepts": ("definition", "description")}
+
+
+def extract_pdf_source(
+    pages: list[Page],
+    *,
+    space_id: str,
+    extract_fn: Callable[..., dict],
+    subject_hint: str | None = None,
+) -> dict:
+    """Extract a PDF source in page windows sized to one ``extract()`` call.
+
+    The one PDF branch that ``wiki_ingest`` and ``scripts/ingest_dry_run.py``
+    share: ``extract_pages`` with windows of ``source_budget_chars(subject_hint)``
+    characters, so a window is cut only when a single page is larger.
+
+    :param pages: ``(page_number, text)`` from ``read_pdf``.
+    :param space_id: passed through to ``extract_fn``.
+    :param extract_fn: ``extraction.extract`` (injected so a caller's stub applies).
+    :param subject_hint: passed through to ``extract_fn``; its prompt block counts
+        against the window budget.
+    :returns: ``extract_pages``'s merged result (``windows`` and ``warnings``
+        included).
+    """
+    return extract_pages(
+        pages,
+        space_id=space_id,
+        extract_fn=extract_fn,
+        budget_chars=source_budget_chars(subject_hint),
+        subject_hint=subject_hint,
+    )
 
 
 def extract_pages(

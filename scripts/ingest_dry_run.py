@@ -48,10 +48,9 @@ from anytype_llm_wiki.wiki.extraction import (
     extract,
     is_identifier_like_name,
     sanitize_name,
-    source_budget_chars,
 )
 from anytype_llm_wiki.wiki.fetch import _to_markdown, fetch_source
-from anytype_llm_wiki.wiki.pdf import extract_pages
+from anytype_llm_wiki.wiki.pdf import extract_pdf_source
 from anytype_llm_wiki.wiki.util import plan_primary_subject
 
 _EXCERPT_CHARS = 1000
@@ -138,11 +137,10 @@ def dry_run(
     started = time.monotonic()
     extract_kwargs = {"subject_hint": subject_hint} if subject_hint else {}
     if pdf_pages:
-        extracted = extract_pages(
+        extracted = extract_pdf_source(
             pdf_pages,
             space_id="dry-run",
             extract_fn=extract,
-            budget_chars=source_budget_chars(subject_hint),
             subject_hint=subject_hint,
         )
         report["windows"] = extracted.get("windows")

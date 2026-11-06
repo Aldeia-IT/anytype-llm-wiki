@@ -389,7 +389,9 @@ class TestIngestPdf:
                     "concepts": []}
 
         monkeypatch.setattr(_ingest, "extract", fake_extract)
-        monkeypatch.setattr(_ingest, "source_budget_chars", lambda hint=None: 260)
+        from anytype_llm_wiki.wiki import pdf as _pdf
+
+        monkeypatch.setattr(_pdf, "source_budget_chars", lambda hint=None: 260)
         result = _ingest.wiki_ingest(source=PDF_URL, space_id="space-pdf-001")
 
         assert result["status"] == "ok", result

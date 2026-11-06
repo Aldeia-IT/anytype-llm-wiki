@@ -37,10 +37,9 @@ from .extraction import (
     is_identifier_like_name,
     sanitize_name,
     sanitize_property_value,
-    source_budget_chars,
 )
 from .fetch import fetch_source
-from .pdf import extract_pages
+from .pdf import extract_pdf_source
 from .util import (
     _existing_text,
     _relation_ids,
@@ -927,11 +926,10 @@ def _run_ingest(
             if pdf_pages:
                 # Aldeia-IT/aldeia-box#1483 D4: one extract() per page window;
                 # every fact carries its page(s).
-                extracted = extract_pages(
+                extracted = extract_pdf_source(
                     pdf_pages,
                     space_id=space_id,
                     extract_fn=extract,
-                    budget_chars=source_budget_chars(subject_hint),
                     subject_hint=subject_hint,
                 )
                 result["warnings"].extend(extracted.get("warnings") or [])

@@ -251,7 +251,9 @@ class TestDryRunPdf:
             return_value=httpx.Response(200, content=_stream(json.dumps(EXTRACTED)))
         )
         module = _load()
-        monkeypatch.setattr(module, "source_budget_chars", lambda hint=None: len(page) + 10)
+        from anytype_llm_wiki.wiki import pdf as _pdf
+
+        monkeypatch.setattr(_pdf, "source_budget_chars", lambda hint=None: len(page) + 10)
         assert module.main(["https://repo.example/thesis.pdf"]) == 0
         (line,) = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         report = json.loads(line)
