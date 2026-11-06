@@ -44,7 +44,7 @@ _DETERMINISTIC_OPTS = {"temperature": 0, "seed": 0, "top_p": 1}
 
 # Conservative chars-per-token estimate for sizing the extraction source (AC4).
 # Measured ~3.3 on a real capoeira page; ``len // 4`` undercounts.
-_CHARS_PER_TOKEN = 3
+CHARS_PER_TOKEN = 3
 
 
 def _load_prompt() -> str:
@@ -279,7 +279,7 @@ def _fill_prompt(template: str, source: str, subject_block: str) -> str:
 def _budget_chars(template: str, subject_block: str) -> int:
     """Source chars that fit ``extract_max_input_tokens()`` beside the filled template."""
     filled = _fill_prompt(template, "", subject_block)
-    return max(config.extract_max_input_tokens() * _CHARS_PER_TOKEN - len(filled), 0)
+    return max(config.extract_max_input_tokens() * CHARS_PER_TOKEN - len(filled), 0)
 
 
 def source_budget_chars(subject_hint: str | None = None) -> int:

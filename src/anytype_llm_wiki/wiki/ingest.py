@@ -31,7 +31,7 @@ from . import config
 from . import profile
 from ..anytype_client import AnytypeReadClient
 from .extraction import (
-    _CHARS_PER_TOKEN,
+    CHARS_PER_TOKEN,
     _call_ollama_prompt,
     _ollama_url,
     check_remote_endpoint_consent,
@@ -619,7 +619,7 @@ def _filter_contradictions(items, candidate_ids: set[str]) -> list[dict]:
         if not isinstance(item, dict):
             continue
         peer_id = item.get("object_id")
-        if peer_id not in candidate_ids:
+        if not isinstance(peer_id, str) or peer_id not in candidate_ids:
             continue
         out.append({"object_id": peer_id, "reason": str(item.get("reason", ""))})
     return out
@@ -699,18 +699,27 @@ def _batch_prompt(checks: list[dict]) -> str:
         {"check_id": c["check_id"], "new_claim": c["new_facts"], "candidates": c["candidates"]}
         for c in checks
     ]
-    return _load_contradiction_batch_prompt().replace("{{CHECKS}}", json.dumps(payload))
+    return _load_contradiction_batch_prompt().replace(
+        "{{CHECKS}}", json.dumps(payload, ensure_ascii=False)
+    )
+
+
+# Headroom for the batch prompt: it is dense JSON, whose tokens run shorter than
+# the extraction source prose CHARS_PER_TOKEN was measured on.
+_BATCH_BUDGET_SHARE = 0.75
 
 
 def _pack_contradiction_batches(checks: list[dict]) -> list[list[dict]]:
     """Group checks into as few prompts as fit the extraction input cap.
 
     The cap is the one ``extract()`` uses (``WIKI_EXTRACT_MAX_INPUT_TOKENS`` at
-    3 chars per token), so a batch never makes Ollama cut its prompt. Usually
-    every check of an ingest fits one batch. A check too large to share a prompt
+    3 chars per token), so a batch never makes Ollama cut its prompt. Batches
+    are packed to ``_BATCH_BUDGET_SHARE`` of it: Portuguese accents and JSON
+    punctuation tokenise worse than the 3-chars estimate. Usually every check
+    of an ingest fits one batch. A check too large to share a prompt
     ends up alone in its batch and takes the single-check path, as before.
     """
-    budget = config.extract_max_input_tokens() * _CHARS_PER_TOKEN
+    budget = int(config.extract_max_input_tokens() * CHARS_PER_TOKEN * _BATCH_BUDGET_SHARE)
     batches: list[list[dict]] = []
     current: list[dict] = []
     for check in checks:
@@ -742,7 +751,7 @@ def _batch_verdicts(checks: list[dict], ollama_base: str) -> dict[str, list[dict
         if not isinstance(entry, dict):
             continue
         check_id = entry.get("check_id")
-        if check_id not in by_id:
+        if not isinstance(check_id, str) or check_id not in by_id:
             continue
         seen[check_id] = seen.get(check_id, 0) + 1
         if isinstance(entry.get("contradictions"), list):

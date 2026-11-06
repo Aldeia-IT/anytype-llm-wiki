@@ -132,7 +132,8 @@ class TestBatchedVerdicts:
         for c in checks:
             c["new_facts"] = big
         # ~2 checks per prompt: the batch prompt template is ~1.6 KB.
-        budget_tokens = (len(ingest._batch_prompt(checks[:2])) + 10) // ingest._CHARS_PER_TOKEN
+        share = ingest.CHARS_PER_TOKEN * ingest._BATCH_BUDGET_SHARE
+        budget_tokens = int((len(ingest._batch_prompt(checks[:2])) + 10) / share) + 1
         monkeypatch.setenv("WIKI_EXTRACT_MAX_INPUT_TOKENS", str(budget_tokens))
         fake = model(
             _batch_answer(("check_1", []), ("check_2", [])),
@@ -143,6 +144,37 @@ class TestBatchedVerdicts:
 
         assert len(fake.batch_prompts) == 1 and len(fake.single_prompts) == 1
         assert set(outcomes) == {"check_1", "check_2", "check_3"}
+
+
+    def test_portuguese_heavy_batches_stay_under_the_reduced_budget(self, monkeypatch):
+        # Accented text is not escaped to \\uXXXX in the prompt, and packing
+        # leaves headroom below the full chars-per-token budget.
+        checks = [_check(n, [f"p{n}"]) for n in range(1, 9)]
+        for c in checks:
+            c["new_facts"] = "açúcar, coração, não, João " * 30
+        budget_tokens = 2000
+        monkeypatch.setenv("WIKI_EXTRACT_MAX_INPUT_TOKENS", str(budget_tokens))
+
+        batches = ingest._pack_contradiction_batches(checks)
+
+        limit = budget_tokens * ingest.CHARS_PER_TOKEN * ingest._BATCH_BUDGET_SHARE
+        assert len(batches) > 1
+        assert all(len(ingest._batch_prompt(b)) <= limit for b in batches)
+        assert "\\u00e7" not in ingest._batch_prompt(batches[0])
+        assert "açúcar" in ingest._batch_prompt(batches[0])
+
+    def test_non_string_ids_in_a_batch_answer_are_skipped(self, model):
+        fake = model({"results": [
+            {"check_id": ["x"], "contradictions": []},
+            {"check_id": "check_1", "contradictions": [
+                {"object_id": ["p1"], "reason": "r"}, {"object_id": "p1", "reason": "r"}]},
+            {"check_id": "check_2", "contradictions": []},
+        ]})
+
+        outcomes = _judge([_check(1, ["p1"]), _check(2, ["p2"])])
+
+        assert outcomes == {"check_1": [{"object_id": "p1", "reason": "r"}], "check_2": []}
+        assert len(fake.prompts) == 1
 
 
 class TestFallbackToSingleCall:
@@ -265,6 +297,28 @@ class TestRunContradictionChecks:
         assert state["obj-1"] == ["obj-2"]
         # obj-2 -> obj-1 was already written by check_1's B-side: not a new link.
         assert result["contradictions_detected"] == 2
+
+
+    def test_a_failing_link_write_makes_the_ingest_partial(self, monkeypatch, writes):
+        _state, _patches, reader = writes
+
+        def boom(*args, **kwargs):
+            raise httpx.ConnectError("write down")
+
+        monkeypatch.setattr(ingest, "_write_contradiction_links", boom)
+        monkeypatch.setattr(ingest, "_judge_contradiction_checks", lambda *a: {
+            "check_1": [{"object_id": "p1", "reason": "r"}],
+        })
+        result = {"warnings": [], "contradictions_detected": 0}
+
+        status, _notes = ingest._run_contradiction_checks(
+            [_check(1, ["p1"])], "space", None, reader, result
+        )
+
+        assert status == "partial"
+        assert len(result["warnings"]) == 1
+        assert result["warnings"][0].startswith("object_failed: 'Object 1'")
+        assert result["contradictions_detected"] == 0
 
 
 class TestBatchPromptPreamble:

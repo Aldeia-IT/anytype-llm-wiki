@@ -51,7 +51,12 @@ def _emit(record: dict) -> None:
         if target == "stderr":
             print(_PREFIX + line, file=sys.stderr, flush=True)
         else:
-            with open(target, "a", encoding="utf-8") as handle:
+            fd = os.open(
+                target,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
     except OSError:
         pass

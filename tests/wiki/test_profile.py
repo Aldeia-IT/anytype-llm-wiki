@@ -58,3 +58,32 @@ def test_meta_may_carry_a_name_key(monkeypatch, capsys):
     monkeypatch.delenv("WIKI_PROFILE")
     with profile.span("resolve", name="Bimba"):
         pass
+
+
+def test_span_reraises_and_still_logs(monkeypatch, capsys):
+    monkeypatch.setenv("WIKI_PROFILE", "1")
+    try:
+        with profile.span("boom"):
+            raise ValueError("x")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("span swallowed the exception")
+    assert '"span": "boom"' in capsys.readouterr().err
+
+
+def test_unwritable_path_is_swallowed(monkeypatch, tmp_path):
+    monkeypatch.setenv("WIKI_PROFILE", str(tmp_path / "missing-dir" / "p.jsonl"))
+    with profile.span("stage"):
+        pass
+
+
+def test_symlink_target_is_not_followed(monkeypatch, tmp_path):
+    real = tmp_path / "real.jsonl"
+    real.write_text("")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(real)
+    monkeypatch.setenv("WIKI_PROFILE", str(link))
+    with profile.span("stage"):
+        pass
+    assert real.read_text() == ""
