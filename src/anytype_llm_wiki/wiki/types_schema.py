@@ -159,3 +159,20 @@ WIKI_TYPES = [
         ],
     },
 ]
+
+
+# Aldeia-IT/aldeia-box#1486 STUB: the ``wiki_link`` type. The implementation moves this
+# entry into ``WIKI_TYPES`` and bumps ``WIKI_SCHEMA_VERSION`` to "0.5.0"; until then
+# bootstrap does not see it, so behaviour is unchanged.
+WIKI_LINK_TYPE = {
+    "type_key": "wiki_link",
+    "name": "Link",
+    "plural_name": "Links",
+    "layout": "basic",
+    "properties": [
+        {"property_key": "wiki_link_from", "name": "Wiki Link From", "format": "objects"},
+        {"property_key": "wiki_link_to", "name": "Wiki Link To", "format": "objects"},
+        {"property_key": "wiki_link_label", "name": "Wiki Link Label", "format": "text"},
+        {"property_key": "wiki_link_sources", "name": "Wiki Link Sources", "format": "objects"},
+    ],
+}
