@@ -18,13 +18,22 @@ queued on a shared Ollama were most of an ingest's time; these changes cut both.
   extract, resolve, writes, contradiction checks, relations, reindex) and Ollama's own counters
   (prompt and output tokens, prefill and decode time) per model call. `1` writes JSON lines to
   stderr; a path appends them to that file. Off by default, and free when off.
+- **Source summary (Aldeia-IT/aldeia-box#1485).** `wiki_ingest` stores the extraction's `summary`
+  of the page on its `wiki_source` as the new `wiki_summary` text property, when it creates the
+  Source and when a re-ingest reuses it; a run without a summary leaves a stored one in place. A
+  PDF's summary joins each page window's summary in page order, each line tagged with its pages.
+  The reindex embeds `wiki_summary` under the heading "Summary", so `semantic_search` finds a
+  source by its summary. `wiki_remember` stores no summary. Schema 0.4.3: run `wiki_bootstrap` on
+  every space before ingesting (see MIGRATIONS.md).
 
 ### Changed
 
 - **Smaller extraction output (Aldeia-IT/aldeia-box#1485).** The extraction prompt no longer asks
-  for `summary`, `domain_tags`, `open_questions` or `is_central`. Nothing read them, and they
-  were about 45% of the generated text. `extract()` strips them if a model still returns them.
-  `entities`, `concepts` and `relations` are asked for as before. The shorter prompt also shifts
+  for `domain_tags`, `open_questions` or `is_central`. Nothing read them, and with `summary` they
+  were about 45% of the generated text (these three alone about a third). `extract()` strips them if
+  a model still returns them. `entities`, `concepts`, `relations` and `summary` are asked for as
+  before. The prompt is shared, so the change applies to every use of `extract()`: URL and file
+  ingest, PDF ingest (each page window) and `wiki_remember`. The shorter prompt also shifts
   which items the model picks and how it words them: on the five profiled pages one page lost
   mostly generic concepts ("person", "location", "2019"), another gained named people and some
   page furniture ("last.fm", "similar artists"); the others moved within run-to-run jitter.

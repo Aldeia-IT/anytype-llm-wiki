@@ -572,11 +572,11 @@ def sanitize_property_value(text: str) -> str:
     return strip_control_chars(text)
 
 
-# Keys the extraction schema no longer asks for (Aldeia-IT/aldeia-box#1485 D1):
-# nothing reads them, and each one cost decode time. A model that still emits
-# them has them removed here, so no reader can come to depend on them.
+# Per-item keys the extraction schema no longer asks for (Aldeia-IT/aldeia-box#1485
+# D1): nothing reads them, and each one cost decode time. A model that still emits
+# them has them removed here, so no reader can come to depend on them. The
+# top-level ``summary`` stays (D16): ingest stores it on the wiki_source.
 _DROPPED_ITEM_KEYS = frozenset({"is_central", "domain_tags", "open_questions"})
-_DROPPED_TOP_KEYS = frozenset({"summary"})
 
 
 def filter_extraction_output(raw: dict) -> dict:
@@ -584,13 +584,13 @@ def filter_extraction_output(raw: dict) -> dict:
 
     ``is_central`` (AC#12): centrality is decided by the ingest pipeline, not by
     attacker-controlled source text, so any is_central in the raw output is
-    removed. ``domain_tags``, ``open_questions`` (per item) and the top-level
-    ``summary`` left the schema in Aldeia-IT/aldeia-box#1485 and are removed
-    the same way. ``relations`` and ``primary_subject`` pass through.
+    removed. ``domain_tags`` and ``open_questions`` (per item) left the schema in
+    Aldeia-IT/aldeia-box#1485 and are removed the same way. ``relations``,
+    ``summary`` and ``primary_subject`` pass through.
     """
     if not isinstance(raw, dict):
         return {"entities": [], "concepts": []}
-    out = {k: v for k, v in raw.items() if k not in _DROPPED_TOP_KEYS}
+    out = dict(raw)
     for key in ("entities", "concepts"):
         items = out.get(key)
         if isinstance(items, list):

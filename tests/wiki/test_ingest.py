@@ -4311,3 +4311,108 @@ class TestContradictionChecksBatchedPerIngest:
         ]
         assert contradiction_patches == [("obj-alpha", [peer_id]), (peer_id, ["obj-alpha"])]
         assert not any(w.startswith("contradiction_detection_degraded") for w in result["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Aldeia-IT/aldeia-box#1485 D16: the extraction's summary is stored on the
+# wiki_source, on the create path and on the dedup-reuse path.
+# ---------------------------------------------------------------------------
+
+
+class TestSourceSummaryStored:
+    def _run(self, monkeypatch, summaries):
+        """Ingest one URL once per entry of ``summaries`` (None = no summary key).
+
+        :returns: ``(results, source_creates, source_patches)``: the ingest results,
+            the properties of every wiki_source create and of every PATCH of the
+            source object.
+        """
+        import json as _json
+
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        from anytype_llm_wiki.wiki.util import normalize_title
+
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+        src = "https://example.com/summary-paper"
+        store: dict = {}
+        counter = {"n": 0}
+        source_creates: list[list[dict]] = []
+        patches: list[tuple[str, list[dict]]] = []
+
+        def on_post(request, **kwargs):
+            url = str(request.url)
+            if "/search" in url:
+                q = normalize_title(_json.loads(request.content).get("query", ""))
+                data = [
+                    {"id": o["id"], "name": o["name"], "type": {"key": tk}, "properties": []}
+                    for (n, tk), o in store.items() if n == q
+                ]
+                return httpx.Response(200, json={"data": data, "pagination": {"has_more": False}})
+            if "/objects" in url:
+                payload = _json.loads(request.content)
+                name, tk = payload.get("name", ""), payload.get("type_key", "")
+                counter["n"] += 1
+                oid = f"obj-{counter['n']}"
+                store[(normalize_title(name), tk)] = {"id": oid, "name": name}
+                if tk == "wiki_source":
+                    source_creates.append(payload.get("properties") or [])
+                return httpx.Response(201, json={"object": {"id": oid, "name": name}})
+            return httpx.Response(200, json={"response": "not-json"})
+
+        def on_patch(request, **kwargs):
+            payload = _json.loads(request.content)
+            patches.append((str(request.url), payload.get("properties") or []))
+            return httpx.Response(200, json={"object": {"id": "patched"}})
+
+        _mock_article_page()
+        respx.get().mock(
+            side_effect=lambda request, **kw: httpx.Response(200, json=_make_schema_ok_response())
+        )
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+
+        results = []
+        for summary in summaries:
+            out = {"entities": [{"name": "Summary Entity", "description": "facts"}],
+                   "concepts": []}
+            if summary is not None:
+                out["summary"] = summary
+            monkeypatch.setattr(_ingest, "extract", lambda _out=out, **kw: _out)
+            results.append(wiki_ingest(source=src, space_id=FAKE_SPACE_ID))
+        source_id = results[0]["source_object_id"]
+        source_patches = [props for url, props in patches if url.endswith(f"/{source_id}")]
+        return results, source_creates, source_patches
+
+    @staticmethod
+    def _summary(props):
+        return [p.get("text") for p in props if p.get("key") == "wiki_summary"]
+
+    @respx.mock
+    def test_summary_written_on_create_and_on_reuse(self, monkeypatch):
+        results, creates, patches = self._run(
+            monkeypatch, ["First summary.", "Second\x07 summary."]
+        )
+        assert [r["status"] for r in results] == ["ok", "ok"], results
+        assert results[0]["source_object_id"] == results[1]["source_object_id"]
+        assert len(creates) == 1 and self._summary(creates[0]) == ["First summary."]
+        # Reuse path: the second ingest PATCHes the same Source with its own summary,
+        # control characters stripped.
+        assert [self._summary(p) for p in patches] == [["Second summary."]]
+
+    @respx.mock
+    def test_no_summary_writes_no_summary_property(self, monkeypatch):
+        """A summary-less (e.g. degraded) run never blanks a stored summary."""
+        _results, creates, patches = self._run(monkeypatch, [None, "  "])
+        assert len(creates) == 1 and self._summary(creates[0]) == []
+        assert len(patches) == 1 and self._summary(patches[0]) == []
+
+    @respx.mock
+    def test_summary_is_capped(self, monkeypatch):
+        from anytype_llm_wiki.wiki.ingest import SOURCE_SUMMARY_MAX_CHARS
+
+        _results, creates, _patches = self._run(
+            monkeypatch, ["x" * (SOURCE_SUMMARY_MAX_CHARS + 50)]
+        )
+        assert self._summary(creates[0]) == ["x" * SOURCE_SUMMARY_MAX_CHARS]

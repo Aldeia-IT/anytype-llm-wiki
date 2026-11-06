@@ -850,14 +850,14 @@ class TestBootstrapLiveAPI:
 
 
 class TestSchemaVersionBumped:
-    """Guard: WIKI_SCHEMA_VERSION must be '0.4.2' (D11 updated, AC#426 addendum item 1).
+    """Guard: WIKI_SCHEMA_VERSION must be '0.4.3' (Aldeia-IT/aldeia-box#1485; was 0.4.2 in #426).
 
     NOTE (addendum item 1 / QA-1): the spec's Test Plan erroneously claimed no
     hardcoded pin existed.  The addendum corrects this: the pin is updated from
     '0.4.1' to '0.4.2' so the version bump in §1 is guarded by a positive pin.
     """
 
-    def test_wiki_schema_version_is_042(self):
+    def test_wiki_schema_version_is_043(self):
         """D11 (updated): WIKI_SCHEMA_VERSION must be pinned at '0.4.2' (AC#426 §1).
 
         The schema version is load-bearing for the AC-R11 schema-outdated abort:
@@ -868,11 +868,12 @@ class TestSchemaVersionBumped:
         regression guard than the version-relative checks elsewhere in this module.
         Covers: §10.1 checklist item, D11 (updated), AC-R11, addendum item 1.
 
-        FAILS until types_schema.py WIKI_SCHEMA_VERSION is bumped to '0.4.2'.
+        Aldeia-IT/aldeia-box#1485 adds wiki_summary to wiki_source, a schema
+        change, so the pin moves 0.4.2 -> 0.4.3.
         """
         from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
-        assert WIKI_SCHEMA_VERSION == "0.4.2", (
-            f"WIKI_SCHEMA_VERSION must be '0.4.2' (AC#426 §1, addendum item 1); "
+        assert WIKI_SCHEMA_VERSION == "0.4.3", (
+            f"WIKI_SCHEMA_VERSION must be '0.4.3' (Aldeia-IT/aldeia-box#1485); "
             f"got: {WIKI_SCHEMA_VERSION!r}. Bump types_schema.py WIKI_SCHEMA_VERSION."
         )
 
@@ -2844,7 +2845,7 @@ class TestReconcilePartialFailureRecoversOnRerun:
 
         # Assertion B: schema-version marker NOT stamped to '0.4.2' after failing run
         from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION as _VERSION
-        assert schema_version_stamped["value"] != "0.4.2", (
+        assert schema_version_stamped["value"] != _VERSION, (
             f"SF-3 / addendum item 4 (assertion B — ordering invariant): "
             f"schema-version marker must NOT be stamped to '0.4.2' when update_type "
             f"fails mid-loop (the WikiLog stamp must come AFTER the full reconcile loop); "

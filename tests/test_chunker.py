@@ -156,16 +156,17 @@ class TestWikiTextPropertyKeysConstant:
         from anytype_llm_wiki.chunker import WIKI_TEXT_PROPERTY_KEYS
         assert isinstance(WIKI_TEXT_PROPERTY_KEYS, frozenset)
 
-    def test_wiki_text_property_keys_has_nine_entries(self):
-        """#336: Allowlist must contain exactly 9 keys — wiki_excerpt added for wiki_source chunking."""
+    def test_wiki_text_property_keys_has_ten_entries(self):
+        """Allowlist must contain exactly 10 keys: wiki_excerpt (#336) and wiki_summary
+        (Aldeia-IT/aldeia-box#1485) for wiki_source chunking."""
         from anytype_llm_wiki.chunker import WIKI_TEXT_PROPERTY_KEYS
-        assert len(WIKI_TEXT_PROPERTY_KEYS) == 9, (
-            f"Expected 9 entries (wiki_excerpt added in #336); got {len(WIKI_TEXT_PROPERTY_KEYS)}: "
+        assert len(WIKI_TEXT_PROPERTY_KEYS) == 10, (
+            f"Expected 10 entries (wiki_summary added in #1485); got {len(WIKI_TEXT_PROPERTY_KEYS)}: "
             f"{sorted(WIKI_TEXT_PROPERTY_KEYS)}"
         )
 
     def test_wiki_text_property_keys_exact_set(self):
-        """#336: Allowlist must contain the 9 specified keys including wiki_excerpt."""
+        """Allowlist must contain the 10 specified keys including wiki_excerpt and wiki_summary."""
         from anytype_llm_wiki.chunker import WIKI_TEXT_PROPERTY_KEYS
         expected = frozenset({
             "wiki_facts",
@@ -177,6 +178,7 @@ class TestWikiTextPropertyKeysConstant:
             "wiki_question",
             "wiki_answer",
             "wiki_excerpt",   # NEW in #336: enables wiki_source chunking
+            "wiki_summary",   # Aldeia-IT/aldeia-box#1485: the source's ingest summary
         })
         assert WIKI_TEXT_PROPERTY_KEYS == expected, (
             f"Expected exact set {expected}; got {WIKI_TEXT_PROPERTY_KEYS}"
@@ -217,6 +219,27 @@ class TestWikiTextPropertyKeysConstant:
             assert WIKI_PROPERTY_HEADING.get(key) == heading, (
                 f"WIKI_PROPERTY_HEADING[{key!r}] expected {heading!r}, got {WIKI_PROPERTY_HEADING.get(key)!r}"
             )
+
+
+class TestWikiSourceSummaryChunk:
+    """Aldeia-IT/aldeia-box#1485 D16: a wiki_source's ingest summary is searchable."""
+
+    def test_wiki_source_summary_is_chunked_under_its_heading(self):
+        from anytype_llm_wiki.chunker import chunk_object
+
+        obj = {
+            "id": "src-1", "space_id": "sp", "name": "https://example.org/a",
+            "type": {"key": "wiki_source"}, "markdown": "",
+            "properties": [
+                {"key": "wiki_excerpt", "text": "The page starts here."},
+                {"key": "wiki_summary", "text": "Mestre Bimba founded Regional."},
+            ],
+        }
+        chunks = chunk_object(obj)
+        summary = [c for c in chunks if c["heading"] == "Summary"]
+        assert [c["text"] for c in summary] == ["Mestre Bimba founded Regional."]
+        assert summary[0]["type_key"] == "wiki_source"
+        assert {c["heading"] for c in chunks} == {"Excerpt", "Summary"}
 
 
 class TestPropertyChunkEmitted:

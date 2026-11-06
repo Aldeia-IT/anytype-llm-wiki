@@ -22,7 +22,8 @@ Return ONLY a single JSON object matching this schema (no prose, no backticks):
 {{
   "entities":   [{{"name": "str", "description": "str"}}],
   "concepts":   [{{"name": "str", "definition": "str"}}],
-  "relations":  [{{"from": "str", "to": "str", "label": "str"}}]
+  "relations":  [{{"from": "str", "to": "str", "label": "str"}}],
+  "summary":    "str"
 }}
 
 ## RULES

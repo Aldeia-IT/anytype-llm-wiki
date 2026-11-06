@@ -62,6 +62,11 @@ _HEADING_RE = re.compile(r"^(#{1,2})\s+(.*\S)\s*$")
 
 _DEGRADED_PREFIX = "extraction_degraded: "
 
+# Cap on the stored source summary (Aldeia-IT/aldeia-box#1485 D16). One window's
+# summary is a few sentences; a joined PDF summary is one per window. The cap only
+# bounds a runaway or hostile model output.
+SOURCE_SUMMARY_MAX_CHARS = 4000
+
 logger = logging.getLogger(__name__)
 
 
@@ -1281,7 +1286,8 @@ def _run_ingest(
         # 9. create Source object.
         with profile.span("create_source"):
             source_id, was_resumed = _create_source(
-                client, space_id, source, markdown, result
+                client, space_id, source, markdown, result,
+                summary=_source_summary(extracted),
             )
         result["source_object_id"] = source_id
 
@@ -1469,14 +1475,41 @@ def _derive_relations(
     return relations
 
 
+def _source_summary(extracted: object) -> str | None:
+    """The extraction's ``summary`` as a storable property value, or None.
+
+    :param extracted: ``extract()``'s (or the PDF window merge's) result.
+    :returns: the summary with control characters and URL secrets removed, cut to
+        ``SOURCE_SUMMARY_MAX_CHARS``; None when there is no non-blank string summary
+        (a degraded or summary-less extraction).
+    """
+    if not isinstance(extracted, dict):
+        return None
+    summary = extracted.get("summary")
+    if not isinstance(summary, str):
+        return None
+    cleaned = sanitize_property_value(scrub_text_urls(summary)).strip()
+    return cleaned[:SOURCE_SUMMARY_MAX_CHARS] or None
+
+
 def _create_source(
-    client: WikiClient, space_id: str, source: str, markdown: str, result: dict
+    client: WikiClient,
+    space_id: str,
+    source: str,
+    markdown: str,
+    result: dict,
+    summary: str | None = None,
 ) -> tuple[str | None, bool]:
     """Create or reuse the wiki_source object.
 
     Returns ``(source_id, was_resumed)`` where ``was_resumed`` is True when an
     existing Source was reused (partial-resume signal, E2). Records a warning on
     failure (non-fatal).
+
+    ``summary`` (Aldeia-IT/aldeia-box#1485 D16) is the extraction's summary of the
+    source, already cleaned by ``_source_summary``. It is written to
+    ``wiki_summary`` on both the create and the dedup-reuse path. None writes
+    nothing, so a degraded re-ingest keeps the summary already stored.
     """
     is_url = source.startswith("http://") or source.startswith("https://")
     # Scrub secrets before persisting the document excerpt to Qdrant, for symmetry
@@ -1487,6 +1520,8 @@ def _create_source(
         {"key": "wiki_excerpt", "text": excerpt},
         {"key": "wiki_ingested_at", "date": datetime.now(timezone.utc).isoformat()},
     ]
+    if summary:
+        props.append({"key": "wiki_summary", "text": summary})
     if is_url:
         props.insert(0, {"key": "wiki_url", "url": source})
     else:

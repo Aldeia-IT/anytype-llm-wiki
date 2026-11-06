@@ -14,6 +14,7 @@ WIKI_TEXT_PROPERTY_KEYS = frozenset({
     "wiki_facts", "wiki_description", "wiki_definition", "wiki_open_questions",
     "wiki_dimensions", "wiki_verdict", "wiki_question", "wiki_answer",
     "wiki_excerpt",  # NEW in #336: enables wiki_source objects to be chunked
+    "wiki_summary",  # Aldeia-IT/aldeia-box#1485: the ingest summary of a wiki_source
 })
 WIKI_PROPERTY_HEADING = {
     "wiki_facts": "Facts", "wiki_description": "Description",
@@ -21,6 +22,7 @@ WIKI_PROPERTY_HEADING = {
     "wiki_dimensions": "Dimensions", "wiki_verdict": "Verdict",
     "wiki_question": "Question", "wiki_answer": "Answer",
     "wiki_excerpt": "Excerpt",  # NEW in #336
+    "wiki_summary": "Summary",
 }
 
 

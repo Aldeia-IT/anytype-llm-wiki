@@ -28,7 +28,7 @@ The wiki is a small set of Anytype types created by `wiki_bootstrap`:
 | `wiki_entity` | a named thing (person, org, token, place) | `wiki_facts`, `wiki_relations`, `wiki_sources`, `wiki_status`, `wiki_contradictions` |
 | `wiki_concept` | an idea/abstraction | `wiki_definition`, `wiki_related`, `wiki_open_questions`, `wiki_sources` |
 | `wiki_query` | a filed Q&A from `wiki_query` | `wiki_question`, `wiki_answer`, `wiki_asked_at`, `wiki_drew_from` |
-| `wiki_source` | provenance of an ingest/remember | source type tag, timestamps |
+| `wiki_source` | provenance of an ingest/remember | `wiki_url`/`wiki_file_path`, `wiki_excerpt`, `wiki_summary` (ingest only), source type tag, timestamps |
 | `wiki_log` | append-only audit receipt per run | `wiki_action`, `wiki_notes`, `wiki_timestamp`, `wiki_schema_version` |
 | `wiki_comparison` | (reserved) | — |
 
