@@ -487,9 +487,13 @@ def space_ingest_lock(space_id: str, source_ref: str | None = None):
         safe_space_id = hashlib.sha256(space_id.encode("utf-8")).hexdigest()[:16]
     lock_path = os.path.join(lock_dir, f"ingest-{safe_space_id}.lock")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    os.chmod(lock_path, 0o600)
-
+    # The outer ``finally`` is the ONLY place this fd is closed, on every path
+    # (Aldeia-IT/aldeia-box#1483). A second close of the same number is not
+    # harmless: in one process another thread can open its own lock fd between
+    # the two closes and get this number back, and the second close would then
+    # close that thread's fd and silently drop its flock.
     try:
+        os.chmod(lock_path, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -504,7 +508,6 @@ def space_ingest_lock(space_id: str, source_ref: str | None = None):
                     holder_hint = f" (held by pid {holder_pid} since {holder_started})"
             except (OSError, ValueError):
                 holder_hint = ""
-            os.close(fd)
             raise RuntimeError(
                 f"[DATA ERROR] ingest_in_progress: another ingest is already "
                 f"running for space {space_id}{holder_hint}"
@@ -524,10 +527,7 @@ def space_ingest_lock(space_id: str, source_ref: str | None = None):
         yield
     finally:
         # Closing the fd releases the flock (kernel-level). Leave the file on disk.
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------
