@@ -4235,3 +4235,79 @@ class TestCreateSourceWritesWikiUrl:
         keys = [p.get("key") for p in client.created[0]]
         assert "wiki_url" not in keys
         assert "wiki_file_path" in keys
+
+
+class TestContradictionChecksBatchedPerIngest:
+    """Aldeia-IT/aldeia-box#1485 D3: every updated object is still checked, in ONE
+    model call per ingest, and each object's verdict still becomes its links."""
+
+    @respx.mock
+    def test_two_updated_objects_take_one_model_call(self, monkeypatch):
+        import json as _json
+
+        import anytype_llm_wiki.wiki.ingest as _ingest
+        from anytype_llm_wiki.wiki.util import normalize_title
+
+        source_url = "https://example.com/two-updates"
+        objects = {"alpha": "obj-alpha", "beta": "obj-beta"}
+        peer_id = "peer-shared"
+        monkeypatch.setattr(_ingest, "extract", lambda **kw: {
+            "entities": [{"name": "Alpha", "description": "Alpha was born in 1900."},
+                         {"name": "Beta", "description": "Beta was born in 1910."}],
+            "concepts": [],
+        })
+        monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
+
+        prompts: list[str] = []
+
+        def fake_model(base, prompt):
+            prompts.append(prompt)
+            return {"results": [
+                {"check_id": "check_1", "contradictions": [{"object_id": peer_id, "reason": "r"}]},
+                {"check_id": "check_2", "contradictions": []},
+            ]}, None
+
+        monkeypatch.setattr(_ingest, "_call_ollama_prompt", fake_model)
+
+        def on_get(request, **kwargs):
+            if f"/objects/{peer_id}" in str(request.url):
+                return httpx.Response(200, json=_make_peer_get_object_response(peer_id))
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        def on_post(request, **kwargs):
+            payload = _json.loads(request.content or b"{}")
+            if "/search" in str(request.url):
+                key = normalize_title(payload.get("query", ""))
+                if key in objects:
+                    return httpx.Response(200, json=_make_objects_shaped_search_response(
+                        objects[key], key.capitalize(), peer_id
+                    ))
+                return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
+            return httpx.Response(201, json={"object": {"id": "obj-new", "name": payload.get("name", "")}})
+
+        patches: list[dict] = []
+
+        def on_patch(request, **kwargs):
+            patches.append({"url": str(request.url), "payload": _json.loads(request.content)})
+            obj_id = str(request.url).rsplit("/", 1)[-1]
+            return httpx.Response(200, json={"object": {"id": obj_id}})
+
+        _mock_article_page()
+        respx.get().mock(side_effect=on_get)
+        respx.post().mock(side_effect=on_post)
+        respx.patch().mock(side_effect=on_patch)
+
+        result = _ingest.wiki_ingest(source=source_url, space_id=FAKE_SPACE_ID)
+
+        assert [o["object_id"] for o in result["objects_updated"]] == ["obj-alpha", "obj-beta"]
+        assert len(prompts) == 1, prompts
+        assert '"check_id": "check_1"' in prompts[0] and '"check_id": "check_2"' in prompts[0]
+        assert "Alpha was born in 1900." in prompts[0] and "Beta was born in 1910." in prompts[0]
+        assert result["contradictions_detected"] == 1
+        contradiction_patches = [
+            (p["url"].rsplit("/", 1)[-1], prop["objects"])
+            for p in patches for prop in p["payload"].get("properties", [])
+            if prop.get("key") == "wiki_contradictions"
+        ]
+        assert contradiction_patches == [("obj-alpha", [peer_id]), (peer_id, ["obj-alpha"])]
+        assert not any(w.startswith("contradiction_detection_degraded") for w in result["warnings"])
