@@ -34,9 +34,12 @@ queued on a shared Ollama were most of an ingest's time; these changes cut both.
   a model still returns them. `entities`, `concepts`, `relations` and `summary` are asked for as
   before. The prompt is shared, so the change applies to every use of `extract()`: URL and file
   ingest, PDF ingest (each page window) and `wiki_remember`. The shorter prompt also shifts
-  which items the model picks and how it words them: on the five profiled pages one page lost
-  mostly generic concepts ("person", "location", "2019"), another gained named people and some
-  page furniture ("last.fm", "similar artists"); the others moved within run-to-run jitter.
+  which items the model picks and how it words them. On a 25-text sample (15 capoeira pages,
+  5 long Wikipedia pages, 5 `wiki_remember` narrations) it named more people, groups, places and
+  events on capoeira pages (232 -> 321) and Wikipedia pages (61 -> 71), and one fewer on the
+  narrations (30 -> 29). Some named items drop out and others come in, mostly books and press
+  items on long capoeira pages. Long pages that ran out of output tokens and yielded no items fell
+  from 4 to 1 of the 25.
 - **One contradiction-check call per ingest (Aldeia-IT/aldeia-box#1485).** The contradiction
   checks of all objects an ingest updates go to the model in one call that returns a verdict per
   object, instead of one call per object. Every check still runs against the same peers. A missing
