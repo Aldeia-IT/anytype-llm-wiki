@@ -149,6 +149,72 @@ def _read_bm25_corpus_version(space_id: str) -> int:
         return 0
 
 
+# Most chunk texts one reindex embed request carries (Aldeia-IT/aldeia-box#1485
+# D4). Ollama's /api/embed takes a list of any length; the cap only keeps one
+# request well inside the embed client's 120 s timeout when a first or forced
+# reindex embeds a whole space. An ingest's reindex (41-113 chunks on the
+# profiled pages) takes one request.
+EMBED_BATCH_TEXTS = 256
+
+
+def _index_pending(
+    client: QdrantClient,
+    pending: list[tuple[str, str, list[dict]]],
+    space_state: dict,
+    stats: dict,
+) -> None:
+    """Embed the chunks of several changed objects in one request, then index each.
+
+    Per object, as before: its old vectors are deleted, its new points upserted,
+    its ``last_modified`` recorded in ``space_state`` and the stats counted. The
+    old vectors are deleted only after the embed succeeded.
+
+    :param pending: ``(object_id, last_modified, chunks)`` per changed object.
+    :raises ValueError: when the embedder returns a vector count that does not
+        match the texts (the vectors could not be told apart per object).
+    """
+    texts = [c["text"] for _oid, _mod, chunks in pending for c in chunks]
+    with profile.span("reindex_embed", chunks=len(texts), objects=len(pending)):
+        vectors = embed(texts)
+    if len(vectors) != len(texts):
+        raise ValueError(f"embedder returned {len(vectors)} vectors for {len(texts)} texts")
+    offset = 0
+    for oid, last_mod, chunks in pending:
+        obj_vectors = vectors[offset:offset + len(chunks)]
+        offset += len(chunks)
+        _delete_object_vectors(client, oid)
+        points = _chunk_points(chunks, obj_vectors)
+        client.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
+        space_state[oid] = last_mod
+        stats["objects_indexed"] += 1
+        stats["chunks"] += len(points)
+
+
+def _chunk_points(chunks: list[dict], vectors: list[list[float]]) -> list[PointStruct]:
+    """Build an object's Qdrant points: one per chunk, with a stable id.
+
+    The id is uuid5 of ``object_id:index:heading``, so a re-embed of an
+    unchanged chunk overwrites its point.
+
+    :param chunks: the object's chunks, in ``chunk_object`` order.
+    :param vectors: one vector per chunk, same order.
+    :returns: the points to upsert.
+    """
+    return [
+        PointStruct(
+            id=str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{chunk['object_id']}:{i}:{chunk['heading']}",
+                )
+            ),
+            vector=vec,
+            payload=_chunk_to_payload(chunk),
+        )
+        for i, (chunk, vec) in enumerate(zip(chunks, vectors))
+    ]
+
+
 def _chunk_to_payload(chunk: dict) -> dict:
     """Build the Qdrant point payload from a chunk dict.
 
@@ -915,6 +981,11 @@ def _run_reindex(space_id: str | None = None) -> dict:
             meta["objects"] = len(objects)
         current_ids = set()
 
+        # Changed objects wait here so their chunks share one embed request
+        # (Aldeia-IT/aldeia-box#1485 D4) instead of one request per object.
+        pending: list[tuple[str, str, list[dict]]] = []
+        pending_texts = 0
+
         for obj_summary in objects:
             oid = obj_summary["id"]
             current_ids.add(oid)
@@ -943,32 +1014,15 @@ def _run_reindex(space_id: str | None = None) -> dict:
             if not chunks:
                 continue
 
-            # Delete old vectors for this object
-            _delete_object_vectors(client, oid)
+            pending.append((oid, last_mod, chunks))
+            pending_texts += len(chunks)
+            if pending_texts >= EMBED_BATCH_TEXTS:
+                _index_pending(client, pending, space_state, stats)
+                changed_spaces.add(sid)
+                pending, pending_texts = [], 0
 
-            # Embed and upsert
-            texts = [c["text"] for c in chunks]
-            with profile.span("reindex_embed", chunks=len(texts)):
-                vectors = embed(texts)
-
-            points = [
-                PointStruct(
-                    id=str(
-                        uuid.uuid5(
-                            uuid.NAMESPACE_URL,
-                            f"{chunk['object_id']}:{i}:{chunk['heading']}",
-                        )
-                    ),
-                    vector=vec,
-                    payload=_chunk_to_payload(chunk),
-                )
-                for i, (chunk, vec) in enumerate(zip(chunks, vectors))
-            ]
-
-            client.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
-            space_state[oid] = last_mod
-            stats["objects_indexed"] += 1
-            stats["chunks"] += len(points)
+        if pending:
+            _index_pending(client, pending, space_state, stats)
             changed_spaces.add(sid)
 
         # Remove vectors for deleted objects
@@ -1050,19 +1104,7 @@ def reembed_object(space_id: str, object_id: str, obj: dict) -> dict:
     points = []
     if chunks:
         vectors = embed([c["text"] for c in chunks])
-        points = [
-            PointStruct(
-                id=str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"{chunk['object_id']}:{i}:{chunk['heading']}",
-                    )
-                ),
-                vector=vec,
-                payload=_chunk_to_payload(chunk),
-            )
-            for i, (chunk, vec) in enumerate(zip(chunks, vectors))
-        ]
+        points = _chunk_points(chunks, vectors)
         client.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
 
     # Bump this space's BM25 corpus version (D3). The load/bump/save cycle races
