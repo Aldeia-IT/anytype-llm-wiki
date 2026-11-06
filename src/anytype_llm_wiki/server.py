@@ -186,7 +186,8 @@ def wiki_ingest(
 
     A PDF (URL or local ``.pdf``) with a text layer is read page by page, up to
     ``WIKI_PDF_MAX_PAGES`` pages (default 40; ``pdf_pages_capped`` names a
-    cut-off), and extracted in page windows; every fact ends with its page(s),
+    cut-off) and ``WIKI_PDF_MAX_PARSE_S`` seconds of parsing (default 60;
+    ``pdf_parse_time_capped``), and extracted in page windows; every fact ends with its page(s),
     e.g. ``[p. 12]``. A PDF without a text layer is refused as ``no_usable_content:
     image_only_pdf`` (no OCR). While another writer holds the space's lock, the
     call waits for it up to ``WIKI_INGEST_LOCK_WAIT_S`` (default 1800 s) and then

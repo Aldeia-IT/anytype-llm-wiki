@@ -15,6 +15,7 @@ a traceback in the ingest result.
 import io
 import logging
 import re
+import time
 import unicodedata
 from collections.abc import Callable
 
@@ -109,20 +110,28 @@ def page_label(numbers: list[int]) -> str:
     return "pp. " + ", ".join(parts)
 
 
-def read_pdf(data: bytes, max_pages: int) -> dict:
+def read_pdf(data: bytes, max_pages: int, max_parse_s: float = 60.0) -> dict:
     """Read the text layer of the first ``max_pages`` pages of a PDF.
+
+    The parse runs while the space lock is held, so it has a wall-clock budget:
+    the clock is checked before each page, and once ``max_parse_s`` seconds have
+    passed the remaining pages are not read. A single page that is slow to parse
+    is not interrupted; the budget stops the next one.
 
     :param data: the whole PDF file.
     :param max_pages: how many pages to read (``WIKI_PDF_MAX_PAGES``).
+    :param max_parse_s: wall-clock budget in seconds (``WIKI_PDF_MAX_PARSE_S``).
     :returns: ``{"pages", "total_pages", "pages_read", "no_text_pages",
         "warnings"}``. ``pages`` lists ``(page_number, text)`` for every read page
         that has a text layer (1-based numbers). ``warnings`` names a cut-off
-        (``pdf_pages_capped``), pages without a text layer
+        (``pdf_pages_capped``), a spent time budget (``pdf_parse_time_capped``),
+        pages without a text layer
         (``pdf_pages_without_text``), pages pypdf could not read
         (``pdf_pages_unreadable``) and garbled text (``pdf_text_degraded``).
     :raises PdfUnreadable: the file is not a readable PDF (``pdf_unreadable: <cls>``)
         or is encrypted with a password (``pdf_encrypted``).
     """
+    started = time.monotonic()
     try:
         reader = PdfReader(io.BytesIO(data))
         if reader.is_encrypted:
@@ -138,12 +147,18 @@ def read_pdf(data: bytes, max_pages: int) -> dict:
     except Exception as exc:  # any parser failure on untrusted bytes
         raise PdfUnreadable(f"pdf_unreadable: {type(exc).__name__}") from exc
 
-    pages_read = min(total, max_pages)
+    page_cap = min(total, max_pages)
+    pages_read = 0
+    timed_out = False
     pages: list[Page] = []
     no_text: list[int] = []
     failed: list[int] = []
     garbled: list[int] = []
-    for index in range(pages_read):
+    for index in range(page_cap):
+        if time.monotonic() - started >= max_parse_s:
+            timed_out = True
+            break
+        pages_read += 1
         number = index + 1
         try:
             raw = reader.pages[index].extract_text() or ""
@@ -160,9 +175,14 @@ def read_pdf(data: bytes, max_pages: int) -> dict:
         pages.append((number, text))
 
     warnings: list[str] = []
-    if total > pages_read:
+    if total > page_cap:
         warnings.append(
-            f"pdf_pages_capped: read {pages_read} of {total} pages (WIKI_PDF_MAX_PAGES)"
+            f"pdf_pages_capped: read {page_cap} of {total} pages (WIKI_PDF_MAX_PAGES)"
+        )
+    if timed_out:
+        warnings.append(
+            f"pdf_parse_time_capped: read {pages_read} of {page_cap} pages in the "
+            f"{max_parse_s:g} s budget (WIKI_PDF_MAX_PARSE_S)"
         )
     if failed:
         warnings.append(f"pdf_pages_unreadable: {page_label(failed)}")

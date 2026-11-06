@@ -572,7 +572,7 @@ def _pdf_result(out: dict, data: bytes) -> dict:
     ``markdown`` to a ``[DATA ERROR]`` string.
     """
     try:
-        read = pdf.read_pdf(data, config.pdf_max_pages())
+        read = pdf.read_pdf(data, config.pdf_max_pages(), config.pdf_max_parse_s())
     except pdf.PdfUnreadable as exc:
         out["markdown"] = f"[DATA ERROR] {exc}"
         return out
@@ -593,33 +593,55 @@ def _pdf_result(out: dict, data: bytes) -> dict:
     return out
 
 
-def _fetch_file_bytes(source: str) -> bytes | str:
-    """Read a local file's bytes, or return a ``[DATA ERROR]`` string."""
+def _read_local(source: str, cap: int) -> bytes | str:
+    """Read at most ``cap + 1`` bytes of a regular local file.
+
+    ``stat().st_size`` is 0 for a FIFO, a device or a symlink to ``/dev/zero``,
+    so a size check alone cannot bound the read: only a regular file is read,
+    and never past ``cap + 1`` bytes (the extra byte tells the caller the file
+    is over its cap).
+
+    :param source: the local path.
+    :param cap: the byte cap of the caller.
+    :returns: the bytes read, or a ``[DATA ERROR]`` string (``file_not_found``,
+        ``not_a_regular_file``, ``file_read_failed``).
+    """
     path = Path(source)
     if not path.exists():
         return f"[DATA ERROR] file_not_found: {source}"
+    if not path.is_file():
+        return f"[DATA ERROR] not_a_regular_file: {source}"
     try:
-        size = path.stat().st_size
-        if size > config.fetch_max_pdf_bytes():
-            return (
-                f"[DATA ERROR] pdf_too_large: over {config.fetch_max_pdf_bytes()} "
-                "bytes (WIKI_FETCH_MAX_PDF_BYTES)"
-            )
-        return path.read_bytes()
+        with path.open("rb") as handle:
+            return handle.read(max(cap, 0) + 1)
     except OSError as exc:
         return f"[DATA ERROR] file_read_failed: {source} ({exc})"
+
+
+def _fetch_file_bytes(source: str) -> bytes | str:
+    """Read a local PDF's bytes, or return a ``[DATA ERROR]`` string.
+
+    A file over ``WIKI_FETCH_MAX_PDF_BYTES`` is refused (``pdf_too_large``): a
+    cut PDF cannot be parsed.
+    """
+    cap = config.fetch_max_pdf_bytes()
+    data = _read_local(source, cap)
+    if isinstance(data, bytes) and len(data) > cap:
+        return f"[DATA ERROR] pdf_too_large: over {cap} bytes (WIKI_FETCH_MAX_PDF_BYTES)"
+    return data
 
 
 def _fetch_file(source: str) -> str:
-    """Read a local file; HTML files are converted to markdown."""
-    path = Path(source)
-    if not path.exists():
-        return f"[DATA ERROR] file_not_found: {source}"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return f"[DATA ERROR] file_read_failed: {source} ({exc})"
-    if path.suffix.lower() in (".html", ".htm"):
+    """Read a local file; HTML files are converted to markdown.
+
+    The file is cut at ``WIKI_FETCH_MAX_BYTES``, like a fetched page.
+    """
+    cap = max(_max_bytes(), 0)
+    data = _read_local(source, cap)
+    if isinstance(data, str):
+        return data
+    text = data[:cap].decode("utf-8", errors="replace")
+    if Path(source).suffix.lower() in (".html", ".htm"):
         return _to_markdown(text, "text/html")
     return text
 

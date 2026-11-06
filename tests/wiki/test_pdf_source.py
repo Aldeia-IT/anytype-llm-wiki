@@ -42,6 +42,7 @@ def _pdf_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("WIKI_PDF_MAX_PAGES", raising=False)
     monkeypatch.delenv("WIKI_FETCH_MAX_PDF_BYTES", raising=False)
+    monkeypatch.delenv("WIKI_PDF_MAX_PARSE_S", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,108 @@ class TestPageCap:
         assert config.pdf_max_pages() == 40
 
 
+class TestParseTimeCap:
+    """The parse runs under the space lock, so it stops once its budget is spent."""
+
+    def test_pages_past_the_time_budget_are_not_read_and_named(self, monkeypatch, tmp_path):
+        import types
+
+        from anytype_llm_wiki.wiki import pdf as pdf_mod
+        from anytype_llm_wiki.wiki.fetch import fetch_source
+
+        ticks = iter(range(0, 1000, 25))  # every clock read is 25 s later
+        monkeypatch.setattr(pdf_mod, "time", types.SimpleNamespace(monotonic=lambda: next(ticks)))
+        monkeypatch.setenv("WIKI_PDF_MAX_PARSE_S", "60")
+        path = tmp_path / "slow.pdf"
+        path.write_bytes(make_pdf(_pages(5)))
+        fetched = fetch_source(str(path))
+        # start 0; checks before p. 1 (25 s) and p. 2 (50 s) pass, p. 3 (75 s) stops.
+        assert [n for n, _ in fetched["pdf_pages"]] == [1, 2]
+        assert fetched["warnings"] == [
+            "pdf_parse_time_capped: read 2 of 5 pages in the 60 s budget (WIKI_PDF_MAX_PARSE_S)"
+        ]
+
+    def test_default_budget_is_sixty_seconds(self):
+        from anytype_llm_wiki.wiki import config
+
+        assert config.pdf_max_parse_s() == 60
+
+
+class TestRefusals:
+    def test_encrypted_pdf_is_refused(self, tmp_path):
+        import io
+
+        from pypdf import PdfReader, PdfWriter
+
+        from anytype_llm_wiki.wiki.fetch import fetch_source
+
+        writer = PdfWriter(clone_from=PdfReader(io.BytesIO(make_pdf([BIMBA]))))
+        writer.encrypt(user_password="secret", algorithm="RC4-128")
+        out = io.BytesIO()
+        writer.write(out)
+        path = tmp_path / "locked.pdf"
+        path.write_bytes(out.getvalue())
+        fetched = fetch_source(str(path))
+        assert fetched["markdown"] == "[DATA ERROR] pdf_encrypted", fetched
+
+    def test_local_pdf_over_its_cap_is_refused(self, monkeypatch, tmp_path):
+        from anytype_llm_wiki.wiki.fetch import fetch_source
+
+        data = make_pdf(_pages(3))
+        path = tmp_path / "big.pdf"
+        path.write_bytes(data)
+        monkeypatch.setenv("WIKI_FETCH_MAX_PDF_BYTES", str(len(data) - 1))
+        fetched = fetch_source(str(path))
+        assert fetched["markdown"] == (
+            f"[DATA ERROR] pdf_too_large: over {len(data) - 1} bytes (WIKI_FETCH_MAX_PDF_BYTES)"
+        )
+        monkeypatch.setenv("WIKI_FETCH_MAX_PDF_BYTES", str(len(data)))
+        assert fetch_source(str(path))["pdf_pages"], "a PDF at its cap is read"
+
+
+class TestLocalFileIsRegular:
+    """``stat().st_size`` is 0 for a FIFO or a device, so only a regular file is read."""
+
+    @staticmethod
+    def _fetch_in_thread(source: str) -> dict:
+        import threading
+
+        from anytype_llm_wiki.wiki.fetch import fetch_source
+
+        box: dict = {}
+        worker = threading.Thread(
+            target=lambda: box.update(out=fetch_source(source)), daemon=True
+        )
+        worker.start()
+        worker.join(5)
+        assert not worker.is_alive(), f"fetch_source({source!r}) never returned"
+        return box["out"]
+
+    @pytest.mark.parametrize("name", ["pipe.pdf", "pipe.md"])
+    def test_fifo_is_refused(self, tmp_path, name):
+        import os
+
+        path = tmp_path / name
+        os.mkfifo(path)
+        fetched = self._fetch_in_thread(str(path))
+        assert fetched["markdown"] == f"[DATA ERROR] not_a_regular_file: {path}"
+
+    @pytest.mark.parametrize("name", ["zero.pdf", "zero.md"])
+    def test_symlink_to_a_device_is_refused(self, tmp_path, name):
+        path = tmp_path / name
+        path.symlink_to("/dev/zero")
+        fetched = self._fetch_in_thread(str(path))
+        assert fetched["markdown"] == f"[DATA ERROR] not_a_regular_file: {path}"
+
+    def test_local_text_file_is_cut_at_the_fetch_cap(self, monkeypatch, tmp_path):
+        from anytype_llm_wiki.wiki.fetch import fetch_source
+
+        path = tmp_path / "notes.md"
+        path.write_text("a" * 50)
+        monkeypatch.setenv("WIKI_FETCH_MAX_BYTES", "20")
+        assert fetch_source(str(path))["markdown"] == "a" * 20
+
+
 class TestRemotePdf:
     @pytest.fixture(autouse=True)
     def _resolve_public(self, monkeypatch):
@@ -164,6 +267,44 @@ class TestRemotePdf:
         assert fetched["content_type"] == "application/pdf"
         assert fetched["raw"] is None
         assert fetched["markdown"].startswith("[p. 1]\n\nMestre Bimba founded")
+
+    @respx.mock
+    def test_redirect_to_a_pdf_checks_each_hop_then_reads_the_pdf(self, monkeypatch):
+        import socket
+
+        from anytype_llm_wiki.wiki import fetch as fetch_mod
+        from anytype_llm_wiki.wiki.fetch import fetch_source
+
+        resolved: list[str] = []
+
+        def resolve(host, *a, **k):
+            resolved.append(host)
+            ip = "10.0.0.7" if host == "intranet.example" else "93.184.216.34"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+        monkeypatch.setattr(fetch_mod.socket, "getaddrinfo", resolve)
+        mirror = "https://mirror.example/files/capoeira.pdf"
+        respx.get(PDF_URL).mock(
+            return_value=httpx.Response(302, headers={"Location": mirror})
+        )
+        respx.get(mirror).mock(
+            return_value=httpx.Response(
+                200, content=make_pdf([BIMBA, PASTINHA]),
+                headers={"content-type": "application/pdf"},
+            )
+        )
+        fetched = fetch_source(PDF_URL)
+        assert resolved == ["lalaue.example", "mirror.example"], "every hop is checked"
+        assert fetched["content_type"] == "application/pdf"
+        assert [n for n, _ in fetched["pdf_pages"]] == [1, 2]
+
+        resolved.clear()
+        respx.get(PDF_URL).mock(
+            return_value=httpx.Response(302, headers={"Location": "https://intranet.example/x.pdf"})
+        )
+        blocked = fetch_source(PDF_URL)
+        assert "ssrf_blocked" in blocked["markdown"], blocked
+        assert blocked["pdf_pages"] is None
 
     def test_html_quoting_the_magic_stays_a_page(self):
         from anytype_llm_wiki.wiki.pdf import is_pdf

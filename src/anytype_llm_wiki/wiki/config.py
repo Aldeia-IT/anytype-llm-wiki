@@ -53,6 +53,9 @@ DEFAULT_WIKI_EXTRACT_OUTPUT_TOKENS = 4096
 # PDF over the byte cap is refused (a cut PDF cannot be parsed).
 DEFAULT_WIKI_PDF_MAX_PAGES = 40
 DEFAULT_WIKI_FETCH_MAX_PDF_BYTES = 25 * 1024 * 1024
+# Wall-clock budget for parsing one PDF: pypdf runs while the space lock is held,
+# so a crafted PDF must not stall every waiting ingest.
+DEFAULT_WIKI_PDF_MAX_PARSE_S = 60
 
 # Aldeia-IT/aldeia-box#1483 D2: wiki_ingest waits this long for the per-space lock.
 DEFAULT_WIKI_INGEST_LOCK_WAIT_S = 1800.0
@@ -173,6 +176,18 @@ def pdf_max_pages() -> int:
     back to the default (Aldeia-IT/aldeia-box#1483 D4).
     """
     return _positive_int("WIKI_PDF_MAX_PAGES", DEFAULT_WIKI_PDF_MAX_PAGES)
+
+
+def pdf_max_parse_s() -> int:
+    """Resolve WIKI_PDF_MAX_PARSE_S — seconds one PDF may take to parse (default 60).
+
+    ``read_pdf`` checks the clock between pages and stops reading once the
+    budget is spent; ingest names the cut-off in its warnings
+    (``pdf_parse_time_capped``). The parse runs while the space lock is held, so
+    the budget bounds how long a crafted PDF can stall other ingests. Non-numeric
+    or non-positive values fall back to the default (Aldeia-IT/aldeia-box#1483).
+    """
+    return _positive_int("WIKI_PDF_MAX_PARSE_S", DEFAULT_WIKI_PDF_MAX_PARSE_S)
 
 
 def fetch_max_pdf_bytes() -> int:

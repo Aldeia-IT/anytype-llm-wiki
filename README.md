@@ -226,6 +226,7 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_INDEX_THRESHOLD` | `200` | Object count at which `wiki_query` flips Tier 1 → Tier 2 |
 | `WIKI_QUERY_MAX_NEIGHBORS` | `16` | Cap on distinct 1-hop neighbours `wiki_query` fans out to fetch and cite per query |
 | `WIKI_PDF_MAX_PAGES` | `40` | Pages of a PDF source that `wiki_ingest` reads; later pages are skipped and the result's warnings name the cut-off (`pdf_pages_capped`) |
+| `WIKI_PDF_MAX_PARSE_S` | `60` | Seconds one PDF may take to parse (checked between pages, while the space lock is held); later pages are skipped and the result's warnings name the cut-off (`pdf_parse_time_capped`) |
 | `WIKI_FETCH_MAX_BYTES` / `WIKI_FETCH_MAX_PDF_BYTES` | `10485760` / `26214400` | Size caps of a fetched page (cut at the cap) and of a PDF source (refused over the cap, as a cut PDF cannot be read) |
 | `WIKI_INGEST_LOCK_WAIT_S` | `1800` | Seconds `wiki_ingest` waits for a space's lock held by another writer before it returns `ingest_in_progress`; `0` tries once |
 | `WIKI_AUTO_REINDEX` | `true` | Auto-reindex after each write (set `false` to batch via a scheduled reindex) |
