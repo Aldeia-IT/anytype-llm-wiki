@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 SECTION_PREFIX = "## Source: "
 LEGACY_LABEL = "unattributed (before per-source facts)"
+SELF_CANDIDATE_MAX_SECTIONS = 8
+SELF_CANDIDATE_MAX_CHARS = 6000
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,11 @@ class SectionMerge:
     new_units: tuple[str, ...]
     tagged: int
     earlier: tuple[FactSection, ...]
+
+
+def fact_source_label(source: str) -> str:
+    """Section label for a source reference or Source name, with secrets scrubbed."""
+    raise NotImplementedError("not implemented")
 
 
 def split_fact_units(facts: str) -> list[str]:
@@ -58,8 +65,10 @@ def append_source_section(
     raise NotImplementedError("not implemented")
 
 
-def self_candidates(obj_id: str, earlier: tuple[FactSection, ...]) -> list[dict]:
-    """Contradiction-check candidates for an object's own earlier sections."""
+def self_candidates(
+    obj_id: str, name: str, earlier: tuple[FactSection, ...]
+) -> list[dict]:
+    """Contradiction-check candidates for an object's own earlier sections, capped."""
     raise NotImplementedError("not implemented")
 
 
@@ -70,6 +79,13 @@ def add_conflict_markers(
     raise NotImplementedError("not implemented")
 
 
-def no_lines_dropped(old_text: str, candidate_text: str) -> bool:
-    """True only if the candidate keeps every unit line and section heading of ``old_text``."""
+def add_also_tags(text: str, label: str, duplicates: list[tuple[int, str]]) -> str:
+    """Tag the matching unit of each ``(section index, earlier text)`` with ``[also: <label>]``."""
+    raise NotImplementedError("not implemented")
+
+
+def no_lines_dropped(
+    old_text: str, candidate_text: str, *, label: str, source_id: str | None
+) -> bool:
+    """True only if the candidate keeps every section, unit, tag and flag of ``old_text``."""
     raise NotImplementedError("not implemented")

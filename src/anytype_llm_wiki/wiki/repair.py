@@ -16,6 +16,6 @@ def plan_chain_repair(space_id: str) -> dict:
     raise NotImplementedError("not implemented")
 
 
-def apply_chain_repair(space_id: str, *, expect_digest: str) -> dict:
+def apply_chain_repair(space_id: str, *, expect_digest: str, backup_path: str) -> dict:
     """Clear the planned ids; refuses a non-ingest-only space or a digest mismatch."""
     raise NotImplementedError("not implemented")

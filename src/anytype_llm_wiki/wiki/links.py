@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .wiki_client import WikiClient
 from ..anytype_client import AnytypeReadClient
+from .wiki_client import WikiClient
 
 LINK_TYPE_KEY = "wiki_link"
 DEFAULT_LABEL = "related"
 LABEL_MAX_CHARS = 60
+RELATION_SPECS_MAX = 200
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class LinkWriteResult:
     sourced: int = 0
     unchanged: int = 0
     skipped: int = 0
+    failed: int = 0
     notes: list[str] = field(default_factory=list)
 
 
@@ -51,8 +53,8 @@ def normalize_label(raw: object) -> str:
     raise NotImplementedError("not implemented")
 
 
-def link_object_name(from_name: str, label: str, to_name: str) -> str:
-    """Name of a ``wiki_link`` object: ``<from> -[<label>]-> <to>``, at most 200 chars."""
+def link_object_name(from_id: str, to_id: str) -> str:
+    """Name of a ``wiki_link`` object: ``link <from_id[-8:]>-<to_id[-8:]>``, no endpoint names."""
     raise NotImplementedError("not implemented")
 
 
@@ -74,10 +76,7 @@ def load_link_index(
 
 
 def relation_specs(
-    extracted: dict,
-    name_to_id: dict[str, str],
-    *,
-    strip_name=None,
+    extracted: dict, name_to_id: dict[str, str]
 ) -> tuple[list[LinkSpec], list[str]]:
     """Validate the model's ``relations``; returns ``(specs, warnings)``."""
     raise NotImplementedError("not implemented")
@@ -91,8 +90,8 @@ def write_links(
     *,
     source_id: str | None,
     kind_by_id: dict[str, str],
-    names_by_id: dict[str, str],
     link_index: dict[tuple[str, str, str], LinkRecord] | None = None,
+    index_cache: dict[str, list[str]] | None = None,
 ) -> LinkWriteResult:
     """Create or source each link, then add both endpoints to the untyped index."""
     raise NotImplementedError("not implemented")
