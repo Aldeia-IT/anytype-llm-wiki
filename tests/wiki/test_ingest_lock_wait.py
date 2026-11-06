@@ -141,15 +141,23 @@ class TestConcurrentIngestsAllComplete:
         fake_ingest["hold"] = 0.8
         sources = [f"https://example.org/page-{i}" for i in range(5)]
         results: dict[str, dict] = {}
+        errors: dict[str, BaseException] = {}
 
         def call(src):
-            results[src] = _ingest(src)
+            # A caller that raises must fail the test by name, not hide as a
+            # missing result.
+            try:
+                results[src] = _ingest(src)
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                errors[src] = exc
 
         threads = [threading.Thread(target=call, args=(s,)) for s in sources]
         for t in threads:
             t.start()
         for t in threads:
             t.join(60)
+        assert not [t.name for t in threads if t.is_alive()], "a caller is still running"
+        assert errors == {}, {src: repr(exc) for src, exc in errors.items()}
         assert sorted(results) == sorted(sources)
         for src, result in results.items():
             assert "ingest_in_progress" not in str(result), result
