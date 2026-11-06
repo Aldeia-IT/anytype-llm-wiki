@@ -47,12 +47,20 @@ class PdfUnreadable(Exception):
 def is_pdf(data: bytes, content_type: str | None = None) -> bool:
     """Whether a body is a PDF, by its content type or its ``%PDF-`` magic bytes.
 
+    A body served as HTML or text counts only when it starts with the magic, so
+    a web page that merely quotes ``%PDF-`` stays a page. Any other type
+    (``application/octet-stream``, none) counts when the magic is in the first
+    kilobyte, where the PDF specification lets it sit.
+
     :param data: the body bytes (only the first kilobyte is inspected).
     :param content_type: the response's Content-Type, if any.
     :returns: True for a PDF.
     """
-    if content_type and "pdf" in content_type.lower():
+    ctype = (content_type or "").lower()
+    if "pdf" in ctype:
         return True
+    if "html" in ctype or ctype.startswith("text/"):
+        return data.lstrip().startswith(PDF_MAGIC)
     return PDF_MAGIC in data[:1024]
 
 

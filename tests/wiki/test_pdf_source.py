@@ -165,6 +165,15 @@ class TestRemotePdf:
         assert fetched["raw"] is None
         assert fetched["markdown"].startswith("[p. 1]\n\nMestre Bimba founded")
 
+    def test_html_quoting_the_magic_stays_a_page(self):
+        from anytype_llm_wiki.wiki.pdf import is_pdf
+
+        page = b"<html><body><p>The file starts with %PDF-1.7 bytes.</p></body></html>"
+        assert not is_pdf(page, "text/html; charset=utf-8")
+        assert is_pdf(b"%PDF-1.7\n...", "text/plain")
+        assert is_pdf(b"junk\n%PDF-1.7\n...", "application/octet-stream")
+        assert not is_pdf(b"plain text", None)
+
     @respx.mock
     def test_pdf_over_its_cap_is_refused_not_cut(self, monkeypatch):
         from anytype_llm_wiki.wiki.fetch import fetch_source
