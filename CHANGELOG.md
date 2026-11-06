@@ -24,8 +24,10 @@ queued on a shared Ollama were most of an ingest's time; these changes cut both.
 - **Smaller extraction output (Aldeia-IT/aldeia-box#1485).** The extraction prompt no longer asks
   for `summary`, `domain_tags`, `open_questions` or `is_central`. Nothing read them, and they
   were about 45% of the generated text. `extract()` strips them if a model still returns them.
-  `entities`, `concepts` and `relations` are asked for as before; the wording of descriptions can
-  shift a little with the shorter prompt.
+  `entities`, `concepts` and `relations` are asked for as before. The shorter prompt also shifts
+  which items the model picks and how it words them: on the five profiled pages one page lost
+  mostly generic concepts ("person", "location", "2019"), another gained named people and some
+  page furniture ("last.fm", "similar artists"); the others moved within run-to-run jitter.
 - **One contradiction-check call per ingest (Aldeia-IT/aldeia-box#1485).** The contradiction
   checks of all objects an ingest updates go to the model in one call that returns a verdict per
   object, instead of one call per object. Every check still runs against the same peers. A missing
