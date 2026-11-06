@@ -178,11 +178,15 @@ crashes between `begin` and draining), for which there is an explicit
 demand or via cron, never an unbounded wait on traffic.
 
 **`wiki_ingest` participates.** Holding the lock obligates draining the queue:
-`wiki_ingest` acquires with the same bounded retry (waits politely instead of
-fail-fast) and **drains pending `wiki_remember` subjects first**, then does its
-own work — so a long ingest never starves queued learnings. It stays synchronous
-(the operator wants its result inline); if the lock stays held for the whole
-retry budget it returns `ingest_in_progress` for the operator to retry.
+`wiki_ingest` waits for the lock, polling it every 0.25 s for up to
+`WIKI_INGEST_LOCK_WAIT_S` (default 1800 s; Aldeia-IT/aldeia-box#1483), and
+**drains pending `wiki_remember` subjects first**, then does its own work — so a
+long ingest never starves queued learnings. It stays synchronous (the caller
+wants its result inline), so concurrent ingests of one space run one at a time,
+in no set order; only if the lock stays held for the whole wait does it return
+`ingest_in_progress`. The wait counts from each call's own start, so a caller
+queued behind several long PDF ingests can still hit the
+`WIKI_INGEST_LOCK_WAIT_S` timeout. While waiting it holds nothing but its poll.
 
 **Extraction is lock-free.** Since submit appends and only draining holds the
 lock, the long extraction LLM call never holds it — the per-space critical

@@ -227,3 +227,42 @@ def test_a_hinted_run_with_title_strip_does_not_import_the_indexer():
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "", out.stdout
+
+
+class TestDryRunPdf:
+    """Aldeia-IT/aldeia-box#1483 AC1: a PDF is dry-run in page windows with page provenance."""
+
+    @respx.mock
+    def test_pdf_report_has_pages_windows_and_cited_facts(self, capsys, monkeypatch):
+        from .pdf_fixtures import make_pdf
+
+        monkeypatch.setenv("WIKI_PDF_MAX_PAGES", "2")
+        page = (
+            "Mestre Bimba founded the Centro de Cultura Fisica Regional in Salvador,\n"
+            "and his students learned the sequences of Capoeira Regional for years.\n"
+        ) * 3
+        respx.get("https://repo.example/thesis.pdf").mock(
+            return_value=httpx.Response(
+                200, content=make_pdf([page, page, page]),
+                headers={"content-type": "application/pdf"},
+            )
+        )
+        generate = respx.post(f"{OLLAMA}/api/generate").mock(
+            return_value=httpx.Response(200, content=_stream(json.dumps(EXTRACTED)))
+        )
+        module = _load()
+        from anytype_llm_wiki.wiki import pdf as _pdf
+
+        monkeypatch.setattr(_pdf, "source_budget_chars", lambda hint=None: len(page) + 10)
+        assert module.main(["https://repo.example/thesis.pdf"]) == 0
+        (line,) = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        report = json.loads(line)
+        assert report["pages"] == 2 and report["total_pages"] == 3
+        assert report["windows"] == 2 and generate.call_count == 2
+        assert report["warnings"] == ["pdf_pages_capped: read 2 of 3 pages (WIKI_PDF_MAX_PAGES)"]
+        assert report["excerpt"].startswith("[p. 1]")
+        bimba = next(e for e in report["entities"] if e["name"] == "Mestre Bimba")
+        assert bimba["facts"] == (
+            "Founded the first recognised school. [p. 1]\n"
+            "Founded the first recognised school. [p. 2]"
+        )

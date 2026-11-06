@@ -1005,10 +1005,10 @@ class TestIngestEntryPathAcquiresLock:
 
     @respx.mock
     def test_entry_path_errors_when_lock_persistently_held(self, monkeypatch, tmp_path):
-        """Queue-submit model: wiki_ingest acquires the per-space lock with a
-        bounded NB retry (via remember._acquire_and_run); if it stays held for the
-        whole budget, ingest surfaces ingest_in_progress (operator retries). The
-        lock now lives in the remember module's namespace."""
+        """wiki_ingest polls the per-space lock (via remember._acquire_and_run) for
+        up to WIKI_INGEST_LOCK_WAIT_S (Aldeia-IT/aldeia-box#1483); if it stays
+        held for the whole wait, ingest surfaces ingest_in_progress. The lock
+        lives in the remember module's namespace."""
         _write_valid_patch_decision(tmp_path)
         monkeypatch.setenv("ALDEIA_DIR", str(tmp_path))
         respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))

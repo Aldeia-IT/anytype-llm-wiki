@@ -15,6 +15,7 @@ layer merged on top, never a hard dependency.
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -38,6 +39,7 @@ from .extraction import (
     sanitize_property_value,
 )
 from .fetch import fetch_source
+from .pdf import extract_pdf_source
 from .util import (
     _existing_text,
     _relation_ids,
@@ -802,17 +804,13 @@ def wiki_ingest(
         if endpoint:
             check_remote_endpoint_consent(endpoint)
 
-        # 5. lock — acquire with a bounded NB retry (wait politely instead of
-        #    fail-fast), and while holding it, drain any queued wiki_remember
-        #    subjects first: holding the per-space lock obligates draining the
-        #    work-log, so a long ingest never starves queued learnings. Lazy
-        #    imports avoid a circular dependency with remember.py.
-        from .remember import (
-            _DRAIN_ACQUIRE_ATTEMPTS,
-            _DRAIN_ACQUIRE_DELAY,
-            _acquire_and_run,
-            _drain_pending,
-        )
+        # 5. lock — wait for it, polling, up to WIKI_INGEST_LOCK_WAIT_S
+        #    (Aldeia-IT/aldeia-box#1483 D2), and while holding it, drain any
+        #    queued wiki_remember subjects first: holding the per-space lock
+        #    obligates draining the work-log, so a long ingest never starves
+        #    queued learnings. Lazy imports avoid a circular dependency with
+        #    remember.py.
+        from .remember import _acquire_and_run, _drain_pending
 
         def _locked_ingest():
             # A queued-remember drain failure must not block an operator ingest.
@@ -823,18 +821,33 @@ def wiki_ingest(
                 subject_hint=subject_hint,
             )
 
+        wait_s = config.ingest_lock_wait_s()
         result = _acquire_and_run(
             space_id, source, _locked_ingest,
-            attempts=_DRAIN_ACQUIRE_ATTEMPTS * 8, delay=_DRAIN_ACQUIRE_DELAY,
+            attempts=_lock_wait_attempts(wait_s), delay=INGEST_LOCK_POLL_S,
         )
         if result is None:
             return _error_result(
                 "[DATA ERROR] ingest_in_progress: per-space lock held by another "
-                "writer; retry shortly"
+                f"writer for the whole {wait_s:g} s wait (WIKI_INGEST_LOCK_WAIT_S)"
             )
         return result
     finally:
         client.close()
+
+
+# Aldeia-IT/aldeia-box#1483 D2: how often a waiting ingest retries the lock. The
+# wait holds no lock, no Anytype request and no model call: only this sleep.
+INGEST_LOCK_POLL_S = 0.25
+
+
+def _lock_wait_attempts(wait_s: float) -> int:
+    """Lock attempts that span ``wait_s`` seconds at ``INGEST_LOCK_POLL_S`` apart.
+
+    :param wait_s: the wait budget (``WIKI_INGEST_LOCK_WAIT_S``); ``0`` means one try.
+    :returns: at least 1.
+    """
+    return max(1, math.ceil(wait_s / INGEST_LOCK_POLL_S) + 1)
 
 
 def _cmp_versions(a: str, b: str) -> int:
@@ -880,6 +893,9 @@ def _run_ingest(
         # Local files and text keep the empty_source path below.
         if fetched["unusable"]:
             return _error_result(f"[DATA ERROR] no_usable_content: {fetched['unusable']}")
+        # Aldeia-IT/aldeia-box#1483: a PDF's cut-off and degradation notes.
+        result["warnings"].extend(fetched.get("warnings") or [])
+        pdf_pages = fetched.get("pdf_pages")
 
         # 7. derive candidates.
         candidates = _derive_candidates(markdown, fallback_name=_source_name(source))
@@ -907,9 +923,20 @@ def _run_ingest(
         extract_started = time.monotonic()
         extracted: dict | None = None
         try:
-            extracted = extract(
-                markdown=markdown, space_id=space_id, subject_hint=subject_hint
-            )
+            if pdf_pages:
+                # Aldeia-IT/aldeia-box#1483 D4: one extract() per page window;
+                # every fact carries its page(s).
+                extracted = extract_pdf_source(
+                    pdf_pages,
+                    space_id=space_id,
+                    extract_fn=extract,
+                    subject_hint=subject_hint,
+                )
+                result["warnings"].extend(extracted.get("warnings") or [])
+            else:
+                extracted = extract(
+                    markdown=markdown, space_id=space_id, subject_hint=subject_hint
+                )
             # AC#11: ollama model not pulled must abort BEFORE Source creation.
             if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
                 "[CONFIG ERROR] ollama_model_not_pulled"

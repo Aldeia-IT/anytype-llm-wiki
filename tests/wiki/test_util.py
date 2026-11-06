@@ -308,6 +308,61 @@ class TestSpaceIngestLockConcurrency:
             pass
 
 
+class TestSpaceIngestLockClosesEachFdOnce:
+    """A contended acquire closes its fd exactly once (Aldeia-IT/aldeia-box#1483).
+
+    The contention path used to close its fd and raise, then close the same fd
+    number again in the outer ``finally``. With threads in one process, another
+    thread could open its own lock fd between those two closes and get the same
+    number back; the second close then closed that thread's fd and dropped its
+    flock. This test forces that interleaving deterministically: the moment the
+    contender closes its fd, a "victim" opens and flocks the lock file in the
+    same slot.
+    """
+
+    def test_contended_acquire_does_not_close_a_reused_fd(self, tmp_path, monkeypatch):
+        import fcntl
+
+        monkeypatch.setenv("WIKI_LOCK_DIR", str(tmp_path / "locks"))
+        from anytype_llm_wiki.wiki.util import space_ingest_lock
+
+        space_id = "space-fd-reuse"
+        lock_path = str(tmp_path / "locks" / f"ingest-{space_id}.lock")
+        real_close = os.close
+        seen: dict[str, int] = {}
+
+        def close_then_reuse_slot(fd):
+            real_close(fd)
+            if "contender" not in seen:
+                # The contender's first close: another caller opens the lock
+                # file now and gets the lowest free fd, i.e. the same number.
+                seen["contender"] = fd
+                seen["victim"] = os.open(lock_path, os.O_RDWR)
+
+        with space_ingest_lock(space_id, "holder"):
+            monkeypatch.setattr(os, "close", close_then_reuse_slot)
+            with (
+                pytest.raises(RuntimeError, match="ingest_in_progress"),
+                space_ingest_lock(space_id, "contender"),
+            ):
+                pytest.fail("the contender must not acquire a held lock")
+            monkeypatch.setattr(os, "close", real_close)
+
+        victim = seen["victim"]
+        try:
+            # Guard against a vacuous pass: the interleaving must really reuse the slot.
+            assert victim == seen["contender"], seen
+            # The victim's fd must still be open: the contender may not close it.
+            os.fstat(victim)
+            # And it can take and hold the now-free lock.
+            fcntl.flock(victim, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            try:
+                os.close(victim)
+            except OSError:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # scrub_credentials tests — AC #15
 # ---------------------------------------------------------------------------
