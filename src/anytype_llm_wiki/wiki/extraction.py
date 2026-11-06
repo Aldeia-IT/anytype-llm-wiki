@@ -572,22 +572,32 @@ def sanitize_property_value(text: str) -> str:
     return strip_control_chars(text)
 
 
-def filter_extraction_output(raw: dict) -> dict:
-    """Strip any LLM-provided ``is_central`` flag (AC#12).
+# Keys the extraction schema no longer asks for (Aldeia-IT/aldeia-box#1485 D1):
+# nothing reads them, and each one cost decode time. A model that still emits
+# them has them removed here, so no reader can come to depend on them.
+_DROPPED_ITEM_KEYS = frozenset({"is_central", "domain_tags", "open_questions"})
+_DROPPED_TOP_KEYS = frozenset({"summary"})
 
-    Centrality is decided by the ingest pipeline, not by attacker-controlled
-    source text, so any is_central in the raw output is removed.
+
+def filter_extraction_output(raw: dict) -> dict:
+    """Strip the keys the extraction schema does not ask for.
+
+    ``is_central`` (AC#12): centrality is decided by the ingest pipeline, not by
+    attacker-controlled source text, so any is_central in the raw output is
+    removed. ``domain_tags``, ``open_questions`` (per item) and the top-level
+    ``summary`` left the schema in Aldeia-IT/aldeia-box#1485 and are removed
+    the same way. ``relations`` and ``primary_subject`` pass through.
     """
     if not isinstance(raw, dict):
         return {"entities": [], "concepts": []}
-    out = dict(raw)
+    out = {k: v for k, v in raw.items() if k not in _DROPPED_TOP_KEYS}
     for key in ("entities", "concepts"):
         items = out.get(key)
         if isinstance(items, list):
             cleaned = []
             for item in items:
                 if isinstance(item, dict):
-                    item = {k: v for k, v in item.items() if k != "is_central"}
+                    item = {k: v for k, v in item.items() if k not in _DROPPED_ITEM_KEYS}
                 cleaned.append(item)
             out[key] = cleaned
     out.setdefault("entities", [])
