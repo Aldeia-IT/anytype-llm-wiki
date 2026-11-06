@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-06
+
+The version moves to 0.9.0 so an install of this build can be told apart from 0.8.0, which
+stayed 0.8.0 across the changes listed below (Aldeia-IT/aldeia-box#1483 AC4).
+
 ### Added
+
+- **PDF sources (Aldeia-IT/aldeia-box#1483).** `wiki_ingest` reads a PDF, fetched or a local
+  `.pdf` file, instead of refusing it. `wiki/pdf.py` takes the text layer of each page with
+  pypdf (compressed streams included) and keeps its page number; the stored excerpt marks pages
+  as `[p. N]`. Pages are sent to `extract()` in windows that each fit
+  `WIKI_EXTRACT_MAX_INPUT_TOKENS`, and every extracted fact ends with the page(s) it came from
+  (`[p. 12]`, `[pp. 3–5]`); an item found in several windows keeps one entry with each fact
+  cited. `WIKI_PDF_MAX_PAGES` (default 40) caps the pages read; a cut-off is named in the warnings
+  as `pdf_pages_capped: read 40 of N pages`. There is no OCR: a PDF without a text layer is refused
+  as `no_usable_content: image_only_pdf`, and a PDF with too little text gets the HTML gate's
+  `too_little_text`. Pages without text (`pdf_pages_without_text`), pages pypdf cannot read
+  (`pdf_pages_unreadable`), garbled glyphs (`pdf_text_degraded`) and a degraded window when other
+  windows succeeded (`extraction_partial`) are named in the warnings. A PDF has its own size cap,
+  `WIKI_FETCH_MAX_PDF_BYTES` (default 25 MiB); a larger one is refused as `pdf_too_large`, never
+  cut. `scripts/ingest_dry_run.py` reports `pages`, `total_pages`, `windows` and the PDF warnings.
+  New runtime dependency: `pypdf>=6.21.4,<7.0.0` (BSD-3-Clause, no runtime dependencies).
+- **`wiki_ingest` waits for the space lock (Aldeia-IT/aldeia-box#1483).** An ingest that finds
+  the per-space lock held now polls it for up to `WIKI_INGEST_LOCK_WAIT_S` (default 1800 s, `0` =
+  one try) instead of about 2.4 s, then runs and returns its own result. `ingest_in_progress` is
+  returned only after the whole wait. Concurrent ingests of one space therefore run one after the
+  other, and no caller retries by hand. `wiki_remember`'s queue-submit behaviour is unchanged.
 
 - **`wiki_ingest` takes a `subject_hint` (Aldeia-IT/aldeia-box#1430).** `wiki_ingest(source,
   space_id, domain_hint=None, subject_hint=None)` and `wiki-ingest --subject-hint NAME` name the
