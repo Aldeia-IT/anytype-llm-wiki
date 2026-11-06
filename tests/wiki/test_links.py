@@ -273,6 +273,15 @@ class TestRelationSpecs:
             (A, "b", B),
         }
 
+    @pytest.mark.parametrize("label", [None, 5, ["x"]])
+    def test_missing_or_non_string_label_becomes_related(self, label):
+        item = {"from": "Mestre Bimba", "to": "Mestre Pastinha"}
+        if label is not None:
+            item["label"] = label
+        specs, warnings = self._specs([item])
+        assert specs == [_links().LinkSpec(A, B, "related")]
+        assert warnings == []
+
     def test_relation_to_a_concept_resolves(self):
         specs, _ = self._specs(
             [{"from": "Mestre Bimba", "to": "Capoeira Regional", "label": "founded"}]
