@@ -94,7 +94,7 @@ v0.9.1 bumps `WIKI_SCHEMA_VERSION` to `0.4.3`. The schema adds the text property
 `wiki_summary` to the `wiki_source` type: `wiki_ingest` writes the extraction's
 summary of the page there (Aldeia-IT/aldeia-box#1485).
 
-`wiki_ingest`, `wiki_remember` and `wiki_query` refuse a space whose schema is older
+`wiki_ingest`, `wiki_remember`, `wiki_query` and `wiki_lint` refuse a space whose schema is older
 than the code's (`wiki_schema_outdated`), so re-run the idempotent bootstrap on
 every existing space right after upgrading:
 

@@ -858,7 +858,7 @@ class TestSchemaVersionBumped:
     """
 
     def test_wiki_schema_version_is_043(self):
-        """D11 (updated): WIKI_SCHEMA_VERSION must be pinned at '0.4.2' (AC#426 §1).
+        """D11 (updated): WIKI_SCHEMA_VERSION must be pinned at '0.4.3' (AC#426 §1; #1485).
 
         The schema version is load-bearing for the AC-R11 schema-outdated abort:
         a live space at an older version must read as outdated against the code
@@ -2697,7 +2697,7 @@ class TestReconcilePartialFailureRecoversOnRerun:
     Two types each missing a declared property; update_type raises on the 2nd.
     Assertions (addendum item 4 — strengthened):
       1. The error propagates out of wiki_bootstrap (not silently swallowed).
-      2. The schema-version marker is NOT stamped to '0.4.2' after the failing run
+      2. The schema-version marker is NOT stamped to the code's schema version after the failing run
          (the WikiLog entry is not written — it is the sole automated guard on the
          marker-after-loop ordering invariant).
       3. A clean re-run (update_type no longer raising) completes the remaining type.
@@ -2716,7 +2716,7 @@ class TestReconcilePartialFailureRecoversOnRerun:
 
         Assertions:
           A. wiki_bootstrap raises (error propagates).
-          B. Schema-version marker NOT stamped to '0.4.2' after the failing run
+          B. Schema-version marker NOT stamped to the code's schema version after the failing run
              (the WikiLog PATCH with wiki_schema_version='0.4.2' was NOT issued).
           C. Clean re-run (update_type no longer raises) returns a result with
              wiki_concept OR wiki_entity in types_reconciled (the remaining type).
@@ -2843,11 +2843,11 @@ class TestReconcilePartialFailureRecoversOnRerun:
                 f"FAILS until bootstrap.py §3 reconcile is implemented."
             )
 
-        # Assertion B: schema-version marker NOT stamped to '0.4.2' after failing run
+        # Assertion B: schema-version marker NOT stamped to the code's schema version after failing run
         from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION as _VERSION
         assert schema_version_stamped["value"] != _VERSION, (
             f"SF-3 / addendum item 4 (assertion B — ordering invariant): "
-            f"schema-version marker must NOT be stamped to '0.4.2' when update_type "
+            f"schema-version marker must NOT be stamped to {_VERSION!r} when update_type "
             f"fails mid-loop (the WikiLog stamp must come AFTER the full reconcile loop); "
             f"but got stamped value: {schema_version_stamped['value']!r}. "
             f"Move the marker stamp to AFTER the reconcile loop in bootstrap.py."

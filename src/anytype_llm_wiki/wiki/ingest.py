@@ -1489,7 +1489,16 @@ def _source_summary(extracted: object) -> str | None:
     if not isinstance(summary, str):
         return None
     cleaned = sanitize_property_value(scrub_text_urls(summary)).strip()
-    return cleaned[:SOURCE_SUMMARY_MAX_CHARS] or None
+    if len(cleaned) <= SOURCE_SUMMARY_MAX_CHARS:
+        return cleaned or None
+    # Over the cap: keep whole lines only, so a joined PDF summary never ends
+    # mid-line and every kept line keeps its trailing ``[p. N]`` tag. A single
+    # line longer than the cap (no newline to cut at) is hard-cut.
+    head = cleaned[:SOURCE_SUMMARY_MAX_CHARS]
+    if cleaned[SOURCE_SUMMARY_MAX_CHARS] == "\n":
+        return head.rstrip() or None
+    cut = head.rfind("\n")
+    return (head[:cut] if cut > 0 else head).rstrip() or None
 
 
 def _create_source(

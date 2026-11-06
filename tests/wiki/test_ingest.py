@@ -4409,6 +4409,23 @@ class TestSourceSummaryStored:
         assert len(patches) == 1 and self._summary(patches[0]) == []
 
     @respx.mock
+    def test_long_joined_summary_is_cut_at_whole_lines_keeping_page_tags(self, monkeypatch):
+        """Many windows exceed the cap: whole trailing lines drop, no line is cut
+        mid-way, and every kept line still ends with its ``[p. N]`` tag."""
+        from anytype_llm_wiki.wiki.ingest import SOURCE_SUMMARY_MAX_CHARS
+
+        lines = [f"Window {n} " + "word " * 40 + f"[p. {n}]" for n in range(1, 60)]
+        joined = "\n".join(lines)
+        assert len(joined) > SOURCE_SUMMARY_MAX_CHARS
+        _results, creates, _patches = self._run(monkeypatch, [joined])
+        (stored,) = self._summary(creates[0])
+        kept = stored.split("\n")
+        assert 0 < len(kept) < len(lines)
+        assert kept == lines[: len(kept)]
+        assert len(stored) <= SOURCE_SUMMARY_MAX_CHARS
+        assert all(line.endswith(f"[p. {i}]") for i, line in enumerate(kept, 1))
+
+    @respx.mock
     def test_summary_is_capped(self, monkeypatch):
         from anytype_llm_wiki.wiki.ingest import SOURCE_SUMMARY_MAX_CHARS
 

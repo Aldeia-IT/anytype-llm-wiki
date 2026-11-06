@@ -410,6 +410,18 @@ class TestWindows:
         assert facts["Besouro Manganga"] == "Lived there. [p. 6]"
         assert facts["Unnamed Teacher"] == "Taught. [pp. 4–6]"
 
+    def test_window_summary_newlines_stay_on_one_line(self):
+        """A window summary with line breaks still yields one tagged line per window."""
+        from anytype_llm_wiki.wiki.pdf import extract_pages
+
+        def fake_extract(markdown, space_id, **kw):
+            return {"entities": [], "concepts": [], "summary": "First.\n\nSecond\tpart."}
+
+        out = extract_pages(
+            [(1, BIMBA)], space_id="s", extract_fn=fake_extract, budget_chars=10_000
+        )
+        assert out["summary"] == "First. Second part. [p. 1]"
+
     def test_window_summaries_join_in_page_order_with_their_pages(self):
         """Aldeia-IT/aldeia-box#1485 D16: the source summary is every window's own
         summary, in page order, each tagged with its window's pages. A degraded

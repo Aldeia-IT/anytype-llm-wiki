@@ -356,7 +356,7 @@ def extract_pages(
         # describe only the start of a long PDF.
         summary = out.get("summary")
         if isinstance(summary, str) and summary.strip():
-            summaries.append(f"{summary.strip()} [{label}]")
+            summaries.append(f"{' '.join(summary.split())} [{label}]")
         for key, (field, other) in _FACT_FIELDS.items():
             for item in out.get(key) or []:
                 if not isinstance(item, dict) or not item.get("name"):

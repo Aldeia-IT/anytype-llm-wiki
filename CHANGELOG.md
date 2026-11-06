@@ -24,7 +24,7 @@ queued on a shared Ollama were most of an ingest's time; these changes cut both.
   PDF's summary joins each page window's summary in page order, each line tagged with its pages.
   The reindex embeds `wiki_summary` under the heading "Summary", so `semantic_search` finds a
   source by its summary. `wiki_remember` stores no summary. Schema 0.4.3: run `wiki_bootstrap` on
-  every space before ingesting (see MIGRATIONS.md).
+  every space before using any wiki tool (see MIGRATIONS.md).
 
 ### Changed
 
