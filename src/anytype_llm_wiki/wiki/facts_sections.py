@@ -48,13 +48,23 @@ def fact_key(unit: str) -> str:
     raise NotImplementedError("not implemented")
 
 
-def parse_sections(text: str) -> list[FactSection]:
-    """Parse a facts text; unsectioned text becomes one ``LEGACY_LABEL`` section."""
+def parse_sections(
+    text: str, *, known_ids: frozenset[str] | None = None
+) -> list[FactSection]:
+    """Parse a facts text; unsectioned text becomes one ``LEGACY_LABEL`` section.
+
+    A section id not in ``known_ids`` is dropped (label-only); ``None`` keeps every id.
+    """
     raise NotImplementedError("not implemented")
 
 
 def render_sections(sections: list[FactSection]) -> str:
     """Render sections back to the stored text."""
+    raise NotImplementedError("not implemented")
+
+
+def canonical_facts(text: str, known_ids: frozenset[str]) -> str:
+    """The stored form of a facts text: ``render_sections(parse_sections(text, known_ids=...))``."""
     raise NotImplementedError("not implemented")
 
 
@@ -72,6 +82,16 @@ def self_candidates(
     raise NotImplementedError("not implemented")
 
 
+def filter_duplicates(
+    items: object, self_ids: frozenset[str], new_units: tuple[str, ...]
+) -> list[tuple[int, str]]:
+    """Keep judged duplicates whose ``#s<n>`` id the check offered, one per new unit.
+
+    Returns ``(section index, earlier unit)`` pairs for ``add_also_tags``.
+    """
+    raise NotImplementedError("not implemented")
+
+
 def add_conflict_markers(
     text: str, label: str, source_id: str | None, conflicts: list[tuple[str, str]]
 ) -> str:
@@ -85,7 +105,16 @@ def add_also_tags(text: str, label: str, duplicates: list[tuple[int, str]]) -> s
 
 
 def no_lines_dropped(
-    old_text: str, candidate_text: str, *, label: str, source_id: str | None
+    old_text: str,
+    candidate_text: str,
+    *,
+    label: str,
+    source_id: str | None,
+    allowed_new_keys: frozenset[str],
 ) -> bool:
-    """True only if the candidate keeps every section, unit, tag and flag of ``old_text``."""
+    """True only if the candidate keeps everything of ``old_text`` and adds only the writer's.
+
+    Additions allowed: the writer's own section, units whose key is in
+    ``allowed_new_keys``, and tags or flags carrying the writer's label.
+    """
     raise NotImplementedError("not implemented")
