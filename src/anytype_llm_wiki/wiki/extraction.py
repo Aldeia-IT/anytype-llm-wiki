@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 
 from . import config
+from . import profile
 from .util import scrub_credentials, strip_control_chars
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,13 @@ def _model_options() -> dict:
     }
 
 
+# Ollama's final-chunk counters, durations in nanoseconds (WIKI_PROFILE only).
+_OLLAMA_STAT_KEYS = (
+    "total_duration", "load_duration", "prompt_eval_count",
+    "prompt_eval_duration", "eval_count", "eval_duration",
+)
+
+
 def _read_stream(resp: httpx.Response) -> tuple[str | None, str | None, str | None]:
     """Assemble a streamed Ollama NDJSON body until ``done: true``.
 
@@ -150,11 +158,26 @@ def _read_stream(resp: httpx.Response) -> tuple[str | None, str | None, str | No
             return None, None, f"stream_error: {message[:200]}"
         parts.append(_chunk_text(chunk))
         if chunk.get("done"):
+            profile.event(
+                "ollama_stats",
+                **{k: chunk.get(k) for k in _OLLAMA_STAT_KEYS},
+            )
             return "".join(parts), chunk.get("done_reason"), None
     return None, None, "stream_error: stream ended before done"
 
 
 def _call_ollama_prompt_detailed(
+    base: str, prompt: str
+) -> tuple[dict | None, httpx.Response | None, str | None]:
+    """Time one model call (``WIKI_PROFILE``); see ``_call_ollama_prompt_untimed``."""
+    with profile.span("ollama_call", prompt_chars=len(prompt)) as meta:
+        parsed, resp, reason = _call_ollama_prompt_untimed(base, prompt)
+        meta["parsed"] = parsed is not None
+        meta["failure"] = reason
+        return parsed, resp, reason
+
+
+def _call_ollama_prompt_untimed(
     base: str, prompt: str
 ) -> tuple[dict | None, httpx.Response | None, str | None]:
     """Stream a pre-built ``prompt`` to {base}/api/generate, then /api/chat.

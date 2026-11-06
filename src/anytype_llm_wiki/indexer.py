@@ -29,6 +29,7 @@ from .anytype_client import get_object, list_objects, list_spaces
 from .chunker import chunk_object, extract_payload_metadata
 from .embedder import embed, embed_query
 from .textfold import fold
+from .wiki import profile
 from .wiki.names import (
     _split_name,
     _strip_title,
@@ -909,7 +910,9 @@ def _run_reindex(space_id: str | None = None) -> dict:
         sid = space["id"]
         stats["spaces"] += 1
         space_state = state.get(sid, {})
-        objects = list_objects(sid)
+        with profile.span("reindex_list_objects") as meta:
+            objects = list_objects(sid)
+            meta["objects"] = len(objects)
         current_ids = set()
 
         for obj_summary in objects:
@@ -933,7 +936,8 @@ def _run_reindex(space_id: str | None = None) -> dict:
                 continue
 
             # Fetch full object with markdown
-            obj = get_object(sid, oid)
+            with profile.span("reindex_get_object"):
+                obj = get_object(sid, oid)
             chunks = chunk_object(obj)
 
             if not chunks:
@@ -944,7 +948,8 @@ def _run_reindex(space_id: str | None = None) -> dict:
 
             # Embed and upsert
             texts = [c["text"] for c in chunks]
-            vectors = embed(texts)
+            with profile.span("reindex_embed", chunks=len(texts)):
+                vectors = embed(texts)
 
             points = [
                 PointStruct(

@@ -28,6 +28,7 @@ import httpx
 from . import types_schema
 from . import bootstrap as _bootstrap
 from . import config
+from . import profile
 from ..anytype_client import AnytypeReadClient
 from .extraction import (
     _call_ollama_prompt,
@@ -266,7 +267,8 @@ def resolve_entity(
     normalized = normalize_title(candidate_title)
 
     try:
-        results = client.search(space_id, query=candidate_title)
+        with profile.span("anytype_search"):
+            results = client.search(space_id, query=candidate_title)
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         # A mocked/degraded search backend that returns a non-search-shaped
         # response is treated as "no existing match" → fall through to create.
@@ -768,7 +770,8 @@ def wiki_ingest(
     try:
         # 2. schema-compat (AC-M4).
         try:
-            live_version = _bootstrap._read_schema_version(client, space_id)
+            with profile.span("schema_read"):
+                live_version = _bootstrap._read_schema_version(client, space_id)
         except httpx.HTTPError as exc:
             return _error_result(f"[API ERROR] schema_read_failed: {exc}")
 
@@ -814,7 +817,7 @@ def wiki_ingest(
 
         def _locked_ingest():
             # A queued-remember drain failure must not block an operator ingest.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception), profile.span("drain_pending"):
                 _drain_pending(client, space_id, [])
             return _run_ingest(
                 client, source, space_id, domain_hint, schema_warnings,
@@ -883,7 +886,10 @@ def _run_ingest(
         # 6. fetch. Any fetch [DATA ERROR] (ssrf_blocked, file_not_found,
         # file_read_failed, fetch_failed) short-circuits — never fabricate a junk
         # entity from an error string.
-        fetched = fetch_source(source)
+        with profile.span("fetch", source=_source_name(source)) as meta:
+            fetched = fetch_source(source)
+            fetched_md = fetched.get("markdown")
+            meta["chars"] = len(fetched_md) if isinstance(fetched_md, str) else 0
         markdown = fetched["markdown"]
         is_url = fetched["is_url"]
         if isinstance(markdown, str) and markdown.startswith("[DATA ERROR]"):
@@ -923,20 +929,25 @@ def _run_ingest(
         extract_started = time.monotonic()
         extracted: dict | None = None
         try:
-            if pdf_pages:
-                # Aldeia-IT/aldeia-box#1483 D4: one extract() per page window;
-                # every fact carries its page(s).
-                extracted = extract_pdf_source(
-                    pdf_pages,
-                    space_id=space_id,
-                    extract_fn=extract,
-                    subject_hint=subject_hint,
-                )
-                result["warnings"].extend(extracted.get("warnings") or [])
-            else:
-                extracted = extract(
-                    markdown=markdown, space_id=space_id, subject_hint=subject_hint
-                )
+            with profile.span("extract", input_chars=len(markdown)) as meta:
+                if pdf_pages:
+                    # Aldeia-IT/aldeia-box#1483 D4: one extract() per page window;
+                    # every fact carries its page(s).
+                    meta["pdf_pages"] = len(pdf_pages)
+                    extracted = extract_pdf_source(
+                        pdf_pages,
+                        space_id=space_id,
+                        extract_fn=extract,
+                        subject_hint=subject_hint,
+                    )
+                    result["warnings"].extend(extracted.get("warnings") or [])
+                else:
+                    extracted = extract(
+                        markdown=markdown, space_id=space_id, subject_hint=subject_hint
+                    )
+                if isinstance(extracted, dict):
+                    meta["entities"] = len(extracted.get("entities") or [])
+                    meta["concepts"] = len(extracted.get("concepts") or [])
             # AC#11: ollama model not pulled must abort BEFORE Source creation.
             if isinstance(extracted, dict) and str(extracted.get("error", "")).startswith(
                 "[CONFIG ERROR] ollama_model_not_pulled"
@@ -999,7 +1010,10 @@ def _run_ingest(
             result["warnings"].extend(plan_warnings)
 
         # 9. create Source object.
-        source_id, was_resumed = _create_source(client, space_id, source, markdown, result)
+        with profile.span("create_source"):
+            source_id, was_resumed = _create_source(
+                client, space_id, source, markdown, result
+            )
         result["source_object_id"] = source_id
 
         # 10. resolve + create/update each candidate. A candidate's ``kind`` maps to
@@ -1058,16 +1072,18 @@ def _run_ingest(
             if domain_tag_prop is not None:
                 props.append(domain_tag_prop)
             try:
-                resolution = resolve_entity(
-                    client, space_id, type_key, clean_name, candidate_facts=facts,
-                    strip_titles=strip_titles,
-                )
+                with profile.span("resolve", name=clean_name):
+                    resolution = resolve_entity(
+                        client, space_id, type_key, clean_name,
+                        candidate_facts=facts, strip_titles=strip_titles,
+                    )
                 if resolution["action"] == "update":
                     target = resolution["target"]
                     # Properties-only PATCH — NEVER a body/markdown key (AC-L1).
-                    updated = client.update_object(
-                        space_id, target["id"], {"properties": props}
-                    )
+                    with profile.span("write_update", name=clean_name):
+                        updated = client.update_object(
+                            space_id, target["id"], {"properties": props}
+                        )
                     obj_id = updated.get("id", target.get("id"))
                     result["objects_updated"].append(
                         {"title": clean_name, "type": type_label, "object_id": obj_id}
@@ -1080,10 +1096,12 @@ def _run_ingest(
                     # ingest.
                     if kind in ("entity", "concept"):
                         try:
-                            peers = detect_contradictions(
-                                facts, obj_id, target, space_id, client, read_client,
-                                kind=kind,
-                            )
+                            with profile.span("contradiction", name=clean_name) as meta:
+                                peers = detect_contradictions(
+                                    facts, obj_id, target, space_id, client,
+                                    read_client, kind=kind,
+                                )
+                                meta["peers_flagged"] = len(peers)
                         except Exception:  # noqa: BLE001 — detection MUST NOT block ingest
                             # CS-9: discriminate the concept path so an operator
                             # can tell which kind degraded; entity stays bare.
@@ -1104,9 +1122,11 @@ def _run_ingest(
                                 result["warnings"].extend(c_rollback)
                 else:
                     # Create with EMPTY body (properties only — AC-P7/AC-L1).
-                    created = client.create_object(
-                        space_id, type_key=type_key, name=clean_name, properties=props
-                    )
+                    with profile.span("write_create", name=clean_name):
+                        created = client.create_object(
+                            space_id, type_key=type_key, name=clean_name,
+                            properties=props,
+                        )
                     obj_id = created.get("id")
                     result["objects_created"].append(
                         {"title": clean_name, "type": type_label, "object_id": obj_id}
@@ -1119,9 +1139,10 @@ def _run_ingest(
 
         # 11. bidirectional relations (AC#13).
         relations = _derive_relations(candidates, name_to_id)
-        rel_created, rollback_notes = _write_bidirectional_relations(
-            client, space_id, relations, kind_by_id
-        )
+        with profile.span("relations", pairs=len(relations)):
+            rel_created, rollback_notes = _write_bidirectional_relations(
+                client, space_id, relations, kind_by_id
+            )
         result["relations_created"] = rel_created
         if rollback_notes:
             status = "partial"
@@ -1135,14 +1156,15 @@ def _run_ingest(
         if was_resumed:
             notes_parts.append("resumed_partial_ingest")
         notes = "; ".join(notes_parts) if notes_parts else "ingest"
-        result["wiki_log_id"] = _write_wikilog(
-            client, space_id,
-            subject=source,
-            created=len(result["objects_created"]),
-            updated=len(result["objects_updated"]),
-            notes=notes,
-            action_tag_id=action_tag_id,
-        )
+        with profile.span("wikilog"):
+            result["wiki_log_id"] = _write_wikilog(
+                client, space_id,
+                subject=source,
+                created=len(result["objects_created"]),
+                updated=len(result["objects_updated"]),
+                notes=notes,
+                action_tag_id=action_tag_id,
+            )
 
         result["status"] = status
 
@@ -1247,6 +1269,13 @@ def _maybe_reindex(space_id: str, result: dict) -> None:
     if os.environ.get("WIKI_AUTO_REINDEX", "true").lower() == "false":
         return
     try:
-        reindex_anytype(space_id)
+        with profile.span("reindex") as meta:
+            stats = reindex_anytype(space_id)
+            if isinstance(stats, dict):
+                meta.update(
+                    objects_checked=stats.get("objects_checked"),
+                    objects_indexed=stats.get("objects_indexed"),
+                    chunks=stats.get("chunks"),
+                )
     except Exception as exc:  # noqa: BLE001 — reindex failure is non-fatal (AC#9)
         result["warnings"].append(f"reindex_failed: {exc}")
