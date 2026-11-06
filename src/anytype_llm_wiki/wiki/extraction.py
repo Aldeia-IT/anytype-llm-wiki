@@ -253,6 +253,24 @@ def _fill_prompt(template: str, source: str, subject_block: str) -> str:
     return _PLACEHOLDER_RE.sub(lambda m: values[m.group(0)], template)
 
 
+def _budget_chars(template: str, subject_block: str) -> int:
+    """Source chars that fit ``extract_max_input_tokens()`` beside the filled template."""
+    filled = _fill_prompt(template, "", subject_block)
+    return max(config.extract_max_input_tokens() * _CHARS_PER_TOKEN - len(filled), 0)
+
+
+def source_budget_chars(subject_hint: str | None = None) -> int:
+    """How many source chars one ``extract()`` call takes before ``_fit_source`` cuts.
+
+    Page-window extraction of a PDF (Aldeia-IT/aldeia-box#1483 D4) sizes its
+    windows with this, so a window is cut only when a single page alone is larger.
+
+    :param subject_hint: the hint ``extract()`` will get; its prompt block counts.
+    :returns: the budget in characters (never negative).
+    """
+    return _budget_chars(_load_prompt(), _subject_block(subject_hint))
+
+
 def _fit_source(
     markdown: str, template: str, subject_block: str = ""
 ) -> tuple[str, dict | None]:
@@ -265,9 +283,7 @@ def _fit_source(
     the budget. Returns ``(source, truncated)`` where ``truncated`` is
     ``{"kept_chars", "total_chars"}`` or None when nothing was cut.
     """
-    filled = _fill_prompt(template, "", subject_block)
-    budget = config.extract_max_input_tokens() * _CHARS_PER_TOKEN - len(filled)
-    budget = max(budget, 0)
+    budget = _budget_chars(template, subject_block)
     total = len(markdown)
     if total <= budget:
         return markdown, None

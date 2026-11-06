@@ -5,7 +5,8 @@ URL fetches and every redirect hop are validated against the RESOLVED IP
 (categorical private/loopback/link-local/reserved check — addendum item 4),
 NOT textual host matching. HTML is reduced to its main content with
 ``trafilatura`` (``strip_boilerplate`` recovers what it drops and is the
-fallback) and converted to markdown (Aldeia-IT/aldeia-box#1432).
+fallback) and converted to markdown (Aldeia-IT/aldeia-box#1432). A PDF, fetched
+or local, is read page by page by ``wiki/pdf.py`` (Aldeia-IT/aldeia-box#1483).
 
 All rejections surface to the caller as a ``[DATA ERROR] ssrf_blocked: ...``
 string; the function never raises for an unsafe URL — it returns the marker
@@ -22,7 +23,8 @@ from pathlib import Path
 import httpx
 
 from .. import __version__
-from . import config
+from . import config, pdf
+from .pdf import is_pdf, pages_markdown
 
 _log = logging.getLogger(__name__)
 
@@ -64,6 +66,10 @@ _MAX_REDIRECTS = 5
 
 class SsrfBlocked(Exception):
     """Raised internally when a URL or redirect target is unsafe."""
+
+
+class PdfTooLarge(Exception):
+    """Raised internally when a PDF body passes ``WIKI_FETCH_MAX_PDF_BYTES``."""
 
 
 def _allowed_ports() -> set:
@@ -493,12 +499,41 @@ def _looks_like_html(text: str) -> bool:
     return head.startswith("<!doctype html") or head.startswith("<html") or "<body" in head
 
 
-def _fetch_remote_raw(url_str: str) -> tuple[str, str]:
-    """Manual redirect loop with per-hop SSRF validation and a size cap.
+def _read_capped(resp: httpx.Response, content_type: str) -> tuple[bytes, bool]:
+    """Read the body up to its cap; return ``(body, is_pdf)``.
 
-    Returns ``(decoded_body, content_type)``.
+    The cap is ``WIKI_FETCH_MAX_BYTES`` (an HTML/text page is cut there), or
+    ``WIKI_FETCH_MAX_PDF_BYTES`` once the content type or the first bytes show a
+    PDF. A cut PDF cannot be parsed, so a PDF over its cap raises
+    ``PdfTooLarge`` instead (Aldeia-IT/aldeia-box#1483 D4).
     """
     max_bytes = _max_bytes()
+    pdf_cap = config.fetch_max_pdf_bytes()
+    chunks: list[bytes] = []
+    total = 0
+    pdf = None
+    for chunk in resp.iter_bytes():
+        if pdf is None and chunk:
+            pdf = is_pdf(chunk, content_type)
+        total += len(chunk)
+        if pdf and total > pdf_cap:
+            raise PdfTooLarge(
+                f"pdf_too_large: over {pdf_cap} bytes (WIKI_FETCH_MAX_PDF_BYTES)"
+            )
+        if not pdf and total > max_bytes:
+            chunks.append(chunk[: max(0, max_bytes - (total - len(chunk)))])
+            break
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    return (body, True) if pdf else (body[:max_bytes], False)
+
+
+def _fetch_remote(url_str: str) -> tuple[str | bytes, str]:
+    """Manual redirect loop with per-hop SSRF validation and a size cap.
+
+    Returns ``(body, content_type)``: the decoded text of a page, or the raw
+    ``bytes`` of a PDF.
+    """
     timeout = httpx.Timeout(connect=5, read=15, write=5, pool=5)
     current = httpx.URL(url_str)
 
@@ -517,24 +552,62 @@ def _fetch_remote_raw(url_str: str) -> tuple[str, str]:
                     continue
                 resp.raise_for_status()
                 content_type = resp.headers.get("content-type", "")
-                if "pdf" in content_type.lower():
-                    raise SsrfBlocked(
-                        "PDF sources are not supported in v0.3.0; "
-                        "provide a local markdown/text file instead"
-                    )
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in resp.iter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        chunks.append(chunk[: max(0, max_bytes - (total - len(chunk)))])
-                        break
-                    chunks.append(chunk)
-                raw = b"".join(chunks)[:max_bytes]
+                raw, pdf = _read_capped(resp, content_type)
+                if pdf:
+                    return raw, content_type
                 text = raw.decode(resp.encoding or "utf-8", errors="replace")
                 return text, content_type
 
     raise SsrfBlocked(f"too many redirects (>{_MAX_REDIRECTS})")
+
+
+def _pdf_result(out: dict, data: bytes) -> dict:
+    """Fill ``fetch_source``'s result for a PDF body (Aldeia-IT/aldeia-box#1483).
+
+    ``markdown`` is the page texts with ``[p. N]`` markers, ``pdf_pages`` the
+    ``(page_number, text)`` list ingest extracts in windows, ``warnings`` the
+    reader's cut-off and degradation notes. The usable-content gate applies as
+    for an HTML page: a PDF with no text layer is ``image_only_pdf``; otherwise
+    ``usable_content_verdict`` judges the text. An unreadable PDF sets
+    ``markdown`` to a ``[DATA ERROR]`` string.
+    """
+    try:
+        read = pdf.read_pdf(data, config.pdf_max_pages())
+    except pdf.PdfUnreadable as exc:
+        out["markdown"] = f"[DATA ERROR] {exc}"
+        return out
+    markdown = pages_markdown(read["pages"])
+    out.update(
+        markdown=markdown,
+        content_type="application/pdf",
+        pdf_pages=read["pages"],
+        pdf_total_pages=read["total_pages"],
+        warnings=read["warnings"],
+    )
+    if read["total_pages"] == 0:
+        out["unusable"] = "empty"
+    elif not read["pages"] and read["no_text_pages"]:
+        out["unusable"] = "image_only_pdf (no text layer; OCR is not supported)"
+    else:
+        out["unusable"] = usable_content_verdict(markdown, markdown)
+    return out
+
+
+def _fetch_file_bytes(source: str) -> bytes | str:
+    """Read a local file's bytes, or return a ``[DATA ERROR]`` string."""
+    path = Path(source)
+    if not path.exists():
+        return f"[DATA ERROR] file_not_found: {source}"
+    try:
+        size = path.stat().st_size
+        if size > config.fetch_max_pdf_bytes():
+            return (
+                f"[DATA ERROR] pdf_too_large: over {config.fetch_max_pdf_bytes()} "
+                "bytes (WIKI_FETCH_MAX_PDF_BYTES)"
+            )
+        return path.read_bytes()
+    except OSError as exc:
+        return f"[DATA ERROR] file_read_failed: {source} ({exc})"
 
 
 def _fetch_file(source: str) -> str:
@@ -573,13 +646,19 @@ def _is_http_url(source: str) -> tuple[bool, str]:
 def fetch_source(source: str) -> dict:
     """Fetch ``source`` like ``fetch_url`` and judge a URL page's usable content.
 
-    Returns ``{"markdown", "raw", "content_type", "is_url", "unusable"}``:
-    ``markdown`` is exactly what ``fetch_url`` returns (a ``[DATA ERROR]`` string
-    on failure); ``raw`` and ``content_type`` are the undecoded-to-markdown body
-    and its type for a fetched URL (``None`` otherwise); ``unusable`` is the
-    ``usable_content_verdict`` reason for a fetched URL page, else ``None``.
-    Local files and fetch errors never get a verdict (ingest keeps its
-    ``empty_source`` path for files).
+    Returns ``{"markdown", "raw", "content_type", "is_url", "unusable",
+    "pdf_pages", "warnings"}``: ``markdown`` is exactly what ``fetch_url``
+    returns (a ``[DATA ERROR]`` string on failure); ``raw`` and ``content_type``
+    are the undecoded-to-markdown body and its type for a fetched URL page
+    (``None`` otherwise); ``unusable`` is the ``usable_content_verdict`` reason for
+    a fetched URL page, else ``None``. Local files and fetch errors never get a
+    verdict (ingest keeps its ``empty_source`` path for files), except a PDF.
+
+    A PDF, fetched or a local ``.pdf`` file (Aldeia-IT/aldeia-box#1483), sets
+    ``pdf_pages`` to its ``(page_number, text)`` list, ``pdf_total_pages``, and
+    ``warnings`` to the reader's notes (cut-off, pages without text, garbled
+    text); it always gets a verdict, ``image_only_pdf`` when it has no text layer.
+    ``raw`` stays ``None`` for a PDF.
     """
     is_url, scheme = _is_http_url(source)
     out = {
@@ -588,23 +667,36 @@ def fetch_source(source: str) -> dict:
         "content_type": None,
         "is_url": is_url,
         "unusable": None,
+        "pdf_pages": None,
+        "warnings": [],
     }
     if not is_url:
         # Anything that is not an http(s) URL is a local file path. A stray
         # non-http scheme (file://, ftp://) is rejected as ssrf_blocked.
         if "://" in source and scheme:
             out["markdown"] = f"[DATA ERROR] ssrf_blocked: scheme not allowed: {scheme}"
+        elif Path(source).suffix.lower() == ".pdf":
+            data = _fetch_file_bytes(source)
+            if isinstance(data, str):
+                out["markdown"] = data
+            else:
+                _pdf_result(out, data)
         else:
             out["markdown"] = _fetch_file(source)
         return out
     try:
-        raw, content_type = _fetch_remote_raw(source)
+        raw, content_type = _fetch_remote(source)
     except SsrfBlocked as exc:
         out["markdown"] = f"[DATA ERROR] ssrf_blocked: {exc}"
+        return out
+    except PdfTooLarge as exc:
+        out["markdown"] = f"[DATA ERROR] {exc}"
         return out
     except httpx.HTTPError as exc:
         out["markdown"] = f"[DATA ERROR] fetch_failed: {exc}"
         return out
+    if isinstance(raw, bytes):
+        return _pdf_result(out, raw)
     markdown = _to_markdown(raw, content_type)
     out.update(
         markdown=markdown,

@@ -22,6 +22,12 @@ names are listed too, as if the space were in
 ``WIKI_REFUSE_IDENTIFIER_NAMES_SPACES``. A page the gate refuses is not sent to
 the model. ``fetch_error`` is set when the fetch itself failed.
 
+A PDF (Aldeia-IT/aldeia-box#1483) is extracted the way ``wiki_ingest`` does it:
+in page windows, every fact ending with its page(s). Its report adds ``pages``
+(pages with text that were read), ``total_pages``, ``windows`` (extraction calls)
+and ``warnings`` (cut-off, pages without text, degraded windows);
+``chars_before_strip`` and ``chars_after_strip`` are both the text's length.
+
 With ``--subject-hint NAME`` (Aldeia-IT/aldeia-box#1430) the hint goes into the
 extraction prompt and the extracted items run through ``plan_primary_subject``,
 the helper ``wiki_ingest`` uses: ``entities`` / ``concepts`` then show the
@@ -42,8 +48,10 @@ from anytype_llm_wiki.wiki.extraction import (
     extract,
     is_identifier_like_name,
     sanitize_name,
+    source_budget_chars,
 )
 from anytype_llm_wiki.wiki.fetch import _to_markdown, fetch_source
+from anytype_llm_wiki.wiki.pdf import extract_pages
 from anytype_llm_wiki.wiki.util import plan_primary_subject
 
 _EXCERPT_CHARS = 1000
@@ -98,6 +106,10 @@ def dry_run(
         "primary_name": None,
         "marked": None,
         "hint_warnings": [],
+        "pages": None,
+        "total_pages": None,
+        "windows": None,
+        "warnings": [],
     }
     started = time.monotonic()
     fetched = fetch_source(url)
@@ -106,10 +118,17 @@ def dry_run(
     if markdown.startswith("[DATA ERROR]"):
         report["fetch_error"] = markdown
         return report
-    raw = fetched["raw"] if fetched["raw"] is not None else markdown
-    report["chars_before_strip"] = len(
-        _to_markdown(raw, fetched["content_type"] or "", strip=False)
-    )
+    pdf_pages = fetched.get("pdf_pages")
+    report["warnings"] = list(fetched.get("warnings") or [])
+    if pdf_pages is not None:
+        report["pages"] = len(pdf_pages)
+        report["total_pages"] = fetched.get("pdf_total_pages")
+        report["chars_before_strip"] = len(markdown)
+    else:
+        raw = fetched["raw"] if fetched["raw"] is not None else markdown
+        report["chars_before_strip"] = len(
+            _to_markdown(raw, fetched["content_type"] or "", strip=False)
+        )
     report["chars_after_strip"] = len(markdown)
     report["excerpt"] = markdown[:_EXCERPT_CHARS]
     report["unusable"] = fetched["unusable"]
@@ -118,7 +137,18 @@ def dry_run(
 
     started = time.monotonic()
     extract_kwargs = {"subject_hint": subject_hint} if subject_hint else {}
-    extracted = extract(markdown=markdown, space_id="dry-run", **extract_kwargs)
+    if pdf_pages:
+        extracted = extract_pages(
+            pdf_pages,
+            space_id="dry-run",
+            extract_fn=extract,
+            budget_chars=source_budget_chars(subject_hint),
+            subject_hint=subject_hint,
+        )
+        report["windows"] = extracted.get("windows")
+        report["warnings"].extend(extracted.get("warnings") or [])
+    else:
+        extracted = extract(markdown=markdown, space_id="dry-run", **extract_kwargs)
     report["extraction_seconds"] = round(time.monotonic() - started, 2)
     error = extracted.get("error")
     report["extraction_error"] = str(error).removeprefix(_DEGRADED_PREFIX) if error else None

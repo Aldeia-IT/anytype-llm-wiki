@@ -36,6 +36,11 @@ dependencies = [
     # strip_boilerplate stays as the recovery pass and fallback. Its tree (lxml, justext,
     # htmldate, courlan, tld …) is recorded in NOTICE.
     "trafilatura>=2.3.1,<3",
+    # PDF text extraction for fetched/local PDF sources (Aldeia-IT/aldeia-box#1483 D3).
+    # BSD-3-Clause, pure Python, no runtime dependencies on Python >= 3.11. Its
+    # optional extras (crypto, image) are not installed: no OCR, AES-encrypted PDFs
+    # are refused.
+    "pypdf>=6.21.4,<7.0.0",
 ]
 
 [project.urls]

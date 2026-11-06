@@ -184,6 +184,14 @@ def wiki_ingest(
     ingest writes only the Source and the WikiLog, and re-ingesting the URL later
     fills it.
 
+    A PDF (URL or local ``.pdf``) with a text layer is read page by page, up to
+    ``WIKI_PDF_MAX_PAGES`` pages (default 40; ``pdf_pages_capped`` names a
+    cut-off), and extracted in page windows; every fact ends with its page(s),
+    e.g. ``[p. 12]``. A PDF without a text layer is refused as ``no_usable_content:
+    image_only_pdf`` (no OCR). While another writer holds the space's lock, the
+    call waits for it up to ``WIKI_INGEST_LOCK_WAIT_S`` (default 1800 s) and then
+    returns its own result; ``ingest_in_progress`` comes back only after that wait.
+
     Returns:
         An IngestResult dict (source/objects created/updated/skipped, relations,
         wiki_log_id, warnings, status, and ``extraction_error`` when extraction

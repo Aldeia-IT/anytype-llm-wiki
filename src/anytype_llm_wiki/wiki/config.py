@@ -8,6 +8,7 @@ and ``WIKI_FETCH_EXTRA_PORTS``) are resolved through functions that read
 and ``run_doctor`` rely on ``monkeypatch.setenv`` taking effect after import.
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -47,6 +48,14 @@ DEFAULT_WIKI_EXTRACT_MAX_INPUT_TOKENS = 8192
 # ``num_predict``; ``num_ctx`` = max input tokens + this (12288 with the defaults).
 # Synthesis sends the same pair (wiki/query.py ``_synthesis_options``).
 DEFAULT_WIKI_EXTRACT_OUTPUT_TOKENS = 4096
+
+# Aldeia-IT/aldeia-box#1483 D4: PDF sources. Pages past the cap are not read; a
+# PDF over the byte cap is refused (a cut PDF cannot be parsed).
+DEFAULT_WIKI_PDF_MAX_PAGES = 40
+DEFAULT_WIKI_FETCH_MAX_PDF_BYTES = 25 * 1024 * 1024
+
+# Aldeia-IT/aldeia-box#1483 D2: wiki_ingest waits this long for the per-space lock.
+DEFAULT_WIKI_INGEST_LOCK_WAIT_S = 1800.0
 
 # v0.4.0 wiki_query tiered-retrieval / synthesis defaults.
 DEFAULT_WIKI_INDEX_THRESHOLD = 200
@@ -154,6 +163,46 @@ def extract_max_input_tokens() -> int:
     return _positive_int(
         "WIKI_EXTRACT_MAX_INPUT_TOKENS", DEFAULT_WIKI_EXTRACT_MAX_INPUT_TOKENS
     )
+
+
+def pdf_max_pages() -> int:
+    """Resolve WIKI_PDF_MAX_PAGES — pages of a PDF source that are read (default 40).
+
+    Pages past the cap are not extracted, and ingest names the cut-off in its
+    warnings (``pdf_pages_capped``). Non-numeric or non-positive values fall
+    back to the default (Aldeia-IT/aldeia-box#1483 D4).
+    """
+    return _positive_int("WIKI_PDF_MAX_PAGES", DEFAULT_WIKI_PDF_MAX_PAGES)
+
+
+def fetch_max_pdf_bytes() -> int:
+    """Resolve WIKI_FETCH_MAX_PDF_BYTES — size cap for a PDF source (default 25 MiB).
+
+    A PDF cannot be parsed once cut, so a larger PDF is refused
+    (``pdf_too_large``) rather than truncated like an HTML page. Non-numeric or
+    non-positive values fall back to the default (Aldeia-IT/aldeia-box#1483 D4).
+    """
+    return _positive_int("WIKI_FETCH_MAX_PDF_BYTES", DEFAULT_WIKI_FETCH_MAX_PDF_BYTES)
+
+
+def ingest_lock_wait_s() -> float:
+    """Resolve WIKI_INGEST_LOCK_WAIT_S — how long ingest waits for the space lock.
+
+    ``wiki_ingest`` polls the per-space lock for up to this many seconds
+    (default 1800), then runs and returns its own result; only after the wait
+    does it return ``ingest_in_progress`` (Aldeia-IT/aldeia-box#1483 D2). ``0``
+    tries once. Negative or non-numeric values fall back to the default.
+    """
+    raw = os.environ.get("WIKI_INGEST_LOCK_WAIT_S")
+    if raw is None:
+        return DEFAULT_WIKI_INGEST_LOCK_WAIT_S
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        return DEFAULT_WIKI_INGEST_LOCK_WAIT_S
+    if not math.isfinite(val) or val < 0:
+        return DEFAULT_WIKI_INGEST_LOCK_WAIT_S
+    return val
 
 
 def extract_output_tokens() -> int:
