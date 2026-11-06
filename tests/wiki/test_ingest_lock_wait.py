@@ -24,7 +24,9 @@ def fake_ingest(monkeypatch, tmp_path):
     """Run wiki_ingest with a fake client and a fake ``_run_ingest`` body.
 
     Returns a dict the body records into: ``inside`` (callers in the body now),
-    ``max_inside`` and ``runs``. ``hold`` sets how long the body takes.
+    ``max_inside``, ``runs`` and ``events`` (``("drain", space)`` for each
+    pre-ingest drain of queued remembers, ``("run", source)`` for each body run,
+    in order). ``hold`` sets how long the body takes.
     """
     import anytype_llm_wiki.wiki.ingest as _ingest
     import anytype_llm_wiki.wiki.remember as _remember
@@ -39,16 +41,22 @@ def fake_ingest(monkeypatch, tmp_path):
         "_read_schema_version",
         lambda client, space_id: types_schema.WIKI_SCHEMA_VERSION,
     )
-    monkeypatch.setattr(_remember, "_drain_pending", lambda *a, **k: None)
-    monkeypatch.setattr(_ingest, "INGEST_LOCK_POLL_S", 0.02, raising=False)
+    monkeypatch.setattr(_ingest, "INGEST_LOCK_POLL_S", 0.02)
 
-    state = {"inside": 0, "max_inside": 0, "runs": [], "hold": 0.0}
+    state = {"inside": 0, "max_inside": 0, "runs": [], "events": [], "hold": 0.0}
     guard = threading.Lock()
+
+    def fake_drain(client, space_id, *a, **k):
+        with guard:
+            state["events"].append(("drain", space_id))
+
+    monkeypatch.setattr(_remember, "_drain_pending", fake_drain)
 
     def fake_run(client, source, space_id, domain_hint, schema_warnings, subject_hint=None):
         with guard:
             state["inside"] += 1
             state["max_inside"] = max(state["max_inside"], state["inside"])
+            state["events"].append(("run", source))
         time.sleep(state["hold"])
         with guard:
             state["inside"] -= 1
@@ -88,6 +96,25 @@ class TestLockWait:
         holder.join()
         assert result == {"status": "ok", "source": "https://example.org/waiter", "warnings": []}
         assert waited >= 2.5, waited
+
+    def test_drain_still_runs_after_a_long_wait(self, fake_ingest, monkeypatch):
+        """Holding the lock obligates draining queued remembers: a caller that
+        waited for the lock still drains before its own ingest body runs."""
+        monkeypatch.setenv("WIKI_INGEST_LOCK_WAIT_S", "30")
+        acquired = threading.Event()
+        holder = threading.Thread(target=_hold_lock, args=(1.0, acquired))
+        holder.start()
+        assert acquired.wait(5)
+        started = time.monotonic()
+        result = _ingest("https://example.org/after-wait")
+        waited = time.monotonic() - started
+        holder.join()
+        assert result["status"] == "ok", result
+        assert waited >= 0.8, waited
+        assert fake_ingest["events"] == [
+            ("drain", SPACE),
+            ("run", "https://example.org/after-wait"),
+        ]
 
     def test_timeout_returns_ingest_in_progress(self, fake_ingest, monkeypatch):
         monkeypatch.setenv("WIKI_INGEST_LOCK_WAIT_S", "0.5")
