@@ -182,9 +182,11 @@ demand or via cron, never an unbounded wait on traffic.
 `WIKI_INGEST_LOCK_WAIT_S` (default 1800 s; Aldeia-IT/aldeia-box#1483), and
 **drains pending `wiki_remember` subjects first**, then does its own work — so a
 long ingest never starves queued learnings. It stays synchronous (the caller
-wants its result inline), so concurrent ingests of one space run one after the
-other; only if the lock stays held for the whole wait does it return
-`ingest_in_progress`. While waiting it holds nothing but its poll.
+wants its result inline), so concurrent ingests of one space run one at a time,
+in no set order; only if the lock stays held for the whole wait does it return
+`ingest_in_progress`. The wait counts from each call's own start, so a caller
+queued behind several long PDF ingests can still hit the
+`WIKI_INGEST_LOCK_WAIT_S` timeout. While waiting it holds nothing but its poll.
 
 **Extraction is lock-free.** Since submit appends and only draining holds the
 lock, the long extraction LLM call never holds it — the per-space critical
