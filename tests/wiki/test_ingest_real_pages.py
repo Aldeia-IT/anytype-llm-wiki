@@ -6,22 +6,17 @@ the result and the log), AC6 (re-ingest after a fix reuses the Source), AC9
 degraded URL ingest). Anytype is a respx fake; extraction is stubbed.
 """
 
-import json
 import logging
 import socket
-from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-ANYTYPE_BASE = "http://127.0.0.1:31012"
+from .fakes import ANYTYPE_BASE, SPACE, FakeWiki
+
 OLLAMA_BASE = "http://127.0.0.1:11434"
-SPACE = "space-real-pages-001"
 PAGE_URL = "https://lalaue.example/capoeira-schools/acmb/"
-LALAUE = (Path(__file__).parent / "fixtures" / "pages" / "lalaue_shaped.html").read_text(
-    encoding="utf-8"
-)
 
 
 @pytest.fixture(autouse=True)
@@ -41,84 +36,6 @@ def _env(monkeypatch, tmp_path):
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
         ],
     )
-
-
-def _schema_ok():
-    from anytype_llm_wiki.wiki.types_schema import WIKI_SCHEMA_VERSION
-
-    return {
-        "data": [
-            {
-                "id": "coll-wiki-001",
-                "name": "Wiki",
-                "type": {"key": "collection"},
-                "properties": [{"key": "wiki_schema_version", "text": WIKI_SCHEMA_VERSION}],
-            }
-        ],
-        "pagination": {"has_more": False},
-    }
-
-
-class FakeWiki:
-    """In-memory Anytype: search by normalized name, create/patch objects, log writes."""
-
-    def __init__(self, page_body: str | None = LALAUE, page_status: int = 200):
-        self.store: dict = {}
-        self.created: list[dict] = []
-        self.patched: list[dict] = []
-        self.page_body = page_body
-        self.page_status = page_status
-        self.n = 0
-
-    def install(self):
-        respx.get(url__startswith=ANYTYPE_BASE).mock(
-            side_effect=lambda request: httpx.Response(200, json=_schema_ok())
-        )
-        respx.get(url__startswith="https://lalaue.example/").mock(side_effect=self._page)
-        respx.post(url__startswith=ANYTYPE_BASE).mock(side_effect=self._post)
-        respx.patch(url__startswith=ANYTYPE_BASE).mock(side_effect=self._patch)
-
-    def _page(self, request):
-        return httpx.Response(
-            self.page_status,
-            text=self.page_body or "",
-            headers={"content-type": "text/html; charset=utf-8"},
-        )
-
-    def _post(self, request):
-        from anytype_llm_wiki.wiki.util import normalize_title
-
-        url = str(request.url)
-        payload = json.loads(request.content or b"{}")
-        if "/search" in url:
-            q = normalize_title(payload.get("query", ""))
-            data = [
-                {"id": o["id"], "name": o["name"], "type": {"key": tk}, "properties": []}
-                for (n, tk), o in self.store.items()
-                if n == q
-            ]
-            return httpx.Response(200, json={"data": data, "pagination": {"has_more": False}})
-        if "/objects" in url:
-            self.n += 1
-            oid = f"obj-{self.n}"
-            name = payload.get("name", "")
-            tk = payload.get("type_key", "")
-            self.store[(normalize_title(name), tk)] = {"id": oid, "name": name}
-            self.created.append(payload)
-            return httpx.Response(201, json={"object": {"id": oid, "name": name}})
-        return httpx.Response(200, json={})
-
-    def _patch(self, request):
-        self.patched.append(json.loads(request.content or b"{}"))
-        return httpx.Response(200, json={"object": {"id": "patched"}})
-
-    def created_of(self, type_key: str) -> list[dict]:
-        return [p for p in self.created if p.get("type_key") == type_key]
-
-    def wiki_objects(self) -> list[dict]:
-        return [
-            p for p in self.created if p.get("type_key") not in ("wiki_source", "wiki_log")
-        ]
 
 
 def _stub_extract(monkeypatch, result: dict | Exception):
