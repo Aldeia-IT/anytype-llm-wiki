@@ -274,7 +274,8 @@ licence or copyright notice or a bare domain: on fetched pages such names are pa
 group or an event literally called "1968", or a company known by its domain, is dropped too, with
 the warning `name_policy_rejected: page_furniture: <name>`. A Creative Commons licence named by its
 code or spelled out with its version (`CC BY-SA 4.0`, `Creative Commons Attribution 4.0`) counts
-as a notice, so such a licence is not kept as a concept either; the organisation `Creative Commons`
-is. The hinted primary subject is exempt:
+as a notice when it is the whole name, so such a licence is not kept as a concept either; the
+organisation `Creative Commons` is, and so is a longer name that only contains a licence (`History
+of CC BY-SA 4.0 adoption`). The hinted primary subject is exempt:
 ingest the page with `subject_hint` set to that name, or record it with `wiki_remember`, which does
 not apply the rule.

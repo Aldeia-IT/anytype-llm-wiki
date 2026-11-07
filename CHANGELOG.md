@@ -16,16 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The fetched text has runs of spaces inside a line collapsed to one space. A ~300-space
     padding run on a profile page set its field list apart from the text and caused the 15
     sentences. Indentation, fenced code, headings and hard breaks keep their spaces.
-  - The recall step no longer appends page furniture: short licence or copyright notices (by
-    their shape: at most 30 words, such as a Creative Commons footer or `© 2016 …`) and lines
-    that only state a date (a byline such as `outubro, 2016`). A bare year line, a version number,
-    a body sentence that mentions `©` or Creative Commons, and other short body lines are still
+  - The recall step no longer appends page furniture: a line of at most 15 words that is, as a
+    whole, a licence or copyright notice (a Creative Commons footer, `© 2016 Velhosmestres.com.
+    All rights reserved.`, `Licensed under CC BY-SA 4.0`), and lines that only state a date (a
+    byline such as `outubro, 2016`). A bare year line, a version number, a body sentence that
+    mentions `©`, copyright or a licence mid-sentence, and other short body lines are still
     recovered.
   - `wiki_ingest` drops an extracted entity or concept whose whole name is only a year, a date, a
     licence notice or a bare domain, in every space, with the warning
-    `name_policy_rejected: page_furniture: <name>`. A licence notice is matched by its shape
-    (`© 2016 …`, `CC BY-SA 4.0`, `All rights reserved`); `Creative Commons`, `Copyright Act`,
-    `MIT License` and `Socket.io` pass. The hinted primary subject and the heading candidates a
+    `name_policy_rejected: page_furniture: <name>`. A licence notice must be the whole name,
+    with at most a year and a holder besides (`© 2016 Grupo X`, `CC BY-SA 4.0`, `All rights
+    reserved`); `Creative Commons`, `Copyright Act`, `MIT License`, `Socket.io` and a longer
+    name that only contains a notice (`History of CC BY-SA 4.0 adoption`) pass. The hinted primary subject and the heading candidates a
     local file or text keeps when extraction degrades are exempt.
     **Limitation:** a real entity named only by a year or a date (a group or an event literally
     called "1968") or by its domain is dropped as well unless it is the hinted subject.
