@@ -475,6 +475,16 @@ class TestHintLinks:
         assert second["relations_created"] == 0
 
     @respx.mock
+    def test_relations_sourced_counts_links_that_gained_a_source(self, monkeypatch):
+        fake = _space()
+        _patch_calls(monkeypatch, [CONCEPT])
+        first = _remember(KNOWLEDGE, subject_hint="Mestre Bimba")
+        second = _remember(KNOWLEDGE, subject_hint="Mestre Bimba")
+        assert (first["relations_created"], first.get("relations_sourced")) == (1, 0)
+        assert (second["relations_created"], second.get("relations_sourced")) == (0, 1)
+        assert len(fake.created_of("wiki_link")) == 1
+
+    @respx.mock
     def test_no_hint_and_no_relations_makes_no_link(self, monkeypatch):
         fake = _space()
         _patch_calls(monkeypatch, [SUBJECT, CONCEPT])
