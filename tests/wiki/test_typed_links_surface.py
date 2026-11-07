@@ -232,6 +232,15 @@ def _query(monkeypatch, question="Who is Mestre Bimba?"):
         return "answer " * 15
 
     monkeypatch.setattr(q, "_call_ollama_synthesis", fake_synthesis)
+    # Tier 1 makes every object a seed, so no object would be a neighbour. Force Tier 2
+    # with the first entity as the only seed; its relation index makes the rest 1-hop
+    # neighbours (a neighbour's links are those to its discovering seed, spec section 8).
+    monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
+    monkeypatch.setattr(
+        q.indexer,
+        "hybrid_search_core",
+        lambda **kw: [{"object_id": A, "type": "wiki_entity", "score": 0.9}],
+    )
     result = q.wiki_query(question=question, space_id=SPACE, file_back=False)
     return result, prompts
 

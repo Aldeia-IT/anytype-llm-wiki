@@ -1,10 +1,10 @@
 """wiki/lint.py — wiki_lint v0.5.0 structural health check.
 
 A read-only, report-only diagnostic over a bootstrapped wiki space. It enumerates
-the wiki ONCE, runs a battery of ten structural checks (asymmetric relations,
+the wiki ONCE, runs a battery of twelve structural checks (asymmetric relations,
 orphans, pipeline orphans, unresolved contradictions, staleness, oversized
-descriptions, empty types, unreviewed/stale needs-review, and — opt-in — potential
-duplicates), assembles a severity-ranked LintReport, and files a single ``wiki_log``
+descriptions, empty types, unreviewed/stale needs-review, typed-link integrity
+(``link_dangling``, ``link_index_missing``), and — opt-in — potential duplicates), assembles a severity-ranked LintReport, and files a single ``wiki_log``
 receipt. ``wiki_lint`` mutates nothing but its own WikiLog receipt.
 
 Single-enumeration constraint (CTO-BLOCKING-1 / spec note G9): ``list_objects`` is
@@ -30,6 +30,7 @@ from . import bootstrap as _bootstrap
 from .. import indexer
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .query import _parse_relation_elements, _fetch_cached
+from .links import LINK_TYPE_KEY, parse_link
 from .remember import _resolve_select_tag
 from .util import normalize_title, object_type_key, scrub_credentials, strip_control_chars
 from ..anytype_client import AnytypeReadClient
@@ -253,7 +254,7 @@ def wiki_lint(
     Sequential pipeline: enumerate
     once → QA#25 schema gate (3 branches) → filter content objects + counts →
     resolve the needs-review tag → fetch each object (per-run cache, D1 backlinks)
-    → run the ten-check battery → opt-in duplicate sweep → severity post-filter →
+    → run the twelve-check battery → opt-in duplicate sweep → severity post-filter →
     summary → WikiLog receipt.
 
     The duplicate sweep is OPT-IN (``include_duplicates=True``) and can exceed the
@@ -544,6 +545,53 @@ def wiki_lint(
                     "low", "oversized", o, space_id,
                     f"description is {len(desc)} chars (> {config.lint_oversized_chars()})",
                 ))
+
+        # (j) link_dangling (High) / link_index_missing (Medium) — typed links (#1486).
+        # Read-only over the single enumeration. A link with a missing endpoint or
+        # Source, or with no Source at all, is dangling; a sound link whose endpoints
+        # do not index each other in wiki_relations/wiki_related is index-missing
+        # (a dangling link is not also reported index-missing).
+        objects_by_id = {
+            o["id"]: o for o in all_objects if isinstance(o, dict) and o.get("id")
+        }
+        for link_obj in all_objects:
+            if not isinstance(link_obj, dict) or _type_of(link_obj) != LINK_TYPE_KEY:
+                continue
+            rec = parse_link(link_obj)
+            if rec is None:
+                findings.append(_finding(
+                    "high", "link_dangling", link_obj, space_id,
+                    "link is malformed (needs one from, one to, a label)",
+                ))
+                continue
+            problems = [
+                f"missing endpoint {end}" for end in (rec.from_id, rec.to_id)
+                if end not in objects_by_id
+            ] + [
+                f"missing source {sid}" for sid in rec.source_ids
+                if sid not in objects_by_id
+            ]
+            if not rec.source_ids:
+                problems.append("no source")
+            if problems:
+                findings.append(_finding(
+                    "high", "link_dangling", link_obj, space_id,
+                    f"link {rec.id} ({rec.label}) is dangling: {', '.join(problems)}",
+                ))
+                continue
+            for end, other in ((rec.from_id, rec.to_id), (rec.to_id, rec.from_id)):
+                end_key = _rel_key_for_type(_type_of(objects_by_id[end]))
+                if end_key is None:
+                    continue
+                if other not in _parse_relation_elements(
+                    (_prop(objects_by_id[end], end_key) or {}).get("objects")
+                ):
+                    findings.append(_finding(
+                        "medium", "link_index_missing", link_obj, space_id,
+                        f"link {rec.id} ({rec.label}): {end} does not list {other} "
+                        f"in {end_key}",
+                    ))
+                    break
 
         # (i) empty_type (Informational) — one per content type with zero objects
         present_types = {_type_of(o) for o in wiki_objects}
