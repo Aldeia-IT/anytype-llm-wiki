@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Page chrome no longer turns into junk entities (Aldeia-IT/aldeia-box#1508).** Since the
+  recall-first fetch (Aldeia-IT/aldeia-box#1432), `wiki_ingest` passed page chrome to the
+  extractor and the model made entities of it: on the 9 pages of the 2026-11-07 genealogy drain,
+  22 junk entities, 15 of them whole sentences. Three generic changes, no site rules:
+  - The fetched text has runs of spaces inside a line collapsed to one space. A ~300-space
+    padding run on a profile page set its field list apart from the text and caused the 15
+    sentences. Indentation, fenced code, headings and hard breaks keep their spaces.
+  - The recall step no longer appends page furniture: licence or copyright notices and lines
+    that only state a date (a byline such as `outubro, 2016`). A bare year line and other short
+    body lines are still recovered.
+  - `wiki_ingest` drops an extracted entity or concept whose whole name is only a year, a date, a
+    licence notice or a bare domain, in every space, with the warning
+    `name_policy_rejected: page_furniture: <name>`. The hinted primary subject is exempt.
+    **Limitation:** a real entity named only by a year or a date (a group or an event literally
+    called "1968") or by its domain is dropped as well unless it is the hinted subject.
+    `wiki_remember` does not apply this rule (it plans its subjects in its own step and reads
+    no fetched page). `scripts/ingest_dry_run.py` lists these names in `refused_names`.
+
 ## [0.10.0] - 2026-11-06
 
 Typed, sourced links and facts per source (Aldeia-IT/aldeia-box#1486). Schema 0.5.0: run

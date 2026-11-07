@@ -184,6 +184,12 @@ def wiki_ingest(
     ingest writes only the Source and the WikiLog, and re-ingesting the URL later
     fills it.
 
+    An extracted entity or concept whose whole name is only a year, a date, a
+    licence or copyright notice or a bare domain is page furniture and is not
+    written (``name_policy_rejected: page_furniture: <name>`` in ``warnings``). The
+    hinted primary subject is exempt; any other entity named only by a year (an
+    event called "1968") is dropped too.
+
     A PDF (URL or local ``.pdf``) with a text layer is read page by page, up to
     ``WIKI_PDF_MAX_PAGES`` pages (default 40; ``pdf_pages_capped`` names a
     cut-off) and ``WIKI_PDF_MAX_PARSE_S`` seconds of parsing (default 60;
