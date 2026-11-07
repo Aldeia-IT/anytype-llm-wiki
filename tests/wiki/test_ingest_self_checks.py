@@ -244,3 +244,41 @@ class TestPeerConflictsUnchanged:
         result = {"warnings": [], "contradictions_detected": 0}
         ingest._run_contradiction_checks([check], "space", None, None, result)
         assert written == [["peer-1"]] and result["contradictions_detected"] == 1
+
+
+class TestSourceSummaryStaysOnTheSource:
+    """T28 (spec section 8): the summary lives on the Source and is never copied into facts."""
+
+    SUMMARY = "A page about the founding of Capoeira Regional in the 1930s."
+
+    @respx.mock
+    def test_ingest_keeps_the_summary_out_of_entity_and_concept_text(self, monkeypatch):
+        from anytype_llm_wiki.wiki import ingest
+
+        fake = _space()
+        monkeypatch.setattr(ingest, "extract", lambda **kw: {
+            "entities": [{"name": BIMBA, "description": "Bimba taught in Salvador."}],
+            "concepts": [{"name": "Capoeira Regional", "definition": "A capoeira style."}],
+            "summary": self.SUMMARY,
+        })
+        _model(monkeypatch, {"contradictions": [], "duplicates": []})
+        result = _ingest()
+        assert result["status"] == "ok", result
+        (source,) = fake.created_of("wiki_source")
+        assert prop_value(source, "wiki_summary") == self.SUMMARY
+        for obj in fake.objects.values():
+            if obj["type"]["key"] in ("wiki_entity", "wiki_concept"):
+                for key in ("wiki_facts", "wiki_definition"):
+                    assert self.SUMMARY not in (prop_value(obj, key) or ""), (obj["name"], key)
+
+    @respx.mock
+    def test_query_shows_the_source_neighbours_summary(self, monkeypatch):
+        from .test_typed_links_surface import A, SRC1, _bootstrapped, _entity_props, _neighbour, _query
+
+        fake = _bootstrapped()
+        props = _entity_props([]) + [{"key": "wiki_sources", "objects": [SRC1]}]
+        fake.seed("wiki_entity", "Mestre Bimba", props, A)
+        fake.seed("wiki_source", "Page one", [{"key": "wiki_summary", "text": self.SUMMARY}], SRC1)
+        result, prompts = _query(monkeypatch)
+        assert _neighbour(result, SRC1) is not None, result["sources_consulted"]
+        assert f"wiki_summary: {self.SUMMARY}" in prompts[0]
