@@ -17,7 +17,9 @@ Each object carries: ``url``, ``fetch_seconds``, ``chars_before_strip`` /
 ``entities`` / ``concepts`` (name and facts), ``relation_count``,
 ``extraction_error``, ``truncated``, ``extraction_seconds``, and
 ``refused_names``: the names ingest would refuse. Names failing the base name
-policy are always listed; with ``--refuse-identifier-names`` the identifier-like
+policy and page-furniture names (only a year, a date, a licence notice or a bare
+domain, Aldeia-IT/aldeia-box#1508; never the hinted primary subject) are always
+listed; with ``--refuse-identifier-names`` the identifier-like
 names are listed too, as if the space were in
 ``WIKI_REFUSE_IDENTIFIER_NAMES_SPACES``. A page the gate refuses is not sent to
 the model. ``fetch_error`` is set when the fetch itself failed.
@@ -47,6 +49,7 @@ import time
 from anytype_llm_wiki.wiki.extraction import (
     extract,
     is_identifier_like_name,
+    is_page_furniture_name,
     sanitize_name,
 )
 from anytype_llm_wiki.wiki.fetch import _to_markdown, fetch_source
@@ -71,11 +74,18 @@ def _items(extracted: dict, key: str, kind: str) -> list[dict]:
     return out
 
 
-def _refused(names: list[str], refuse_identifiers: bool) -> list[str]:
+def _refused(
+    names: list[str], refuse_identifiers: bool, primary_name: str | None = None
+) -> list[str]:
+    """The names ingest would refuse; the primary subject is never page furniture."""
     refused = []
     for name in names:
         clean = sanitize_name(name)
-        if clean is None or (refuse_identifiers and is_identifier_like_name(clean)):
+        if (
+            clean is None
+            or (refuse_identifiers and is_identifier_like_name(clean))
+            or (name != primary_name and is_page_furniture_name(clean))
+        ):
             refused.append(name)
     return refused
 
@@ -173,7 +183,7 @@ def dry_run(
     relations = extracted.get("relations")
     report["relation_count"] = len(relations) if isinstance(relations, list) else 0
     names = [i["name"] for i in report["entities"] + report["concepts"]]
-    report["refused_names"] = _refused(names, refuse_identifiers)
+    report["refused_names"] = _refused(names, refuse_identifiers, report["primary_name"])
     return report
 
 

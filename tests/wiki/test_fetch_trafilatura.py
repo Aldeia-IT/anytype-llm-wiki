@@ -423,3 +423,180 @@ class TestRecoverMissingLines:
         merged = _recover_missing_lines(self.PRIMARY, f"{first}\n\n{self.PRIMARY}\n\n{second}")
         assert merged.index(first) < merged.index(second)
         assert merged.index(self.PRIMARY) < merged.index(first)
+
+
+class TestRecoverSkipsPageFurniture:
+    """Aldeia-IT/aldeia-box#1508: the recall step does not append furniture lines, a
+    licence / copyright notice or a line that only states a month with a date or year
+    (a byline or edit stamp). The model turned them into junk entities. Body lines,
+    a bare year line and a caption with a place stay recovered (Aldeia-IT/aldeia-box#1432 D11a)."""
+
+    PRIMARY = TestRecoverMissingLines.PRIMARY
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            (
+                "Content is available under Creative Commons Attribution-ShareAlike 4.0 "
+                "International (CC BY-SA 4.0) unless otherwise noted."
+            ),
+            "Copyright",
+            "Copyright 2016 Velhos Mestres",
+            "© 2026 Grupo Liberdade. All rights reserved.",
+            "Todos os direitos reservados.",
+            "© 2016 Velhosmestres.com. All rights reserved.",
+            "Copyright 2016 Velhosmestres",
+            "(c) 2016 Grupo Liberdade",
+            # A holder name of up to six words (a measured page's footer).
+            "© 2026 Grupo de Capoeira Esquiva de Rúa",
+            "Licensed under CC BY-SA 4.0",
+            (
+                "This work is licensed under a Creative Commons Attribution-ShareAlike "
+                "4.0 International License."
+            ),
+            "outubro, 2016",
+            "1 de Janeiro, 2010",
+            "26 August 1997",
+        ],
+    )
+    def test_furniture_line_is_not_appended(self, line):
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        assert _recover_missing_lines(self.PRIMARY, f"{self.PRIMARY}\n\n{line}") == self.PRIMARY
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "1974",
+            "Salvador, 1974",
+            "Maio",
+            "Mestre Ana",
+            "He wrote the songs of the group and kept the copyright on all of them.",
+            # Body sentences that mention ©, Creative Commons or copyright (review F1).
+            (
+                "Photo © Pierre Verger, taken in Salvador in 1946, shows Mestre Pastinha "
+                "teaching at the academy."
+            ),
+            (
+                "The recordings were later licensed under Creative Commons by the family "
+                "so that students could share them."
+            ),
+            "Copyright disputes over the songs went on for years after Bimba died in 1974.",
+            # A long line is body text even when it carries a notice phrase.
+            (
+                "The archive, all rights reserved by the family since the founder died, "
+                "holds letters, photographs and recordings of the rodas that he led in "
+                "Salvador and in Rio de Janeiro between 1940 and 1970."
+            ),
+            # A short body line that mentions a notice mid-sentence: the notice must
+            # be the whole line (Aldeia-IT/aldeia-box#1508 fix round 2).
+            (
+                "The 1978 recording of the ladainha, licensed under the Creative Commons "
+                "Attribution 4.0 licence by the family, is kept in the archive."
+            ),
+            "The songbook, all rights reserved, stayed with the family.",
+            "His CC BY-SA 4.0 photos of the roda are in the archive.",
+            "© 2016 photo by Pierre Verger of Mestre Pastinha teaching at his academy in Salvador",
+            # A lettered list item, a sentence that opens with "Copyright <year>" or
+            # "© <year>", and a short "under a licence" line that is not a notice
+            # (Aldeia-IT/aldeia-box#1508 fix round 3).
+            "(c) the berimbau leads the roda",
+            "(c) Bimba opened his academy in 1932.",
+            "Copyright 1978 ruling favoured Mestre Bimba.",
+            "© 2016 Mestre Pastinha teaching in Salvador",
+            "Published under a licence from the family.",
+            # Version numbers and Portuguese words are not dates (review F2, F3).
+            "1.2.3",
+            "Out 1",
+            "Mar 3",
+        ],
+    )
+    def test_body_lines_stay_recovered(self, line):
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        merged = _recover_missing_lines(self.PRIMARY, f"{self.PRIMARY}\n\n{line}")
+        assert merged.endswith(line), merged
+
+
+class TestCollapseSpaceRuns:
+    """Aldeia-IT/aldeia-box#1508: runs of spaces inside a line of trafilatura's text
+    become one space (a ~300-space padding run split a profile block from its text,
+    and the model listed 15 sentences as entities). Markdown that relies on spaces
+    keeps them: a hard break (two or more trailing spaces) stays a hard break,
+    indentation, fenced code blocks and headings are untouched."""
+
+    def test_interior_run_becomes_one_space(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        padded = "Origem: Mestre Pelé da Bomba" + " " * 300 + "Mestre Índio fundou o grupo."
+        assert _collapse_space_runs(padded) == (
+            "Origem: Mestre Pelé da Bomba Mestre Índio fundou o grupo."
+        )
+
+    def test_non_breaking_space_and_tab_runs_collapse(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("Grupo:   Oxossi\t\tPais: Brasil") == (
+            "Grupo: Oxossi Pais: Brasil"
+        )
+
+    def test_a_single_non_breaking_space_is_kept(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("Mestre Bimba") == "Mestre Bimba"
+
+    def test_hard_break_is_kept_and_a_long_trailing_run_kept_as_one_hard_break(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("line one  \nline two") == "line one  \nline two"
+        assert _collapse_space_runs("line one" + " " * 40 + "\nline two") == (
+            "line one  \nline two"
+        )
+
+    def test_indentation_is_kept(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "* item\n  * nested  item\n\n    indented   code"
+        assert _collapse_space_runs(text) == "* item\n  * nested item\n\n    indented   code"
+
+    def test_fenced_code_block_is_untouched(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "Before  it.\n\n```\nx    =  1\n```\n\nAfter   it."
+        assert _collapse_space_runs(text) == "Before it.\n\n```\nx    =  1\n```\n\nAfter it."
+
+    def test_a_fence_closes_only_on_its_own_character(self):
+        """Review F6: inside a ``~~~`` block a ``` line is code, not the closing fence
+        (CommonMark), so the lines after it stay untouched until ``~~~``."""
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "~~~\n```\nx    =  1\n~~~\nAfter   it."
+        assert _collapse_space_runs(text) == "~~~\n```\nx    =  1\n~~~\nAfter it."
+
+    def test_a_longer_fence_needs_a_long_enough_closer(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "````\n```\nx    =  1\n````\nAfter   it."
+        assert _collapse_space_runs(text) == "````\n```\nx    =  1\n````\nAfter it."
+
+    def test_headings_are_untouched(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("#  roda de  domingo") == "#  roda de  domingo"
+
+    def test_trafilatura_text_is_collapsed(self, monkeypatch):
+        """The collapse runs on trafilatura's output inside the fetch path."""
+        import trafilatura
+
+        from anytype_llm_wiki.wiki.fetch import extract_main_markdown
+
+        body = (
+            "The first paragraph of a shaped article body is long enough to pass the gate,"
+            + " " * 120
+            + "because it talks at length about rodas, berimbaus and the old masters of Bahia. "
+        ) * 3
+        monkeypatch.setattr(trafilatura, "extract", lambda *a, **k: body)
+        html = f"<html><body><article><p>{body}</p></article></body></html>"
+        md = extract_main_markdown(html)
+        assert "gate, because" in md, md[:300]
+        assert "  " not in md.replace("  \n", ""), md[:300]

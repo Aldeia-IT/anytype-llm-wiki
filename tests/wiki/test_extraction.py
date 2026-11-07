@@ -1307,3 +1307,146 @@ class TestDroppedExtractionFields:
         assert out["relations"] == raw["relations"]
         assert out["primary_subject"] == "Bimba"
         assert out["summary"] == "s"
+
+
+class TestIsPageFurnitureName:
+    """Aldeia-IT/aldeia-box#1508: the predicate ingest uses to drop a model-extracted
+    name that is page furniture, not an entity or concept: only a year, only a date,
+    a licence notice or a bare domain (a site name).
+
+    The positives include the junk names the 2026-11-07 drain wrote from fetched
+    pages ("1970", "2016", "Velhosmestres.com", the Creative Commons footer).
+
+    Known limitation: the predicate looks at the name alone, so a real entity whose
+    whole name is a year or a date (a group or an event literally called "1968",
+    "Maio de 1968") is page furniture to it as well. Ingest exempts the hinted
+    primary subject only; see ``TestPageFurnitureGuardInIngest``.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Only a year, a decade or an approximate year.
+            "1970",
+            "2016",
+            "1924",
+            "1960s",
+            "c. 1950",
+            "1968-1970",
+            # Only a date (English, Portuguese, Spanish month names; numeric forms).
+            "26 August 1997",
+            "August 26, 1997",
+            "outubro, 2016",
+            "Outubro de 2016",
+            "1 de Janeiro, 2010",
+            "12 de octubre de 1950",
+            "May 1968",
+            "August 26",
+            "November 5, 2026",
+            "out 2016",
+            "3 mar 2010",
+            "2016-10-01",
+            "01/10/2016",
+            "1.10.2016",
+            # A licence notice.
+            "Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)",
+            "CC BY-SA 4.0",
+            "All rights reserved",
+            "Todos os direitos reservados",
+            "© 2026 Grupo Liberdade",
+            "© Velhos Mestres",
+            "Velhos Mestres © 2016",
+            "Copyright 2016 Velhos Mestres",
+            "Copyright © Velhos Mestres",
+            "Copyright 2016 Velhosmestres",
+            "© 2016 Velhosmestres.com. All rights reserved.",
+            # "(c)" counts as the sign after "Copyright" or before a year.
+            "(c) 2016 Grupo Liberdade",
+            "Copyright (c) Velhos Mestres",
+            # A bare domain (a site name).
+            "Velhosmestres.com",
+            "Capoeirahistory.com",
+            "www.capoeira.org",
+            "capoeira.com.br",
+            # Surrounding whitespace and punctuation are stripped first.
+            "  1975. ",
+        ],
+    )
+    def test_page_furniture(self, name):
+        from anytype_llm_wiki.wiki.extraction import is_page_furniture_name
+
+        assert is_page_furniture_name(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Mestre Bimba",
+            "Grupo Liberdade",
+            "Capoeira Regional",
+            "180 golpes",
+            "Mestre Pelé da Bomba",
+            "Revolta da Chibata (1910)",
+            "Festival de Capoeira 1968",
+            # A lone month can be a name.
+            "May",
+            "Maio",
+            # A licence by name is a concept, not a notice; so are the organisation
+            # and laws about copyright (review F1).
+            "MIT License",
+            "GNU General Public License",
+            "Creative Commons",
+            "Copyright Act",
+            "Copyright law",
+            # A longer name that only contains a notice is a title, not a notice
+            # (Aldeia-IT/aldeia-box#1508 fix round 2: the notice must be the whole name).
+            "History of CC BY-SA 4.0 adoption",
+            "Licença CC BY 4.0 no Brasil",
+            "Music copyright in Brazil",
+            "The songbook, all rights reserved",
+            "Notes on all rights reserved in Brazilian law",
+            "Copyright 2016 dispute between Grupo X and Grupo Y over the songbook",
+            # A lettered list item is not a copyright line, and a "Copyright <year>"
+            # opening with more than a three-word holder is a sentence
+            # (Aldeia-IT/aldeia-box#1508 fix round 3).
+            "(c) the berimbau leads the roda",
+            "Copyright 1978 ruling favoured Mestre Bimba",
+            # Version numbers are not numeric dates (review F2).
+            "1.2.3",
+            "2.0.1",
+            "2.0.10",
+            # Portuguese words that are month abbreviations too (review F3).
+            "Out 1",
+            "Set 1, 2",
+            "Mar 3",
+            "De Mar 1",
+            # Dotted names that are not domains (review F4: ".io" ends software names).
+            "Node.js",
+            "ASP.NET",
+            "Socket.io",
+            "bge-m3",
+            "",
+            "   ",
+            None,
+            42,
+        ],
+    )
+    def test_not_page_furniture(self, name):
+        from anytype_llm_wiki.wiki.extraction import is_page_furniture_name
+
+        assert is_page_furniture_name(name) is False
+
+    def test_a_real_entity_named_only_by_a_year_is_page_furniture_too(self):
+        """Documented limitation: a group or event literally called "1968" cannot be
+        told from a year by its name. The predicate says furniture; only the hinted
+        primary subject escapes the ingest guard."""
+        from anytype_llm_wiki.wiki.extraction import is_page_furniture_name
+
+        assert is_page_furniture_name("1968") is True
+
+    def test_sanitize_name_does_not_apply_the_rule(self):
+        """The predicate is separate from the base name policy: query.py and the
+        remember path keep their behaviour."""
+        from anytype_llm_wiki.wiki.extraction import sanitize_name
+
+        assert sanitize_name("1968") == "1968"
+        assert sanitize_name("Velhosmestres.com") == "Velhosmestres.com"

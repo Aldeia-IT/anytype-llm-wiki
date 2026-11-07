@@ -265,3 +265,17 @@ server while the client sees an error (a timeout, or a 5xx after the commit), th
 the Source is deleted, and the object's `wiki_sources` or the link's `wiki_link_sources` now names a
 missing object. Nothing worse happens. `wiki_lint` surfaces both forms: `link_dangling` for a link and
 `source_dangling` for an entity or concept.
+
+## 15. An entity named only by a year, a date or its domain is dropped at ingest
+
+`wiki_ingest` drops an extracted entity or concept whose whole name is only a year, a date, a
+licence or copyright notice or a bare domain: on fetched pages such names are page furniture
+(Aldeia-IT/aldeia-box#1508). The rule sees the name alone, so a real entity with such a name, a
+group or an event literally called "1968", or a company known by its domain, is dropped too, with
+the warning `name_policy_rejected: page_furniture: <name>`. A Creative Commons licence named by its
+code or spelled out with its version (`CC BY-SA 4.0`, `Creative Commons Attribution 4.0`) counts
+as a notice when it is the whole name, so such a licence is not kept as a concept either; the
+organisation `Creative Commons` is, and so is a longer name that only contains a licence (`History
+of CC BY-SA 4.0 adoption`). The hinted primary subject is exempt:
+ingest the page with `subject_hint` set to that name, or record it with `wiki_remember`, which does
+not apply the rule.

@@ -203,6 +203,22 @@ class TestDryRunSubjectHint:
         assert page["marked"] is None
         assert "PRIMARY SUBJECT" not in json.loads(generate.calls[0].request.content)["prompt"]
 
+    def test_page_furniture_names_are_refused_except_the_primary(self, capsys):
+        """Aldeia-IT/aldeia-box#1508: ``refused_names`` lists the page-furniture names
+        ingest drops in every space; the hinted primary subject is exempt."""
+        extracted = {
+            "entities": [
+                {"name": "1968", "description": "d"},
+                {"name": "Mestre Bimba", "description": "d"},
+                {"name": "2016", "description": "d"},
+            ],
+            "concepts": [{"name": "Velhosmestres.com", "definition": "d"}],
+            "primary_subject": "1968",
+        }
+        page, _ = self._run(["--subject-hint", "1968"], extracted, capsys)
+        assert page["primary_name"] == "1968"
+        assert page["refused_names"] == ["2016", "Velhosmestres.com"]
+
 
 def test_a_hinted_run_with_title_strip_does_not_import_the_indexer():
     """The hint planning and the title strip need no indexer (and so no Qdrant)."""

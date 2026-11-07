@@ -24,6 +24,7 @@ import httpx
 
 from .. import __version__
 from . import config, pdf
+from .furniture import is_date_only, is_licence_notice
 from .pdf import is_pdf, pages_markdown
 
 _log = logging.getLogger(__name__)
@@ -375,11 +376,32 @@ def _is_chrome_line(line: str) -> bool:
     return link_chars >= _RECOVER_MAX_LINK_SHARE * len(visible)
 
 
+# A recovered line is a notice only when it is short. The longest notice on the
+# measured pages, the Creative Commons footer "Content is available under Creative
+# Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) unless otherwise
+# noted.", is 15 words; a copyright line ("© 2016 Velhosmestres.com. All rights
+# reserved.") is about 6. The notice must also be the whole line, so a body sentence
+# that mentions a licence is recovered whatever its length (Aldeia-IT/aldeia-box#1508).
+_FURNITURE_LINE_MAX_WORDS = 15
+
+
+def _is_furniture_line(line: str) -> bool:
+    """True for a markdown line that is page furniture: a line that is, as a whole, a
+    licence / copyright notice of at most fifteen words (``is_licence_notice``), or
+    a line that only states a date, such as a byline or an edit stamp
+    (Aldeia-IT/aldeia-box#1508). A body line that mentions a licence mid-sentence
+    is recovered. A bare year line is not furniture: it can be body text (D11a)."""
+    visible = markdown_visible_text(line)
+    is_notice = len(line.split()) <= _FURNITURE_LINE_MAX_WORDS and is_licence_notice(visible)
+    return is_notice or is_date_only(visible)
+
+
 def _recover_missing_lines(primary: str, baseline: str) -> str:
     """Append to ``primary`` every ``baseline`` line it lacks, in baseline order.
 
     A line is present when its whole word sequence occurs in ``primary``
-    (``_words``). Chrome-like lines (``_is_chrome_line``) and repeats are skipped;
+    (``_words``). Chrome-like lines (``_is_chrome_line``), furniture lines
+    (``_is_furniture_line``, Aldeia-IT/aldeia-box#1508) and repeats are skipped;
     images keep only their alt text. Recovered lines go at the end because their
     position relative to ``primary``'s text is unknown.
 
@@ -392,13 +414,60 @@ def _recover_missing_lines(primary: str, baseline: str) -> str:
     missing: list[str] = []
     for line in baseline.splitlines():
         key = _words(line)
-        if not key.strip() or _is_chrome_line(line) or key in present or key in appended:
+        if (
+            not key.strip()
+            or key in present
+            or key in appended
+            or _is_chrome_line(line)
+            or _is_furniture_line(line)
+        ):
             continue
         appended.add(key)
         missing.append(_MD_IMAGE_RE.sub(r"\1", line).strip())
     if not missing:
         return primary
     return primary + "\n\n" + "\n\n".join(missing)
+
+
+# Aldeia-IT/aldeia-box#1508: a run of spaces inside a line (trafilatura keeps the
+# padding of table-like layouts and &nbsp; runs) carries no meaning in markdown, spends
+# the extractor's input window and, on a profile page, set a field list apart from the
+# text it belongs to. Runs between two visible characters become one space; a trailing
+# run of three or more becomes the two-space hard break it already meant.
+_SPACE_RUN_RE = re.compile(r"(?<=\S)[ \t\u00a0]{2,}(?=\S)")
+_TRAILING_SPACE_RUN_RE = re.compile(r"(?<=\S)[ \t\u00a0]{3,}$")
+_MD_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_MD_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(\s|$)")
+
+
+def _collapse_space_runs(markdown: str) -> str:
+    """Collapse runs of spaces inside each line of ``markdown`` to one space.
+
+    Markdown that relies on spaces is kept: leading indentation (lists, an indented
+    code block, whose lines are left whole), fenced code blocks, headings, and a hard
+    break (a trailing run of three or more spaces becomes two). A single non-breaking
+    space stays. Words and their order are unchanged.
+
+    :param markdown: markdown text.
+    :returns: the text with interior space runs collapsed.
+    """
+    lines: list[str] = []
+    # The opening fence; only the same character, at least as many times, closes it.
+    fence = ""
+    for line in markdown.split("\n"):
+        match = _MD_FENCE_RE.match(line)
+        if match and not fence:
+            fence = match.group(1)
+        elif match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence):
+            fence = ""
+        elif not (
+            fence
+            or _MD_HEADING_RE.match(line)
+            or line.startswith(("    ", "\t"))
+        ):
+            line = _TRAILING_SPACE_RUN_RE.sub("  ", _SPACE_RUN_RE.sub(" ", line))
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _trafilatura_extract(html: str) -> tuple[str, str | None]:
@@ -459,7 +528,8 @@ def extract_main_markdown(html: str) -> str:
     trafilatura (``_trafilatura_extract``) leads, with the metadata title
     prepended (``_prepend_title``); the ``strip_boilerplate`` lines the titled text
     lacks are then appended (``_recover_missing_lines``), so a heading equal to the
-    title is not recovered a second time. ``strip_boilerplate``'s markdown is returned
+    title is not recovered a second time, and runs of spaces inside lines are
+    collapsed (``_collapse_space_runs``, Aldeia-IT/aldeia-box#1508). ``strip_boilerplate``'s markdown is returned
     unchanged when trafilatura yields nothing or the usable-content gate refuses
     the merged text (D8).
 
@@ -470,7 +540,9 @@ def extract_main_markdown(html: str) -> str:
     body, title = _trafilatura_extract(html)
     if not body:
         return baseline
-    merged = _recover_missing_lines(_prepend_title(body, title), baseline)
+    merged = _collapse_space_runs(
+        _recover_missing_lines(_prepend_title(body, title), baseline)
+    )
     if usable_content_verdict(html, merged) is not None:
         return baseline
     return merged
