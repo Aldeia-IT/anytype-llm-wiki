@@ -273,7 +273,14 @@ class TestSourceSummaryStaysOnTheSource:
 
     @respx.mock
     def test_query_shows_the_source_neighbours_summary(self, monkeypatch):
-        from .test_typed_links_surface import A, SRC1, _bootstrapped, _entity_props, _neighbour, _query
+        from .test_typed_links_surface import (
+            SRC1,
+            A,
+            _bootstrapped,
+            _entity_props,
+            _neighbour,
+            _query,
+        )
 
         fake = _bootstrapped()
         props = _entity_props([]) + [{"key": "wiki_sources", "objects": [SRC1]}]
