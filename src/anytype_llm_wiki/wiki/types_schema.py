@@ -23,8 +23,9 @@ API-contract notes (verified against the Anytype local API, version
 
 # Semver x.y.z. v0.3.0 ships the wiki_ingest compile pipeline; v0.3.1 adds the
 # wiki_remember agent-memory write path plus wiki_status / wiki_source_type tag
-# seeding. MUST be > "0.1.0".
-WIKI_SCHEMA_VERSION = "0.4.2"
+# seeding; v0.4.3 adds wiki_summary to wiki_source (Aldeia-IT/aldeia-box#1485).
+# MUST be > "0.1.0".
+WIKI_SCHEMA_VERSION = "0.4.3"
 
 # The Anytype-managed property set. These system properties are auto-re-added by
 # Anytype when omitted from an update-type payload, so the bootstrap reconcile
@@ -82,6 +83,7 @@ WIKI_TYPES = [
             {"property_key": "wiki_url", "name": "Wiki URL", "format": "url"},
             {"property_key": "wiki_file_path", "name": "Wiki File Path", "format": "text"},
             {"property_key": "wiki_excerpt", "name": "Wiki Excerpt", "format": "text"},
+            {"property_key": "wiki_summary", "name": "Wiki Summary", "format": "text"},
             {"property_key": "wiki_ingested_at", "name": "Wiki Ingested At", "format": "date"},
             {"property_key": "wiki_domain_tags", "name": "Wiki Domain Tags", "format": "multi_select"},
             {"property_key": "wiki_source_type", "name": "Wiki Source Type", "format": "select"},

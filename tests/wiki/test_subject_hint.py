@@ -412,7 +412,10 @@ def captured_prompts(monkeypatch):
 
 class TestExtractionPrompt:
     def test_without_a_hint_the_prompt_is_byte_identical_to_before(self, captured_prompts):
-        golden = (FIXTURES / "extraction_prompt_before_1430.md").read_text(encoding="utf-8")
+        # The golden is the full no-hint prompt. It was cut from the pre-#1430
+        # prompt; Aldeia-IT/aldeia-box#1485 D1 then dropped four unread output
+        # fields from the schema, so it was regenerated once from that template.
+        golden = (FIXTURES / "extraction_prompt_no_hint.md").read_text(encoding="utf-8")
         md = "# Bimba\n\nBorn in Salvador {subject} {source}."
         extraction.extract(markdown=md, space_id="s")
         extraction.extract(markdown=md, space_id="s", subject_hint=None)

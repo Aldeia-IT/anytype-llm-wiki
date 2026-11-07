@@ -307,7 +307,8 @@ def extract_pages(
     :param budget_chars: the window size (``extraction.source_budget_chars``).
     :param subject_hint: passed through to ``extract_fn``.
     :returns: an ``extract()``-shaped dict (``entities``, ``concepts``,
-        ``relations``, optional ``primary_subject``) plus ``windows`` (the count)
+        ``relations``, optional ``primary_subject`` and ``summary``) plus
+        ``windows`` (the count)
         and ``warnings``: ``extraction_input_truncated`` for a window that was cut,
         ``extraction_partial`` for each degraded window when others succeeded.
         When every window degraded, ``error`` is the first window's
@@ -324,6 +325,7 @@ def extract_pages(
     }
     seen: dict[tuple[str, str], dict] = {}
     degraded: list[tuple[list[int], str]] = []
+    summaries: list[str] = []
     kwargs = {"subject_hint": subject_hint} if subject_hint else {}
     for window in windows:
         numbers = [number for number, _text in window]
@@ -348,6 +350,13 @@ def extract_pages(
             merged["primary_subject"] = out["primary_subject"]
         if isinstance(out.get("relations"), list):
             merged["relations"].extend(out["relations"])
+        # Aldeia-IT/aldeia-box#1485 D16: each window's summary covers only its own
+        # pages, so the source summary joins them in page order, one line per
+        # window tagged with its pages like a fact. The first window alone would
+        # describe only the start of a long PDF.
+        summary = out.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            summaries.append(f"{' '.join(summary.split())} [{label}]")
         for key, (field, other) in _FACT_FIELDS.items():
             for item in out.get(key) or []:
                 if not isinstance(item, dict) or not item.get("name"):
@@ -366,6 +375,8 @@ def extract_pages(
                 seen[ident] = entry
                 merged[key].append(entry)
 
+    if summaries:
+        merged["summary"] = "\n".join(summaries)
     if degraded and len(degraded) == len(windows):
         merged["error"] = f"{_DEGRADED_PREFIX}{degraded[0][1]}"
         return merged
