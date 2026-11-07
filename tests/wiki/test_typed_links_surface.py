@@ -364,6 +364,16 @@ class TestLintLinkChecks:
         assert found["link_dangling"][0]["severity"] == "high"
 
     @respx.mock
+    def test_archived_endpoint_or_source_is_dangling(self):
+        fake = _lint_world()
+        assert _lint()["link_dangling"] == []
+        fake.objects[SRC1]["archived"] = True
+        assert _ids(_lint()["link_dangling"]) == ["lnk-1"]
+        fake.objects[SRC1]["archived"] = False
+        fake.objects[B]["archived"] = True
+        assert _ids(_lint()["link_dangling"]) == ["lnk-1"]
+
+    @respx.mock
     def test_missing_source_is_dangling(self):
         _lint_world(link_sources=("ghost-src",))
         assert len(_lint()["link_dangling"]) == 1
@@ -440,6 +450,15 @@ class TestLintSourceDangling:
         fake = _lint_world()
         fake.objects[A]["properties"].append({"key": "wiki_sources", "objects": [SRC1]})
         assert self._found()["source_dangling"] == []
+
+    @respx.mock
+    def test_archived_source_counts_as_missing(self):
+        """Anytype's delete only archives the object (archived: true)."""
+        fake = _lint_world()
+        fake.objects[A]["properties"].append({"key": "wiki_sources", "objects": [SRC1]})
+        assert self._found()["source_dangling"] == []
+        fake.objects[SRC1]["archived"] = True
+        assert A in _ids(self._found()["source_dangling"])
 
     @respx.mock
     def test_both_forms_of_the_residual_race_are_surfaced(self):

@@ -549,11 +549,19 @@ def wiki_lint(
         # Source, or with no Source at all, is dangling; a sound link whose endpoints
         # do not index each other in wiki_relations/wiki_related is index-missing
         # (a dangling link is not also reported index-missing).
+        # Anytype's delete only archives (``archived: true``): an archived object is as
+        # missing as an absent one, and an archived link or entity is not itself checked.
         objects_by_id = {
-            o["id"]: o for o in all_objects if isinstance(o, dict) and o.get("id")
+            o["id"]: o
+            for o in all_objects
+            if isinstance(o, dict) and o.get("id") and o.get("archived") is not True
         }
         for link_obj in all_objects:
-            if not isinstance(link_obj, dict) or _type_of(link_obj) != LINK_TYPE_KEY:
+            if (
+                not isinstance(link_obj, dict)
+                or _type_of(link_obj) != LINK_TYPE_KEY
+                or link_obj.get("archived") is True
+            ):
                 continue
             rec = parse_link(link_obj)
             if rec is None:
@@ -596,7 +604,11 @@ def wiki_lint(
         # the single enumeration. One way to get here is a write that reached the server
         # while the client saw an error, after which remember deleted the Source.
         for o in all_objects:
-            if not isinstance(o, dict) or rel_key_for_type(_type_of(o)) is None:
+            if (
+                not isinstance(o, dict)
+                or rel_key_for_type(_type_of(o)) is None
+                or o.get("archived") is True
+            ):
                 continue
             missing = [
                 sid
