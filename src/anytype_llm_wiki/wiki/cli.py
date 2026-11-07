@@ -12,6 +12,7 @@ functional for the maintainer's pre-release demo (no CLI test in v0.2.0).
 import argparse
 import json
 import logging
+import re
 import sys
 
 from . import config, types_schema
@@ -313,8 +314,121 @@ def _cmd_prune_citations(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in ("ok", "partial") else 1
 
 
+def _digest_arg(raw: str) -> str:
+    """argparse type: a sha256 digest, 64 lowercase hex characters."""
+    if not re.fullmatch(r"[0-9a-f]{64}", raw):
+        raise argparse.ArgumentTypeError("must be 64 lowercase hex characters")
+    return raw
+
+
+def _load_confirm_list(path: str) -> frozenset[str] | None:
+    """Read a ``--confirm-untagged`` file (a JSON list of id strings); None when invalid."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, list) or not all(isinstance(i, str) for i in data):
+        return None
+    return frozenset(data)
+
+
+def _print_repair_plan(plan: dict) -> None:
+    """Human output of a plan: kind, evidence, untagged, every id to clear, the digest."""
+    print(f"[repair-chain-relations] space {plan['space_id']}: kind={plan['kind']}")
+    print(f"  evidence:  {json.dumps(plan['evidence'], sort_keys=True)}")
+    for entry in plan["untagged"]:
+        print(f"  untagged:  {entry['id']}  {entry['type']}  {entry['name']}")
+    for item in plan["plan"]:
+        for cleared in item["clear"]:
+            print(
+                f"  clear:     {item['object_id']} ({item['name']}) "
+                f"{item['key']} -> {cleared['id']} ({cleared['name']})"
+            )
+    print(f"  digest:    {plan['digest']}")
+    if plan.get("error"):
+        print(f"  error:     {plan['error']}")
+
+
 def _cmd_repair_chain_relations(args: argparse.Namespace) -> int:
-    raise NotImplementedError("not implemented")
+    from . import repair
+
+    write_mode = args.clear_ingest_only
+    if write_mode and args.dry_run:
+        print("error: --dry-run and --clear-ingest-only are exclusive", file=sys.stderr)
+        return 2
+    if write_mode and (not args.expect_digest or not args.backup):
+        print("error: --clear-ingest-only needs --expect-digest and --backup", file=sys.stderr)
+        return 2
+    if not write_mode and (args.expect_digest or args.backup):
+        print("error: --expect-digest and --backup need --clear-ingest-only", file=sys.stderr)
+        return 2
+    confirmed: frozenset[str] = frozenset()
+    if args.confirm_untagged is not None:
+        loaded = _load_confirm_list(args.confirm_untagged)
+        if loaded is None:
+            print("error: --confirm-untagged must be a JSON list of id strings", file=sys.stderr)
+            return 2
+        confirmed = loaded
+
+    if not write_mode:
+        if args.confirm_untagged is not None:
+            # The list must be exactly the untagged ids: compare with an unconfirmed plan.
+            bare = repair.plan_chain_repair(args.space_id)
+            if bare["status"] == "ok" and {u["id"] for u in bare["untagged"]} != confirmed:
+                print(
+                    "error: the confirm list must equal the untagged ids of the space",
+                    file=sys.stderr,
+                )
+                return 2
+        plan = repair.plan_chain_repair(args.space_id, confirmed_untagged=confirmed)
+        if args.json:
+            print(json.dumps(plan, indent=2, default=str))
+        else:
+            _print_repair_plan(plan)
+        return 0 if plan["status"] == "ok" else 1
+
+    try:
+        result = repair.apply_chain_repair(
+            args.space_id,
+            expect_digest=args.expect_digest,
+            backup_path=args.backup,
+            confirmed_untagged=confirmed,
+        )
+    except repair.RepairRefusedError as refused:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "status": "refused",
+                        "reason": refused.reason,
+                        "live_digest": refused.live_digest,
+                        "plan": refused.plan,
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+        else:
+            print(f"[repair-chain-relations] refused ({refused.reason}): {refused}")
+            if refused.live_digest:
+                print(f"  live digest: {refused.live_digest}")
+            if refused.plan:
+                _print_repair_plan(refused.plan)
+        print(f"refused: {refused.reason}: {refused}", file=sys.stderr)
+        return refused.exit_code
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"[repair-chain-relations] space {args.space_id}: status={result['status']}")
+        print(f"  backup:           {result['backup_path']}")
+        print(f"  objects modified: {result['objects_modified']}")
+        print(f"  ids cleared:      {result['ids_cleared']}")
+        if result.get("error"):
+            print(f"  error:            {result['error']}")
+        for warning in result["warnings"]:
+            print(f"  warn:             {warning}")
+    return 0 if result["status"] == "ok" else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -458,7 +572,9 @@ def build_parser() -> argparse.ArgumentParser:
     repair_p.add_argument("--confirm-untagged", help="JSON list of confirmed untagged ids.")
     repair_p.add_argument("--dry-run", action="store_true", help="Plan only (default).")
     repair_p.add_argument("--clear-ingest-only", action="store_true", help="Write mode.")
-    repair_p.add_argument("--expect-digest", help="Plan digest the write must match.")
+    repair_p.add_argument(
+        "--expect-digest", type=_digest_arg, help="Plan digest the write must match."
+    )
     repair_p.add_argument("--backup", help="Backup file to create before the first PATCH.")
     repair_p.set_defaults(func=_cmd_repair_chain_relations)
 
