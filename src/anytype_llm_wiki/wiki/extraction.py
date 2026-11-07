@@ -21,6 +21,7 @@ import httpx
 
 from . import config
 from . import profile
+from .furniture import is_date_only, is_licence_notice
 from .util import fence_safe, fill_template, scrub_credentials, strip_control_chars
 
 logger = logging.getLogger(__name__)
@@ -571,6 +572,62 @@ def is_identifier_like_name(name: str) -> bool:
     ):
         return True
     return stripped.rsplit("/", 1)[-1].lower().endswith(_FILE_SUFFIXES)
+
+
+# Page-furniture name shapes (Aldeia-IT/aldeia-box#1508) beyond the shared date and
+# licence rules: a year, an approximate year, a decade or a year range, and a bare
+# domain. The domain's suffix must be written in lowercase, so "ASP.NET" is a name.
+_YEAR_ONLY_RE = re.compile(
+    r"^(?:(?:c|ca|circa)\.?\s*)?\d{4}$|^\d{3,4}'?s$|^\d{4}\s*[-\u2013\u2014/]\s*\d{2,4}$",
+    re.IGNORECASE,
+)
+_BARE_DOMAIN_RE = re.compile(
+    r"^(?:www\.)?[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)*"
+    r"\.(?:com|org|net|edu|gov|info|io|co|br|pt|es|de|fr|it|uk|nl|us|ca|au|ar|mx)$"
+)
+
+
+def is_page_furniture_name(name: str) -> bool:
+    """Tell whether an extracted name is page furniture, not an entity or concept.
+
+    Meant for names a model extracted from fetched page text: ingest drops a
+    non-primary candidate with such a name (Aldeia-IT/aldeia-box#1508). Do not apply
+    it to a caller-given name such as ``subject_hint`` or to existing objects. The
+    name is stripped of whitespace and edge punctuation first. It is furniture when
+    it is only:
+
+    1. a year, an approximate year, a decade or a year range: ``1975``,
+       ``c. 1950``, ``1960s``, ``1968-1970``;
+    2. a date (``furniture.is_date_only``): ``26 August 1997``, ``outubro, 2016``,
+       ``2016-10-01``; a lone month (``May``) is not;
+    3. a licence or copyright notice (``furniture.is_licence_notice``): the
+       Creative Commons footer, ``All rights reserved``, ``© 2026 ...``; a licence
+       named on its own (``MIT License``) is not;
+    4. a bare domain, a site name: ``Velhosmestres.com``, ``capoeira.com.br``;
+       ``Node.js`` and ``ASP.NET`` are not.
+
+    Known limitation: the rule sees the name alone, so a real entity named only by
+    a year or a date (a group or an event called "1968") or by its domain is
+    furniture to it too. Ingest exempts the hinted primary subject.
+
+    Args:
+        name: the candidate object name.
+
+    Returns:
+        ``True`` when the name matches a rule above; ``False`` otherwise,
+        including for non-str or blank input (``sanitize_name`` rejects those).
+    """
+    if not isinstance(name, str):
+        return False
+    stripped = name.strip().strip(".,;:").strip()
+    if not stripped:
+        return False
+    return bool(
+        _YEAR_ONLY_RE.match(stripped)
+        or is_date_only(stripped)
+        or is_licence_notice(stripped)
+        or _BARE_DOMAIN_RE.match(stripped)
+    )
 
 
 def sanitize_property_value(text: str) -> str:

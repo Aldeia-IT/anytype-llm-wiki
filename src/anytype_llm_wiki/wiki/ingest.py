@@ -38,6 +38,7 @@ from .extraction import (
     check_remote_endpoint_consent,
     extract,
     is_identifier_like_name,
+    is_page_furniture_name,
     sanitize_name,
     sanitize_property_value,
 )
@@ -1448,6 +1449,14 @@ def _run_ingest(
             ):
                 result["warnings"].append(
                     f"name_policy_rejected: identifier_like: {clean_name}"
+                )
+                continue
+            # Aldeia-IT/aldeia-box#1508: a name that is only a year, a date, a
+            # licence notice or a bare domain is page furniture, in every space.
+            # The hinted primary subject is exempt: the caller named it.
+            if not cand.get("primary") and is_page_furniture_name(clean_name):
+                result["warnings"].append(
+                    f"name_policy_rejected: page_furniture: {clean_name}"
                 )
                 continue
             kind = cand.get("kind", "entity")

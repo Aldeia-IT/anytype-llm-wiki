@@ -491,7 +491,7 @@ class TestPageChromeRegression:
         from anytype_llm_wiki.wiki.fetch import extract_main_markdown
 
         text = extract_main_markdown(CHROME_PAGE)
-        assert "fundou o grupo Oxossi em 1969" in text, text  # #1432 recovery intact
+        assert "fundou o grupo Oxossi em 1969" in text, text  # Aldeia-IT/aldeia-box#1432 recovery intact
         assert "Origem: Mestre Pele da Bomba" in text, text
         assert "Creative Commons" not in text, text
         assert "Copyright" not in text, text

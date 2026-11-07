@@ -429,15 +429,17 @@ class TestRecoverSkipsPageFurniture:
     """Aldeia-IT/aldeia-box#1508: the recall step does not append furniture lines, a
     licence / copyright notice or a line that only states a month with a date or year
     (a byline or edit stamp). The model turned them into junk entities. Body lines,
-    a bare year line and a caption with a place stay recovered (#1432 D11a)."""
+    a bare year line and a caption with a place stay recovered (Aldeia-IT/aldeia-box#1432 D11a)."""
 
     PRIMARY = TestRecoverMissingLines.PRIMARY
 
     @pytest.mark.parametrize(
         "line",
         [
-            "Content is available under Creative Commons Attribution-ShareAlike 4.0 "
-            "International (CC BY-SA 4.0) unless otherwise noted.",
+            (
+                "Content is available under Creative Commons Attribution-ShareAlike 4.0 "
+                "International (CC BY-SA 4.0) unless otherwise noted."
+            ),
             "Copyright",
             "© 2026 Grupo Liberdade. All rights reserved.",
             "Todos os direitos reservados.",
