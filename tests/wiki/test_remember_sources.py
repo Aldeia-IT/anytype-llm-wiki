@@ -603,3 +603,40 @@ class TestSourceCleanup:
         result = _remember()
         assert "source_cleanup_failed" in result["warnings"], result["warnings"]
         assert result["status"] == "partial"
+
+    @respx.mock
+    def test_later_batch_of_a_drain_is_judged_on_its_own_links(self, monkeypatch):
+        """Architecture O1: links an earlier batch wrote must not keep a later batch's Source."""
+        from anytype_llm_wiki.wiki import remember
+        from anytype_llm_wiki.wiki.wiki_client import WikiClient
+
+        fake = _space()
+        _seed_bimba(fake)
+        _patch_calls(monkeypatch, [SUBJECT, CONCEPT])
+        fake.fail("POST", type_key="wiki_entity")  # batch 2's only write
+        deleted: list[str] = []
+        respx.delete(url__regex=r".*/objects/[^/]+$").mock(
+            side_effect=lambda request: (deleted.append(request.url.path.rsplit("/", 1)[-1])
+                                         or httpx.Response(200, json={"object": {}}))
+        )
+        client = WikiClient()
+        result = remember._empty_remember_result()
+        result["status"] = "ok"
+        batch_one = {
+            "relations": [{"from": "Mestre Bimba", "to": "Capoeira Regional", "label": "founded"}],
+            "source": "note one",
+        }
+        items_one = [
+            {"name": "Mestre Bimba", "kind": "entity", "facts": NEW_UNIT, "id": "a", "_work_id": "w1"},
+            {"name": "Capoeira Regional", "kind": "concept", "facts": "A capoeira style.",
+             "id": "b", "_work_id": "w1"},
+        ]
+        remember._apply_batch(client, SPACE, items_one, batch_one, result)
+        assert result["relations_created"] == 1 and deleted == [], (result, deleted)
+
+        items_two = [{"name": "Zumbi", "kind": "entity", "facts": "Led Palmares.", "id": "c",
+                      "_work_id": "w2"}]
+        remember._apply_batch(client, SPACE, items_two, {"source": "note two"}, result)
+        client.close()
+        sources = [o for o in fake.created if o.get("type_key") == "wiki_source"]
+        assert len(sources) == 2 and len(deleted) == 1, (sources, deleted)

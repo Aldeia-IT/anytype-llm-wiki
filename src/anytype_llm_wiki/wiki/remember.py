@@ -946,6 +946,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         result["objects"].append(obj_entry)
 
     # relations (SF5 type-safe; G1 per-object counts).
+    batch_links = 0  # links this batch created or sourced (result counts span a whole drain)
     if relations:
         stripped = [
             {**rel, "from": strip(str(rel.get("from", ""))), "to": strip(str(rel.get("to", "")))}
@@ -967,6 +968,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
             source_id=_ensure_source() if rel_tuples else None, kind_by_id=kind_by_id,
         )
         rel_total = link_result.created
+        batch_links = link_result.created + link_result.sourced
         result["relations_sourced"] += link_result.sourced
         if link_result.notes:
             result["warnings"].extend(link_result.notes)
@@ -979,8 +981,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         result["relations_created"] += rel_total
 
     # D20b: a Source no entity, concept or link refers to is cleaned up (best effort).
-    linked = result.get("relations_created", 0) or result.get("relations_sourced", 0)
-    if source_state["id"] and not wrote["object"] and not linked:
+    if source_state["id"] and not wrote["object"] and not batch_links:
         try:
             client.delete_object(space_id, source_state["id"])
             result["source_object_id"] = None
