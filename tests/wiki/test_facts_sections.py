@@ -791,3 +791,35 @@ class TestGuardOwnUnits:
             label="page", source_id="s3",
             allowed_new_keys=_keys(*self.INPUT), allowed_new_units=frozenset(self.INPUT),
         )
+
+
+class TestFactSourceLabelSecrets:
+    """Security M1 / L6: credentials and tokens leave the label whatever the scheme or case."""
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("HTTPS://alice:s3cret@example.com/doc?token=x", "https://example.com/doc"),
+            ("Http://alice:s3cret@example.com/doc#frag", "http://example.com/doc"),
+        ],
+    )
+    def test_uppercase_scheme_is_scrubbed(self, source, expected):
+        out = fs.fact_source_label(source)
+        assert out == expected
+        assert "s3cret" not in out and "token" not in out
+
+    def test_other_schemes_in_a_note_lose_userinfo_and_query(self):
+        out = fs.fact_source_label("note postgres://u:pw@db.internal/x?sslpassword=abc about Bimba")
+        assert out == "note postgres://db.internal/x about Bimba"
+
+    def test_uppercase_scheme_in_a_note_is_scrubbed(self):
+        out = fs.fact_source_label("see HTTPS://a:b@ex.org/p?k=1 now")
+        assert "a:b" not in out and "k=1" not in out and "ex.org/p" in out
+
+    def test_jwt_shaped_segment_is_elided(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl"
+        assert fs.fact_source_label(f"https://ex.org/reset/{jwt}") == "https://ex.org/reset/…"
+
+    def test_segment_with_dots_and_percent_signs_is_elided(self):
+        assert fs.fact_source_label("https://ex.org/a/ab.cd~ef=gh%2Fij+kl.mnop") == "https://ex.org/a/…"
+        assert fs.fact_source_label("https://ex.org/a/short.pdf") == "https://ex.org/a/short.pdf"

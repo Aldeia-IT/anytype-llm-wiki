@@ -18,9 +18,10 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from .extraction import sanitize_property_value
-from .util import _TEXT_URL_RE, scrub_credentials, scrub_text_urls, strip_control_chars
+from .util import scrub_credentials, strip_control_chars
 
 SECTION_PREFIX = "## Source: "
 LEGACY_LABEL = "unattributed (before per-source facts)"
@@ -44,7 +45,9 @@ _TAGS_RE = re.compile(r"\[(?:also|superseded):[^\]]*\]", re.IGNORECASE)
 _TRAILING_CITE_RE = re.compile(r"\s*\[pp?\. [^\]]*\]\s*$")
 _DEFUSE_RE = re.compile(r"\[(?=(?:also:|superseded:|conflict))", re.IGNORECASE)
 _LEADING_MARKUP_RE = re.compile(r"^[\s#>\-]+")
-_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]{20,}")
+_PATH_SEGMENT_MIN = 20
+# Any "scheme://" URL in prose, whatever the scheme or its case (postgres://u:pw@host/x).
+_ANY_URL_RE = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.-]*://[^\s)\]>"']+""")
 _SELF_ID_RE = re.compile(r"#s(\d+)$")
 _ELLIPSIS = "…"
 
@@ -94,30 +97,40 @@ def _clean_label(label: str) -> str:
 
 
 def _elide_url_path(url: str) -> str:
-    """Replace each path segment of 20+ token characters (an id, a key) by an ellipsis."""
+    """Replace each path segment of 20+ characters (an id, a key, a JWT) by an ellipsis."""
     if "://" not in url:
         return url
     scheme, rest = url.split("://", 1)
     host, sep, path = rest.partition("/")
-    segments = [_ELLIPSIS if _PATH_SEGMENT_RE.fullmatch(seg) else seg for seg in path.split("/")]
+    segments = [_ELLIPSIS if len(seg) >= _PATH_SEGMENT_MIN else seg for seg in path.split("/")]
     return f"{scheme}://{host}{sep}{'/'.join(segments)}"
+
+
+def _is_http_url(text: str) -> bool:
+    """One whitespace-free token whose scheme is http or https, in any case."""
+    if not re.fullmatch(r"\S+", text):
+        return False
+    try:
+        return urlparse(text).scheme.lower() in ("http", "https")
+    except ValueError:
+        return False
 
 
 def fact_source_label(source: str) -> str:
     """Section label for a source reference or Source name, with secrets scrubbed.
 
-    A URL keeps scheme, host and path (credentials, query and fragment dropped; long
-    token-shaped path segments elided), a local path its basename, other text (a
-    remember note) its words with embedded URLs scrubbed the same way.
+    A URL keeps scheme, host and path (credentials, query and fragment dropped; every
+    path segment of 20+ characters elided; the scheme may be any case), a local path its basename, other text (a
+    remember note) its words with embedded URLs of any scheme scrubbed the same way.
     """
     text = source if isinstance(source, str) else str(source)
     stripped = text.strip()
-    if re.fullmatch(r"https?://\S+", stripped):
+    if _is_http_url(stripped):
         text = _elide_url_path(scrub_credentials(stripped))
     elif stripped.startswith(("/", "~/", "./", "../")) and "\n" not in stripped:
         text = os.path.basename(stripped.rstrip("/")) or stripped
     else:
-        text = _TEXT_URL_RE.sub(lambda m: _elide_url_path(m.group(0)), scrub_text_urls(text))
+        text = _ANY_URL_RE.sub(lambda m: _elide_url_path(scrub_credentials(m.group(0))), text)
         text = sanitize_property_value(text)
     return _clean_label(text).lstrip("#").strip()
 
