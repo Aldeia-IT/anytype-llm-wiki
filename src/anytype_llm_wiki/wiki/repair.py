@@ -27,9 +27,9 @@ import httpx
 
 from .links import LINK_TYPE_KEY
 from .util import (
-    _rel_key,
     _relation_ids,
     object_type_key,
+    rel_key_for_type,
     scrub_credentials,
     space_ingest_lock,
 )
@@ -39,7 +39,6 @@ _ACTION_KEY = "wiki_action"
 _SOURCE_TYPE_KEY = "wiki_source_type"
 _LOG_TYPE = "wiki_log"
 _SOURCE_TYPE = "wiki_source"
-_KIND_BY_TYPE = {"wiki_entity": "entity", "wiki_concept": "concept"}
 _MIXED_SOURCE_TYPES = frozenset({"agent", "conversation"})
 _LOG_NAME_REMEMBER = "remember"
 _LOCK_REF = "repair-chain-relations"
@@ -168,7 +167,7 @@ def _build_items(objects: list[dict]) -> list[dict]:
     nodes = {
         o["id"]: o
         for o in objects
-        if isinstance(o, dict) and o.get("id") and object_type_key(o) in _KIND_BY_TYPE
+        if isinstance(o, dict) and o.get("id") and rel_key_for_type(object_type_key(o)) is not None
     }
     linked: set[frozenset[str]] = set()
     for obj in objects:
@@ -177,7 +176,7 @@ def _build_items(objects: list[dict]) -> list[dict]:
             linked.add(pair)
     items: list[dict] = []
     for oid, obj in nodes.items():
-        key = _rel_key(_KIND_BY_TYPE[object_type_key(obj)])
+        key = rel_key_for_type(object_type_key(obj))
         clear: list[dict] = []
         keep: list[str] = []
         for rid in _relation_ids(obj, key):

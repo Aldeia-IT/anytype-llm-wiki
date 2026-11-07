@@ -67,6 +67,22 @@ DOMAIN_TAGS_PROPERTY_KEY = "wiki_domain_tags"
 # WikiLog marker object (read back for upgrade detection).
 SCHEMA_VERSION_PROPERTY_KEY = "wiki_schema_version"
 
+# The Link type (a typed, sourced edge between two objects), defined on its own so callers
+# can name it; it is the last entry of ``WIKI_TYPES``.
+WIKI_LINK_TYPE = {
+    "type_key": "wiki_link",
+    "name": "Link",
+    "plural_name": "Links",
+    "layout": "basic",
+    "properties": [
+        {"property_key": "wiki_link_from", "name": "Wiki Link From", "format": "objects"},
+        {"property_key": "wiki_link_to", "name": "Wiki Link To", "format": "objects"},
+        {"property_key": "wiki_link_label", "name": "Wiki Link Label", "format": "text"},
+        {"property_key": "wiki_link_sources", "name": "Wiki Link Sources", "format": "objects"},
+    ],
+}
+
+
 # The six canonical wiki object types. Each entry:
 #   type_key:    stable wiki_-prefixed key used in API calls
 #   name:        singular human-readable label shown in the Anytype UI
@@ -161,20 +177,6 @@ WIKI_TYPES = [
             {"property_key": "wiki_schema_version", "name": "Wiki Schema Version", "format": "text"},
         ],
     },
-    {
-        "type_key": "wiki_link",
-        "name": "Link",
-        "plural_name": "Links",
-        "layout": "basic",
-        "properties": [
-            {"property_key": "wiki_link_from", "name": "Wiki Link From", "format": "objects"},
-            {"property_key": "wiki_link_to", "name": "Wiki Link To", "format": "objects"},
-            {"property_key": "wiki_link_label", "name": "Wiki Link Label", "format": "text"},
-            {"property_key": "wiki_link_sources", "name": "Wiki Link Sources", "format": "objects"},
-        ],
-    },
+    WIKI_LINK_TYPE,
 ]
 
-
-# The Link type, for callers that need it by name (it is the last entry of ``WIKI_TYPES``).
-WIKI_LINK_TYPE = WIKI_TYPES[-1]

@@ -32,7 +32,13 @@ from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .query import _parse_relation_elements, _fetch_cached
 from .links import LINK_TYPE_KEY, parse_link
 from .remember import _resolve_select_tag
-from .util import normalize_title, object_type_key, scrub_credentials, strip_control_chars
+from .util import (
+    normalize_title,
+    object_type_key,
+    rel_key_for_type,
+    scrub_credentials,
+    strip_control_chars,
+)
 from ..anytype_client import AnytypeReadClient
 from .wiki_client import WikiClient
 
@@ -123,15 +129,6 @@ def _title_duplicate_reason(title_a: str, title_b: str) -> str | None:
     return None
 
 
-def _rel_key_for_type(type_key: str) -> str | None:
-    """Relation property key carrying outbound 1-hop links for a content type."""
-    if type_key == "wiki_entity":
-        return "wiki_relations"
-    if type_key == "wiki_concept":
-        return "wiki_related"
-    return None
-
-
 def _prop(obj: dict, key: str) -> dict | None:
     """Return the first property dict on ``obj`` matching ``key`` (or None)."""
     for p in obj.get("properties", []) or []:
@@ -142,7 +139,7 @@ def _prop(obj: dict, key: str) -> dict | None:
 
 def _outbound(obj: dict) -> list[str]:
     """Parse the type-appropriate outbound relation array → list of id strings."""
-    rel_key = _rel_key_for_type(_type_of(obj))
+    rel_key = rel_key_for_type(_type_of(obj))
     if rel_key is None:
         return []
     prop = _prop(obj, rel_key)
@@ -580,7 +577,7 @@ def wiki_lint(
                 ))
                 continue
             for end, other in ((rec.from_id, rec.to_id), (rec.to_id, rec.from_id)):
-                end_key = _rel_key_for_type(_type_of(objects_by_id[end]))
+                end_key = rel_key_for_type(_type_of(objects_by_id[end]))
                 if end_key is None:
                     continue
                 if other not in _parse_relation_elements(

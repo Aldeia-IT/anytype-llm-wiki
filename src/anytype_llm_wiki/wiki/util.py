@@ -310,7 +310,16 @@ def _parse_relation_elements(elements) -> list[str]:
 # (types_schema.WIKI_TYPES): Entity uses ``wiki_relations``; Concept uses
 # ``wiki_related``. They hold the untyped index of related objects; the typed,
 # sourced edge is a ``wiki_link`` object (``wiki/links.py``).
-_REL_KEY_BY_KIND = {"entity": "wiki_relations", "concept": "wiki_related"}
+_REL_KEY_BY_TYPE = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
+_REL_KEY_BY_KIND = {"entity": _REL_KEY_BY_TYPE["wiki_entity"], "concept": _REL_KEY_BY_TYPE["wiki_concept"]}
+
+
+def rel_key_for_type(type_key: str) -> str | None:
+    """The relation index property key of a content type; None for any other type.
+
+    The one type to key map: ingest, remember, lint, query and repair all read it.
+    """
+    return _REL_KEY_BY_TYPE.get(type_key)
 
 
 def _rel_key(kind: str) -> str:

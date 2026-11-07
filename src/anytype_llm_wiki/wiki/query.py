@@ -41,6 +41,7 @@ from .links import links_by_endpoint
 from .util import (
     _parse_relation_elements,
     object_type_key,
+    rel_key_for_type,
     scrub_credentials,
     strip_control_chars,
 )
@@ -1255,9 +1256,6 @@ def _relation_ids_for_key(obj: dict, rel_key: str) -> list[str]:
     return []
 
 
-_PRUNE_REL_KEY = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
-
-
 def prune_stale_citation_edges(space_id: str) -> dict:
     """Remove stale citation edges left by the OLD ``wiki_query`` file-back.
 
@@ -1299,7 +1297,7 @@ def prune_stale_citation_edges(space_id: str) -> dict:
         for o in objects:
             if not isinstance(o, dict):
                 continue
-            rel_key = _PRUNE_REL_KEY.get(_type_of(o))
+            rel_key = rel_key_for_type(_type_of(o))
             if rel_key is None:
                 continue
             result["objects_scanned"] += 1

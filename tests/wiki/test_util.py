@@ -520,3 +520,28 @@ class TestScrubUrlSecrets:
         from anytype_llm_wiki.wiki.util import scrub_url_secrets
 
         assert scrub_url_secrets(None) == "None"
+
+
+class TestRelKeyForType:
+    """N3: one type to relation-key map, shared by ingest, lint, query and repair."""
+
+    def test_entity_and_concept_have_a_key_and_nothing_else_does(self):
+        from anytype_llm_wiki.wiki.util import rel_key_for_type
+
+        assert rel_key_for_type("wiki_entity") == "wiki_relations"
+        assert rel_key_for_type("wiki_concept") == "wiki_related"
+        for other in ("wiki_source", "wiki_link", "wiki_query", "wiki_log", "page", ""):
+            assert rel_key_for_type(other) is None
+
+    def test_the_kind_map_agrees_with_the_type_map(self):
+        from anytype_llm_wiki.wiki.util import _rel_key, rel_key_for_type
+
+        assert _rel_key("entity") == rel_key_for_type("wiki_entity")
+        assert _rel_key("concept") == rel_key_for_type("wiki_concept")
+
+    def test_link_type_is_the_named_dict_inside_wiki_types(self):
+        from anytype_llm_wiki.wiki import types_schema
+
+        assert types_schema.WIKI_LINK_TYPE in types_schema.WIKI_TYPES
+        assert types_schema.WIKI_LINK_TYPE["type_key"] == "wiki_link"
+        assert any(t is types_schema.WIKI_LINK_TYPE for t in types_schema.WIKI_TYPES)
