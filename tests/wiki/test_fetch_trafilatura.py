@@ -423,3 +423,116 @@ class TestRecoverMissingLines:
         merged = _recover_missing_lines(self.PRIMARY, f"{first}\n\n{self.PRIMARY}\n\n{second}")
         assert merged.index(first) < merged.index(second)
         assert merged.index(self.PRIMARY) < merged.index(first)
+
+
+class TestRecoverSkipsPageFurniture:
+    """Aldeia-IT/aldeia-box#1508: the recall step does not append furniture lines, a
+    licence / copyright notice or a line that only states a month with a date or year
+    (a byline or edit stamp). The model turned them into junk entities. Body lines,
+    a bare year line and a caption with a place stay recovered (#1432 D11a)."""
+
+    PRIMARY = TestRecoverMissingLines.PRIMARY
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Content is available under Creative Commons Attribution-ShareAlike 4.0 "
+            "International (CC BY-SA 4.0) unless otherwise noted.",
+            "Copyright",
+            "© 2026 Grupo Liberdade. All rights reserved.",
+            "Todos os direitos reservados.",
+            "outubro, 2016",
+            "1 de Janeiro, 2010",
+            "26 August 1997",
+        ],
+    )
+    def test_furniture_line_is_not_appended(self, line):
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        assert _recover_missing_lines(self.PRIMARY, f"{self.PRIMARY}\n\n{line}") == self.PRIMARY
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "1974",
+            "Salvador, 1974",
+            "Maio",
+            "Mestre Ana",
+            "He wrote the songs of the group and kept the copyright on all of them.",
+        ],
+    )
+    def test_body_lines_stay_recovered(self, line):
+        from anytype_llm_wiki.wiki.fetch import _recover_missing_lines
+
+        merged = _recover_missing_lines(self.PRIMARY, f"{self.PRIMARY}\n\n{line}")
+        assert merged.endswith(line), merged
+
+
+class TestCollapseSpaceRuns:
+    """Aldeia-IT/aldeia-box#1508: runs of spaces inside a line of trafilatura's text
+    become one space (a ~300-space padding run split a profile block from its text,
+    and the model listed 15 sentences as entities). Markdown that relies on spaces
+    keeps them: a hard break (two or more trailing spaces) stays a hard break,
+    indentation, fenced code blocks and headings are untouched."""
+
+    def test_interior_run_becomes_one_space(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        padded = "Origem: Mestre Pelé da Bomba" + " " * 300 + "Mestre Índio fundou o grupo."
+        assert _collapse_space_runs(padded) == (
+            "Origem: Mestre Pelé da Bomba Mestre Índio fundou o grupo."
+        )
+
+    def test_non_breaking_space_and_tab_runs_collapse(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("Grupo:   Oxossi\t\tPais: Brasil") == (
+            "Grupo: Oxossi Pais: Brasil"
+        )
+
+    def test_a_single_non_breaking_space_is_kept(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("Mestre Bimba") == "Mestre Bimba"
+
+    def test_hard_break_is_kept_and_a_long_trailing_run_kept_as_one_hard_break(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("line one  \nline two") == "line one  \nline two"
+        assert _collapse_space_runs("line one" + " " * 40 + "\nline two") == (
+            "line one  \nline two"
+        )
+
+    def test_indentation_is_kept(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "* item\n  * nested  item\n\n    indented   code"
+        assert _collapse_space_runs(text) == "* item\n  * nested item\n\n    indented   code"
+
+    def test_fenced_code_block_is_untouched(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "Before  it.\n\n```\nx    =  1\n```\n\nAfter   it."
+        assert _collapse_space_runs(text) == "Before it.\n\n```\nx    =  1\n```\n\nAfter it."
+
+    def test_headings_are_untouched(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        assert _collapse_space_runs("#  roda de  domingo") == "#  roda de  domingo"
+
+    def test_trafilatura_text_is_collapsed(self, monkeypatch):
+        """The collapse runs on trafilatura's output inside the fetch path."""
+        import trafilatura
+
+        from anytype_llm_wiki.wiki.fetch import extract_main_markdown
+
+        body = (
+            "The first paragraph of a shaped article body is long enough to pass the gate,"
+            + " " * 120
+            + "because it talks at length about rodas, berimbaus and the old masters of Bahia. "
+        ) * 3
+        monkeypatch.setattr(trafilatura, "extract", lambda *a, **k: body)
+        html = f"<html><body><article><p>{body}</p></article></body></html>"
+        md = extract_main_markdown(html)
+        assert "gate, because" in md, md[:300]
+        assert "  " not in md.replace("  \n", ""), md[:300]

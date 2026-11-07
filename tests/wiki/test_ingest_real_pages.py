@@ -428,3 +428,165 @@ class TestIdentifierNameGate:
         (source,) = fake.created_of("wiki_source")
         assert source["name"] == PAGE_URL, "the Source's own name is never gated"
         assert f"name_policy_rejected: identifier_like: {PAGE_URL}" in result["warnings"]
+
+
+# Aldeia-IT/aldeia-box#1508 AC3: a profile page with a licence footer, site chrome
+# (navigation, a byline) and a run of padding spaces, shaped on the 2026-11-07 drain
+# pages (grupoliberdadecapoeira linhagem-mestres, velhosmestres); text rewritten.
+_PAD = " " * 300
+_CHROME_BODY = (
+    "Mestre Indio fundou o grupo Oxossi em 1969 e ensinou capoeira de rua em Salvador, "
+    "onde formou muitos alunos ao longo de varias decadas de trabalho dedicado."
+)
+CHROME_PAGE = f"""<html><head><title>Linhagem Mestres</title></head><body>
+<div id="nav"><a href="/">Inicio</a> <a href="/mestres">Mestres</a> <a href="/contato">Contato</a></div>
+<div id="page"><div id="content"><h1>Linhagem Mestres</h1>
+<h4>1. Mestre Indio</h4>
+<p>Grupo: Oxossi<br>Pais: Brasil<br>Cidade: Salvador, Bahia<br>Data de Nascimento: 1955{_PAD}Origem: Mestre Pele da Bomba</p>
+<p>{_CHROME_BODY}</p>
+<p>{_CHROME_BODY} Mais um paragrafo de texto corrido para que a pagina tenha corpo suficiente.</p>
+</div></div>
+<div class="site-info"><p>outubro, 2016</p><p>Copyright</p>
+<p>Content is available under Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) unless otherwise noted.</p></div>
+</body></html>"""
+
+# Names granite4.1:8b extracted from such text on the drain pages, plus real entities.
+_FURNITURE = [
+    "1970",
+    "2016",
+    "26 August 1997",
+    "outubro, 2016",
+    "Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)",
+    "Velhosmestres.com",
+]
+_REAL = ["Mestre Indio", "Grupo Oxossi", "Mestre Pele da Bomba"]
+
+
+def _model_output(names: list[str], relations: list[dict] | None = None) -> dict:
+    return {
+        "entities": [{"name": n, "description": f"{n} facts"} for n in names],
+        "concepts": [],
+        "relations": relations or [],
+    }
+
+
+def _entity_names(fake: FakeWiki) -> set[str]:
+    return {
+        p["name"]
+        for p in fake.wiki_objects()
+        if p.get("type_key") in ("wiki_entity", "wiki_concept")
+    }
+
+
+class TestPageChromeRegression:
+    """Aldeia-IT/aldeia-box#1508 AC3: page chrome must not reach the extractor, and the
+    furniture names a model still makes from a page never become objects.
+
+    The fetch side runs the real fetch on the fixture page. The extraction side cannot
+    call granite in a test, so the model is stubbed: it records the text it was given
+    and answers with the junk names the drain wrote, next to real ones.
+    """
+
+    def test_fetched_text_keeps_the_body_and_drops_footer_byline_and_padding(self):
+        from anytype_llm_wiki.wiki.fetch import extract_main_markdown
+
+        text = extract_main_markdown(CHROME_PAGE)
+        assert "fundou o grupo Oxossi em 1969" in text, text  # #1432 recovery intact
+        assert "Origem: Mestre Pele da Bomba" in text, text
+        assert "Creative Commons" not in text, text
+        assert "Copyright" not in text, text
+        assert "outubro, 2016" not in text, text
+        assert " " * 3 not in text, repr(text)
+
+    @respx.mock
+    def test_ingest_sends_clean_text_and_writes_only_real_entities(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest_mod
+
+        fake = FakeWiki(page_body=CHROME_PAGE)
+        fake.install()
+        seen: list[str] = []
+
+        def fake_extract(**kw):
+            seen.append(kw["markdown"])
+            return _model_output(
+                _REAL + _FURNITURE,
+                [
+                    {"from": "Mestre Indio", "to": "Grupo Oxossi", "label": "founded"},
+                    {"from": "Mestre Indio", "to": "1970", "label": "active in"},
+                ],
+            )
+
+        monkeypatch.setattr(_ingest_mod, "extract", fake_extract)
+        result = _ingest()
+        assert result["status"] == "ok", result
+        (markdown,) = seen
+        assert "Creative Commons" not in markdown and " " * 3 not in markdown
+        assert _entity_names(fake) == set(_REAL), _entity_names(fake)
+        assert sorted(w for w in result["warnings"] if "page_furniture" in w) == sorted(
+            f"name_policy_rejected: page_furniture: {n}" for n in _FURNITURE
+        ), result["warnings"]
+        assert len(fake.created_of("wiki_link")) == 1, fake.created_of("wiki_link")
+
+
+class TestPageFurnitureGuardInIngest:
+    """Aldeia-IT/aldeia-box#1508: ingest drops a non-primary candidate whose name is page
+    furniture (``is_page_furniture_name``), in every space, with the warning
+    ``name_policy_rejected: page_furniture: <name>``. The hinted primary subject is
+    exempt: the caller named it.
+
+    Known limitation: a real entity named only by a year or a date (a group or an
+    event literally called "1968") is dropped unless it is the hinted primary subject.
+    """
+
+    @respx.mock
+    def test_furniture_candidates_dropped_in_an_unlisted_space(self, monkeypatch):
+        monkeypatch.delenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", raising=False)
+        fake = FakeWiki()
+        fake.install()
+        _stub_extract(monkeypatch, _model_output(["Mestre Bimba", *_FURNITURE]))
+        result = _ingest()
+        assert _entity_names(fake) == {"Mestre Bimba"}, _entity_names(fake)
+        assert sum("page_furniture" in w for w in result["warnings"]) == len(_FURNITURE)
+
+    @respx.mock
+    def test_furniture_concepts_dropped_too(self, monkeypatch):
+        fake = FakeWiki()
+        fake.install()
+        _stub_extract(
+            monkeypatch,
+            {
+                "entities": [{"name": "Mestre Bimba", "description": "d"}],
+                "concepts": [
+                    {"name": "Capoeira Regional", "definition": "c"},
+                    {"name": "CC BY-SA 4.0", "definition": "licence"},
+                ],
+            },
+        )
+        result = _ingest()
+        assert _entity_names(fake) == {"Mestre Bimba", "Capoeira Regional"}
+        assert "name_policy_rejected: page_furniture: CC BY-SA 4.0" in result["warnings"]
+
+    @respx.mock
+    def test_a_real_entity_named_only_by_a_year_is_dropped(self, monkeypatch):
+        """Documented limitation: the guard cannot tell the group "1968" from a year."""
+        fake = FakeWiki()
+        fake.install()
+        _stub_extract(monkeypatch, _model_output(["Mestre Bimba", "1968"]))
+        result = _ingest()
+        assert _entity_names(fake) == {"Mestre Bimba"}
+        assert "name_policy_rejected: page_furniture: 1968" in result["warnings"]
+
+    @respx.mock
+    def test_the_hinted_primary_subject_is_exempt(self, monkeypatch):
+        from anytype_llm_wiki.wiki.ingest import wiki_ingest
+
+        fake = FakeWiki()
+        fake.install()
+        out = _model_output(["1968", "Mestre Bimba", "2016"])
+        out["primary_subject"] = "1968"
+        _stub_extract(monkeypatch, out)
+        result = wiki_ingest(source=PAGE_URL, space_id=SPACE, subject_hint="1968")
+        assert _entity_names(fake) == {"1968", "Mestre Bimba"}, _entity_names(fake)
+        assert [w for w in result["warnings"] if "page_furniture" in w] == [
+            "name_policy_rejected: page_furniture: 2016"
+        ]

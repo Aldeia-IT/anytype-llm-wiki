@@ -1307,3 +1307,106 @@ class TestDroppedExtractionFields:
         assert out["relations"] == raw["relations"]
         assert out["primary_subject"] == "Bimba"
         assert out["summary"] == "s"
+
+
+class TestIsPageFurnitureName:
+    """Aldeia-IT/aldeia-box#1508: the predicate ingest uses to drop a model-extracted
+    name that is page furniture, not an entity or concept: only a year, only a date,
+    a licence notice or a bare domain (a site name).
+
+    The positives include the junk names the 2026-11-07 drain wrote from fetched
+    pages ("1970", "2016", "Velhosmestres.com", the Creative Commons footer).
+
+    Known limitation: the predicate looks at the name alone, so a real entity whose
+    whole name is a year or a date (a group or an event literally called "1968",
+    "Maio de 1968") is page furniture to it as well. Ingest exempts the hinted
+    primary subject only; see ``TestPageFurnitureGuardInIngest``.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Only a year, a decade or an approximate year.
+            "1970",
+            "2016",
+            "1924",
+            "1960s",
+            "c. 1950",
+            "1968-1970",
+            # Only a date (English, Portuguese, Spanish month names; numeric forms).
+            "26 August 1997",
+            "August 26, 1997",
+            "outubro, 2016",
+            "Outubro de 2016",
+            "1 de Janeiro, 2010",
+            "12 de octubre de 1950",
+            "May 1968",
+            "2016-10-01",
+            "01/10/2016",
+            # A licence notice.
+            "Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)",
+            "CC BY-SA 4.0",
+            "All rights reserved",
+            "Todos os direitos reservados",
+            "© 2026 Grupo Liberdade",
+            "Copyright 2016 Velhos Mestres",
+            # A bare domain (a site name).
+            "Velhosmestres.com",
+            "Capoeirahistory.com",
+            "www.capoeira.org",
+            "capoeira.com.br",
+            # Surrounding whitespace and punctuation are stripped first.
+            "  1975. ",
+        ],
+    )
+    def test_page_furniture(self, name):
+        from anytype_llm_wiki.wiki.extraction import is_page_furniture_name
+
+        assert is_page_furniture_name(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Mestre Bimba",
+            "Grupo Liberdade",
+            "Capoeira Regional",
+            "180 golpes",
+            "Mestre Pelé da Bomba",
+            "Revolta da Chibata (1910)",
+            "Festival de Capoeira 1968",
+            # A lone month can be a name.
+            "May",
+            "Maio",
+            # A licence by name is a concept, not a notice.
+            "MIT License",
+            "GNU General Public License",
+            # Dotted names that are not domains.
+            "Node.js",
+            "ASP.NET",
+            "bge-m3",
+            "",
+            "   ",
+            None,
+            42,
+        ],
+    )
+    def test_not_page_furniture(self, name):
+        from anytype_llm_wiki.wiki.extraction import is_page_furniture_name
+
+        assert is_page_furniture_name(name) is False
+
+    def test_a_real_entity_named_only_by_a_year_is_page_furniture_too(self):
+        """Documented limitation: a group or event literally called "1968" cannot be
+        told from a year by its name. The predicate says furniture; only the hinted
+        primary subject escapes the ingest guard."""
+        from anytype_llm_wiki.wiki.extraction import is_page_furniture_name
+
+        assert is_page_furniture_name("1968") is True
+
+    def test_sanitize_name_does_not_apply_the_rule(self):
+        """The predicate is separate from the base name policy: query.py and the
+        remember path keep their behaviour."""
+        from anytype_llm_wiki.wiki.extraction import sanitize_name
+
+        assert sanitize_name("1968") == "1968"
+        assert sanitize_name("Velhosmestres.com") == "Velhosmestres.com"
