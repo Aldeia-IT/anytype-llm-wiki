@@ -228,7 +228,8 @@ def wiki_remember(
     added as a per-source section, superseded facts are kept and tagged
     [superseded: <new source>], and contradictions are flagged
     (wiki_status=needs-review, never silently overwritten). Re-asserting the
-    same knowledge adds nothing to the facts; it records the new Source.
+    same knowledge with the same source note adds nothing to the facts; the new
+    Source still joins wiki_sources.
 
     Naming: subject_hint names the primary subject even when extraction finds
     subjects; the primary gets the whole knowledge text. Extracted subjects that

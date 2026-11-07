@@ -30,6 +30,7 @@ The wiki is a small set of Anytype types created by `wiki_bootstrap`:
 | `wiki_query` | a filed Q&A from `wiki_query` | `wiki_question`, `wiki_answer`, `wiki_asked_at`, `wiki_drew_from` |
 | `wiki_source` | provenance of an ingest/remember | `wiki_url`/`wiki_file_path`, `wiki_excerpt`, `wiki_summary` (ingest only), source type tag, timestamps |
 | `wiki_log` | append-only audit receipt per run | `wiki_action`, `wiki_notes`, `wiki_timestamp`, `wiki_schema_version` |
+| `wiki_link` | a typed, sourced relation between two entities/concepts | `wiki_link_from`, `wiki_link_to`, `wiki_link_label`, `wiki_link_sources` |
 | `wiki_comparison` | (reserved) | — |
 
 Objects carry **properties, not body text** — Anytype silently drops a `body`
@@ -49,11 +50,19 @@ same backbone:
    decoding (temp 0 + fixed seed) so re-runs converge (known-limitations §6).
 2. **Resolve** — each subject's title is matched against existing objects
    (§5 below) to decide *update existing* vs *create new*.
-3. **Consolidate** — each target is read fresh once per batch (a search hit may carry no
-   properties) and cached, then updated after each write. On an update, an LLM merges the
-   new facts into the existing `wiki_facts`/`wiki_definition` (§4 below). On a create, the
-   object is created with properties only. The batch's Source is created right before the
-   first write that needs it, so a run that degrades earlier creates none.
+3. **Consolidate / write facts** — differs per tool:
+   - `wiki_remember`: each target is read fresh once per batch (a search hit may carry no
+     properties) and cached, then updated after each write. On an update, an LLM merges
+     the new facts into the existing `wiki_facts`/`wiki_definition` (§4 below); the
+     deterministic merge is the fallback whenever the rewrite fails the guard. On a
+     create, the object is created with properties only. The batch's Source is created
+     right before the first write that needs it, and deleted again (best effort,
+     `source_cleanup_failed` if that fails) when no object or link of that batch refers
+     to it.
+   - `wiki_ingest`: no LLM merge. An update appends the page's units as the page
+     Source's own `## Source:` section deterministically (duplicates tagged `[also:]`);
+     the model only judges contradictions afterwards, against linked peers and the
+     object's own earlier sections. A create writes one section, properties only.
 4. **Relations** — named `{from, to, label}` links are written **bidirectionally**
    between resolved subjects: a typed `wiki_link` object (free label, Source) per relation, plus the `wiki_relations`/`wiki_related` 1-hop index.
    If the second side of the index fails, the first is restored and the run reports
@@ -94,7 +103,8 @@ resolves them. **Important nuance:** whether a correction lands as *supersede*
 Phrasing nudges it — "X replaced Y / Y is no longer true" leans supersede; "X,
 but actually Y" leans conflict. So narrating a correction does not always reach
 clean truth on its own; you may then need to review the flagged object and edit
-out the stale clause. Re-asserting the *same* knowledge adds nothing to the facts.
+out the stale clause. Re-asserting the *same* knowledge with the same source note adds
+nothing to the facts (the new Source still joins `wiki_sources`).
 
 ## 5. Entity resolution & duplicate handling
 

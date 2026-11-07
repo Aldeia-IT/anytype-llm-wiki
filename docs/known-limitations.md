@@ -256,3 +256,12 @@ Before schema 0.5.0 ingest chained a page's entities into one another's
 [MIGRATIONS](../MIGRATIONS.md)). Facts stored before the upgrade are one legacy, unattributed
 section until the Sources are re-ingested (Aldeia-IT/aldeia-box#1496). The tool keeps per-source sections and
 does not write a merged current summary (Aldeia-IT/aldeia-box#1493).
+
+## 14. A Source deleted after an ambiguous write failure can leave a dangling reference
+
+`wiki_remember` creates its Source lazily and deletes it again when no object or link of the batch
+refers to it. It counts a write as done only when the client saw it succeed. If a write reaches the
+server while the client sees an error (a timeout, or a 5xx after the commit), the batch looks empty,
+the Source is deleted, and the object's `wiki_sources` or the link's `wiki_link_sources` now names a
+missing object. Nothing worse happens. `wiki_lint` surfaces both forms: `link_dangling` for a link and
+`source_dangling` for an entity or concept.

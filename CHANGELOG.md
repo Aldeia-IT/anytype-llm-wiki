@@ -29,7 +29,9 @@ MIGRATIONS.md first.
   `links` (`label`, `from`, `to`, `sources`, all ids), and the synthesis prompt prints each link with
   its Source titles before the neighbour's text. A synthesis rule explains the section headings and
   the `[superseded]`, `[CONFLICT]` and `[also]` markers.
-- **Lint.** `link_dangling` (high) and `link_index_missing` (medium); `wiki_lint` now runs twelve checks.
+- **Lint.** `link_dangling` (high), `link_index_missing` (medium) and `source_dangling` (high: an entity
+  or concept whose `wiki_sources` names an object that no longer exists); `wiki_lint` now runs thirteen
+  checks.
 - **`repair-chain-relations` CLI.** Clears the meaningless chain relations earlier ingests wrote, only
   in a space proven ingest-only, behind a read-only dry run, a plan digest and a backup file. See
   MIGRATIONS.md.
@@ -39,6 +41,17 @@ MIGRATIONS.md first.
   `relation_index_write_failed: ...`, `facts_guard_rejected` (ingest names the object), and
   `facts_read_failed: <name>: <reason>`. A failed second-side link write makes the run `partial`
   and its `relation_rollback` note also lands in the WikiLog notes.
+- **More result keys and warnings.** `wiki_ingest` results carry `self_conflicts_flagged` (a new
+  section judged against the object's own earlier sections) and `duplicates_tagged` (units tagged
+  `[also: <label>]`). `wiki_remember` warns `consolidation_rewrite_rejected` when the model's rewrite
+  fails the guard (the deterministic merge is written instead) and `source_cleanup_failed` (with
+  `status: partial`) when deleting an unused Source fails. The `sources_overwrite_on_conflict` result
+  key of earlier `wiki_remember` versions is gone: sources never overwrite.
+- **Source cleanup.** `wiki_remember` creates its Source right before the first write that needs it and
+  deletes it again, best effort, when no object or link of that batch refers to it (judged per batch,
+  also inside a multi-batch drain). A write that reached the server while the client saw an error can
+  leave a reference to the deleted Source; `wiki_lint` reports it (`source_dangling`, or
+  `link_dangling` for a link). See known-limitations section 14.
 
 ### Changed
 
@@ -56,6 +69,9 @@ MIGRATIONS.md first.
   case-insensitive on the scheme, drops userinfo and query of any scheme and elides every path segment
   of 20 or more characters. `wiki_remember` reads each target fresh once per batch and creates its
   Source lazily, right before the first write that needs it.
+- **Prompt fences (security).** Text from a caller, a page or stored facts can no longer close a prompt
+  fence (`</` is written `<\/`), and prompts are filled in one pass so a value is never expanded as a
+  placeholder. A URL glued to a word character (`x_postgres://u:pw@host`) is scrubbed from a Source label.
 - **`repair-chain-relations`.** The printed plan escapes control characters in names. A `wiki_link`
   with one from-id and one to-id protects its pair even without a label. `--confirm-untagged` lists the
   space once. A mixed space refuses as `kind` before the confirm list is checked.
