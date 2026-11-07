@@ -1341,15 +1341,23 @@ class TestIsPageFurnitureName:
             "1 de Janeiro, 2010",
             "12 de octubre de 1950",
             "May 1968",
+            "August 26",
+            "November 5, 2026",
+            "out 2016",
+            "3 mar 2010",
             "2016-10-01",
             "01/10/2016",
+            "1.10.2016",
             # A licence notice.
             "Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)",
             "CC BY-SA 4.0",
             "All rights reserved",
             "Todos os direitos reservados",
             "© 2026 Grupo Liberdade",
+            "© Velhos Mestres",
+            "Velhos Mestres © 2016",
             "Copyright 2016 Velhos Mestres",
+            "Copyright © Velhos Mestres",
             # A bare domain (a site name).
             "Velhosmestres.com",
             "Capoeirahistory.com",
@@ -1377,12 +1385,26 @@ class TestIsPageFurnitureName:
             # A lone month can be a name.
             "May",
             "Maio",
-            # A licence by name is a concept, not a notice.
+            # A licence by name is a concept, not a notice; so are the organisation
+            # and laws about copyright (review F1).
             "MIT License",
             "GNU General Public License",
-            # Dotted names that are not domains.
+            "Creative Commons",
+            "Copyright Act",
+            "Copyright law",
+            # Version numbers are not numeric dates (review F2).
+            "1.2.3",
+            "2.0.1",
+            "2.0.10",
+            # Portuguese words that are month abbreviations too (review F3).
+            "Out 1",
+            "Set 1, 2",
+            "Mar 3",
+            "De Mar 1",
+            # Dotted names that are not domains (review F4: ".io" ends software names).
             "Node.js",
             "ASP.NET",
+            "Socket.io",
             "bge-m3",
             "",
             "   ",

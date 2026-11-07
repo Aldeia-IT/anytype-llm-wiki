@@ -424,7 +424,7 @@ def _recover_missing_lines(primary: str, baseline: str) -> str:
 # run of three or more becomes the two-space hard break it already meant.
 _SPACE_RUN_RE = re.compile(r"(?<=\S)[ \t\u00a0]{2,}(?=\S)")
 _TRAILING_SPACE_RUN_RE = re.compile(r"(?<=\S)[ \t\u00a0]{3,}$")
-_MD_FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
+_MD_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _MD_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(\s|$)")
 
 
@@ -440,12 +440,16 @@ def _collapse_space_runs(markdown: str) -> str:
     :returns: the text with interior space runs collapsed.
     """
     lines: list[str] = []
-    in_fence = False
+    # The opening fence; only the same character, at least as many times, closes it.
+    fence = ""
     for line in markdown.split("\n"):
-        if _MD_FENCE_RE.match(line):
-            in_fence = not in_fence
+        match = _MD_FENCE_RE.match(line)
+        if match and not fence:
+            fence = match.group(1)
+        elif match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence):
+            fence = ""
         elif not (
-            in_fence
+            fence
             or _MD_HEADING_RE.match(line)
             or line.startswith(("    ", "\t"))
         ):

@@ -576,14 +576,15 @@ def is_identifier_like_name(name: str) -> bool:
 
 # Page-furniture name shapes (Aldeia-IT/aldeia-box#1508) beyond the shared date and
 # licence rules: a year, an approximate year, a decade or a year range, and a bare
-# domain. The domain's suffix must be written in lowercase, so "ASP.NET" is a name.
+# domain. The domain's suffix must be written in lowercase, so "ASP.NET" is a name,
+# and ".io" / ".co" are left out: they end software names ("Socket.io").
 _YEAR_ONLY_RE = re.compile(
     r"^(?:(?:c|ca|circa)\.?\s*)?\d{4}$|^\d{3,4}'?s$|^\d{4}\s*[-\u2013\u2014/]\s*\d{2,4}$",
     re.IGNORECASE,
 )
 _BARE_DOMAIN_RE = re.compile(
     r"^(?:www\.)?[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)*"
-    r"\.(?:com|org|net|edu|gov|info|io|co|br|pt|es|de|fr|it|uk|nl|us|ca|au|ar|mx)$"
+    r"\.(?:com|org|net|edu|gov|info|br|pt|es|de|fr|it|uk|nl|us|ca|au|ar|mx)$"
 )
 
 
@@ -600,15 +601,17 @@ def is_page_furniture_name(name: str) -> bool:
        ``c. 1950``, ``1960s``, ``1968-1970``;
     2. a date (``furniture.is_date_only``): ``26 August 1997``, ``outubro, 2016``,
        ``2016-10-01``; a lone month (``May``) is not;
-    3. a licence or copyright notice (``furniture.is_licence_notice``): the
-       Creative Commons footer, ``All rights reserved``, ``© 2026 ...``; a licence
-       named on its own (``MIT License``) is not;
+    3. a licence or copyright notice by its shape (``furniture.is_licence_notice``):
+       the Creative Commons footer, ``CC BY-SA 4.0``, ``All rights reserved``,
+       ``© 2026 ...``; a licence or organisation named on its own (``MIT License``,
+       ``Creative Commons``, ``Copyright Act``) is not;
     4. a bare domain, a site name: ``Velhosmestres.com``, ``capoeira.com.br``;
-       ``Node.js`` and ``ASP.NET`` are not.
+       ``Node.js``, ``Socket.io`` and ``ASP.NET`` are not.
 
     Known limitation: the rule sees the name alone, so a real entity named only by
     a year or a date (a group or an event called "1968") or by its domain is
-    furniture to it too. Ingest exempts the hinted primary subject.
+    furniture to it too. Ingest exempts the hinted primary subject and the
+    heading-derived candidates (the document's own headings, not model output).
 
     Args:
         name: the candidate object name.

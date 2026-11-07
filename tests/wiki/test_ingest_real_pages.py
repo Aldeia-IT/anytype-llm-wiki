@@ -577,6 +577,34 @@ class TestPageFurnitureGuardInIngest:
         assert "name_policy_rejected: page_furniture: 1968" in result["warnings"]
 
     @respx.mock
+    def test_body_names_with_licence_words_are_kept(self, monkeypatch):
+        """Review F1: the organisation and laws are concepts, not notices."""
+        fake = FakeWiki()
+        fake.install()
+        _stub_extract(monkeypatch, _model_output(["Creative Commons", "Copyright Act"]))
+        result = _ingest()
+        assert _entity_names(fake) == {"Creative Commons", "Copyright Act"}
+        assert not [w for w in result["warnings"] if "page_furniture" in w]
+
+    @respx.mock
+    def test_heading_fallback_names_are_not_guarded(self, monkeypatch, tmp_path):
+        """Review F5: when extraction degrades, a local file keeps its heading
+        candidates; they are the author's headings, not model output, so a daily note
+        titled with a date still gets its object."""
+        fake = FakeWiki()
+        fake.install()
+        _stub_extract(
+            monkeypatch,
+            {"entities": [], "concepts": [], "error": "extraction_degraded: http_error: 503"},
+        )
+        note = tmp_path / "daily.md"
+        note.write_text("# 2026-11-07\n\nRoda at the academy with Mestre Ana.\n")
+        result = _ingest(source=str(note))
+        assert "extraction_degraded" in result["warnings"]
+        assert _entity_names(fake) == {"2026-11-07"}, _entity_names(fake)
+        assert not [w for w in result["warnings"] if "page_furniture" in w]
+
+    @respx.mock
     def test_the_hinted_primary_subject_is_exempt(self, monkeypatch):
         from anytype_llm_wiki.wiki.ingest import wiki_ingest
 

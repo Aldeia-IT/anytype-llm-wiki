@@ -187,8 +187,8 @@ def wiki_ingest(
     An extracted entity or concept whose whole name is only a year, a date, a
     licence or copyright notice or a bare domain is page furniture and is not
     written (``name_policy_rejected: page_furniture: <name>`` in ``warnings``). The
-    hinted primary subject is exempt; any other entity named only by a year (an
-    event called "1968") is dropped too.
+    hinted primary subject and degraded-run heading candidates are exempt; any
+    other entity named only by a year (an event called "1968") is dropped too.
 
     A PDF (URL or local ``.pdf``) with a text layer is read page by page, up to
     ``WIKI_PDF_MAX_PAGES`` pages (default 40; ``pdf_pages_capped`` names a

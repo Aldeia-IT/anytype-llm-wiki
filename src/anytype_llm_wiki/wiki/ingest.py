@@ -1374,6 +1374,13 @@ def _run_ingest(
             if is_url:
                 candidates = extracted_cands
 
+        # Aldeia-IT/aldeia-box#1508 review F5: heading-derived candidates (the
+        # fallback when extraction degrades or yields nothing) are the document's
+        # own headings, not names a model lifted from page chrome; a daily note
+        # titled "2026-11-07" keeps its object, so the furniture guard skips them.
+        # Read before plan_primary_subject builds a new list.
+        from_headings = candidates is not extracted_cands
+
         # Aldeia-IT/aldeia-box#1430: name the hinted primary subject and, in an
         # opted-in space, drop leading title words, before any policy refusal or
         # resolution. A degraded URL run has no candidates: it reports only the
@@ -1454,7 +1461,11 @@ def _run_ingest(
             # Aldeia-IT/aldeia-box#1508: a name that is only a year, a date, a
             # licence notice or a bare domain is page furniture, in every space.
             # The hinted primary subject is exempt: the caller named it.
-            if not cand.get("primary") and is_page_furniture_name(clean_name):
+            if (
+                not from_headings
+                and not cand.get("primary")
+                and is_page_furniture_name(clean_name)
+            ):
                 result["warnings"].append(
                     f"name_policy_rejected: page_furniture: {clean_name}"
                 )

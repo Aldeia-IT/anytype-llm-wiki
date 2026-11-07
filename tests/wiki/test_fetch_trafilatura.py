@@ -441,6 +441,7 @@ class TestRecoverSkipsPageFurniture:
                 "International (CC BY-SA 4.0) unless otherwise noted."
             ),
             "Copyright",
+            "Copyright 2016 Velhos Mestres",
             "© 2026 Grupo Liberdade. All rights reserved.",
             "Todos os direitos reservados.",
             "outubro, 2016",
@@ -461,6 +462,26 @@ class TestRecoverSkipsPageFurniture:
             "Maio",
             "Mestre Ana",
             "He wrote the songs of the group and kept the copyright on all of them.",
+            # Body sentences that mention ©, Creative Commons or copyright (review F1).
+            (
+                "Photo © Pierre Verger, taken in Salvador in 1946, shows Mestre Pastinha "
+                "teaching at the academy."
+            ),
+            (
+                "The recordings were later licensed under Creative Commons by the family "
+                "so that students could share them."
+            ),
+            "Copyright disputes over the songs went on for years after Bimba died in 1974.",
+            # A long line is body text even when it carries a notice phrase.
+            (
+                "The archive, all rights reserved by the family since the founder died, "
+                "holds letters, photographs and recordings of the rodas that he led in "
+                "Salvador and in Rio de Janeiro between 1940 and 1970."
+            ),
+            # Version numbers and Portuguese words are not dates (review F2, F3).
+            "1.2.3",
+            "Out 1",
+            "Mar 3",
         ],
     )
     def test_body_lines_stay_recovered(self, line):
@@ -516,6 +537,20 @@ class TestCollapseSpaceRuns:
 
         text = "Before  it.\n\n```\nx    =  1\n```\n\nAfter   it."
         assert _collapse_space_runs(text) == "Before it.\n\n```\nx    =  1\n```\n\nAfter it."
+
+    def test_a_fence_closes_only_on_its_own_character(self):
+        """Review F6: inside a ``~~~`` block a ``` line is code, not the closing fence
+        (CommonMark), so the lines after it stay untouched until ``~~~``."""
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "~~~\n```\nx    =  1\n~~~\nAfter   it."
+        assert _collapse_space_runs(text) == "~~~\n```\nx    =  1\n~~~\nAfter it."
+
+    def test_a_longer_fence_needs_a_long_enough_closer(self):
+        from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
+
+        text = "````\n```\nx    =  1\n````\nAfter   it."
+        assert _collapse_space_runs(text) == "````\n```\nx    =  1\n````\nAfter it."
 
     def test_headings_are_untouched(self):
         from anytype_llm_wiki.wiki.fetch import _collapse_space_runs
