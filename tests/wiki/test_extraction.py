@@ -1360,6 +1360,9 @@ class TestIsPageFurnitureName:
             "Copyright © Velhos Mestres",
             "Copyright 2016 Velhosmestres",
             "© 2016 Velhosmestres.com. All rights reserved.",
+            # "(c)" counts as the sign after "Copyright" or before a year.
+            "(c) 2016 Grupo Liberdade",
+            "Copyright (c) Velhos Mestres",
             # A bare domain (a site name).
             "Velhosmestres.com",
             "Capoeirahistory.com",
@@ -1402,6 +1405,11 @@ class TestIsPageFurnitureName:
             "The songbook, all rights reserved",
             "Notes on all rights reserved in Brazilian law",
             "Copyright 2016 dispute between Grupo X and Grupo Y over the songbook",
+            # A lettered list item is not a copyright line, and a "Copyright <year>"
+            # opening with more than a three-word holder is a sentence
+            # (Aldeia-IT/aldeia-box#1508 fix round 3).
+            "(c) the berimbau leads the roda",
+            "Copyright 1978 ruling favoured Mestre Bimba",
             # Version numbers are not numeric dates (review F2).
             "1.2.3",
             "2.0.1",

@@ -445,6 +445,10 @@ class TestRecoverSkipsPageFurniture:
             "© 2026 Grupo Liberdade. All rights reserved.",
             "Todos os direitos reservados.",
             "© 2016 Velhosmestres.com. All rights reserved.",
+            "Copyright 2016 Velhosmestres",
+            "(c) 2016 Grupo Liberdade",
+            # A holder name of up to six words (a measured page's footer).
+            "© 2026 Grupo de Capoeira Esquiva de Rúa",
             "Licensed under CC BY-SA 4.0",
             (
                 "This work is licensed under a Creative Commons Attribution-ShareAlike "
@@ -493,6 +497,14 @@ class TestRecoverSkipsPageFurniture:
             "The songbook, all rights reserved, stayed with the family.",
             "His CC BY-SA 4.0 photos of the roda are in the archive.",
             "© 2016 photo by Pierre Verger of Mestre Pastinha teaching at his academy in Salvador",
+            # A lettered list item, a sentence that opens with "Copyright <year>" or
+            # "© <year>", and a short "under a licence" line that is not a notice
+            # (Aldeia-IT/aldeia-box#1508 fix round 3).
+            "(c) the berimbau leads the roda",
+            "(c) Bimba opened his academy in 1932.",
+            "Copyright 1978 ruling favoured Mestre Bimba.",
+            "© 2016 Mestre Pastinha teaching in Salvador",
+            "Published under a licence from the family.",
             # Version numbers and Portuguese words are not dates (review F2, F3).
             "1.2.3",
             "Out 1",

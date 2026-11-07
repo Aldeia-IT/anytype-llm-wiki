@@ -48,10 +48,19 @@ _DATE_MAX_TOKENS = 7
 # backstop: the shapes are short by construction.
 _NOTICE_MAX_WORDS = 30
 _SIGN = r"(?:©|\(c\))"
+# "(c)" opens a copyright line only after "Copyright" or right before a year: a
+# lettered list item ("(c) the berimbau leads the roda") is body text.
+_SIGN_OPEN = r"(?:copyright\s*(?:©|\(c\))|©|\(c\)(?=\s*\d{4}))"
 _YEAR = r"\d{4}(?:\s*[-–]\s*\d{4})?"
-# Who holds the copyright: up to six words after the sign or year ("Grupo X",
-# "Velhosmestres.com.").
-_HOLDER = r"[^\s©]+(?:\s+[^\s©]+){0,5}"
+# Who holds the copyright: a name of up to six words after the sign or year
+# ("Grupo X", "Velhosmestres.com.", "Grupo de Capoeira Esquiva de Rúa"). After the
+# first word, each word opens with a capital or a digit or is a joiner, so a
+# sentence is not a holder ("Copyright 1978 ruling favoured Mestre Bimba.").
+_HOLDER_WORD = (
+    r"(?:(?-i:[A-ZÀ-ÖØ-Þ0-9])[^\s©]*"
+    r"|(?:de|da|do|das|dos|del|e|y|of|the|and|&)(?![^\s©]))"
+)
+_HOLDER = rf"[^\s©]+(?:\s+{_HOLDER_WORD}){{0,5}}"
 _RESERVED = (
     r"(?:all\s+rights\s+reserved|todos\s+os\s+direitos\s+reservados"
     r"|todos\s+los\s+derechos\s+reservados)"
@@ -60,7 +69,7 @@ _RESERVED = (
 # "Copyright", "X © 2016", each optionally closed by "All rights reserved".
 # "Copyright" + a word that is not a year ("Copyright law") is not one.
 _COPYRIGHT = (
-    rf"(?:(?:copyright\s*)?{_SIGN}\s*(?:{_YEAR})?(?:[\s,.]*{_HOLDER})?"
+    rf"(?:{_SIGN_OPEN}\s*(?:{_YEAR})?(?:[\s,.]*{_HOLDER})?"
     rf"|copyright(?:\s+{_YEAR}(?:[\s,.]+{_HOLDER})?)?"
     rf"|{_HOLDER}\s*{_SIGN}\s*{_YEAR})"
     rf"(?:[\s.,|–-]+{_RESERVED})?"
@@ -106,8 +115,10 @@ def is_licence_notice(text: str) -> bool:
 
     The notice must cover the whole text (edge whitespace and punctuation
     aside), which is at most thirty words. Notices: a copyright line that opens
-    with ``©`` / ``(c)`` or "Copyright" (alone or with a year) or ends with ``©``
-    and a year, with only a year and a holder of up to six words besides
+    with ``©``, "Copyright" (alone or with a year) or ``(c)`` after "Copyright"
+    or before a year, or ends with ``©`` and a year, with only a year and a
+    holder besides: a name of up to six words whose words after the first open
+    with a capital or a digit or are joiners ("de", "of")
     (``© 2026 Grupo X``, ``Copyright 2016 Velhosmestres``), optionally closed by
     "All rights reserved"; "All rights reserved" alone (English, Portuguese or
     Spanish); a Creative Commons licence by its code or spelled out with its
@@ -116,9 +127,12 @@ def is_licence_notice(text: str) -> bool:
     BY-SA 4.0", "Content is available under ... unless otherwise noted").
 
     Not notices: a licence or organisation named on its own (``MIT License``,
-    ``Creative Commons``, ``Copyright Act``), and any text that only contains a
-    notice: a title ("History of CC BY-SA 4.0 adoption") or a body sentence that
-    mentions a licence or ``©`` mid-sentence (Aldeia-IT/aldeia-box#1508).
+    ``Creative Commons``, ``Copyright Act``), a lettered list item that opens
+    with ``(c)`` ("(c) the berimbau leads the roda"), a sentence that opens with
+    "Copyright <year>" or "© <year>" ("Copyright 1978 ruling favoured Mestre
+    Bimba"), and any text that only contains a notice: a title ("History of CC
+    BY-SA 4.0 adoption") or a body sentence that mentions a licence or ``©``
+    mid-sentence (Aldeia-IT/aldeia-box#1508).
 
     Args:
         text: a line of page text or an extracted name.
