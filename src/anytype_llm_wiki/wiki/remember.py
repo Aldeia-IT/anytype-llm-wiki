@@ -16,7 +16,7 @@ The genuinely new surface vs. ingest is the LLM-assisted consolidation step
 Module-level seam imports: the symbols below are imported at module scope and
 called by their bare names so tests can monkeypatch
 ``anytype_llm_wiki.wiki.remember.<name>`` (extract, consolidate, space_ingest_lock,
-check_remote_endpoint_consent, _write_bidirectional_relations, _maybe_reindex).
+check_remote_endpoint_consent, write_links, _maybe_reindex).
 """
 
 import os
@@ -37,19 +37,33 @@ from .extraction import (
     sanitize_name,
     sanitize_property_value,
 )
+from ..anytype_client import AnytypeReadClient
 from .ingest import (
     _cmp_versions,
     _domain_taxonomy,
+    _flag_conflict_status,
     _resolve_multi_select_tags,
     _resolve_select_tag,
     _resolve_wiki_action_tag,
-    _write_bidirectional_relations,
     _write_wikilog,
     resolve_entity,
 )
+from .facts_sections import (
+    append_source_section,
+    FactSection,
+    canonical_facts,
+    fact_key,
+    fact_source_label,
+    no_lines_dropped,
+    parse_sections,
+    render_sections,
+    split_fact_units,
+)
+from .links import relation_specs, union_ids, write_links
 from .ingest import _maybe_reindex as _ingest_maybe_reindex
 from .util import (
     _existing_text,
+    _relation_ids,
     normalize_title,
     _title_stripper,
     same_subject,
@@ -91,6 +105,7 @@ def _empty_remember_result() -> dict:
         "source_object_id": None,
         "objects": [],
         "relations_created": 0,
+        "relations_sourced": 0,
         "conflicts_flagged": 0,
         "wiki_log_id": None,
         "warnings": [],
@@ -132,11 +147,6 @@ def _normalize_for_compare(text) -> str:
 # ``from .remember import _resolve_select_tag`` keeps resolving post-refactor.
 
 
-def _resolve_wiki_status_tag(
-    client: WikiClient, space_id: str, tag_name: str
-) -> tuple[str | None, bool]:
-    return _resolve_select_tag(client, space_id, "wiki_status", tag_name)
-
 
 def _resolve_wiki_source_type_tag(
     client: WikiClient, space_id: str, tag_name: str
@@ -147,6 +157,13 @@ def _resolve_wiki_source_type_tag(
 # ---------------------------------------------------------------------------
 # Provenance Source (D7/SF4/SF10)
 # ---------------------------------------------------------------------------
+
+
+def _remember_source_name(source_note: str | None) -> str:
+    """The name of the Source a remember call creates (also the base of its fact label)."""
+    if source_note:
+        return scrub_text_urls(source_note)[:200]
+    return f"agent {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
 
 
 def _create_remember_source(
@@ -162,11 +179,7 @@ def _create_remember_source(
     chars before being written to wiki_excerpt. ``wiki_source_type`` is written
     only when ``source_type_tag_id`` is resolvable.
     """
-    name = (
-        scrub_text_urls(source_note)[:200]
-        if source_note
-        else f"agent {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
-    )
+    name = _remember_source_name(source_note)
     if source_note:
         excerpt = sanitize_property_value(scrub_text_urls(source_note))[:500]
     else:
@@ -591,7 +604,73 @@ def _queued_remember_result(n: int, base_warnings: list[str]) -> dict:
     return result
 
 
+def _stamp_writer_heading(
+    candidate: str,
+    stored_text: str,
+    label: str,
+    source_id: str | None,
+    known_ids: frozenset[str],
+) -> str:
+    """Give the model's new section for this call its Source id.
+
+    The model writes ``## Source: <label>`` (the Source does not exist yet while it
+    runs, D19). If the candidate has exactly one section more than the stored text, last,
+    with this call's label and no known id, that section gets ``source_id``.
+    """
+    if not source_id:
+        return candidate
+    sections = parse_sections(candidate, known_ids=None)
+    if len(sections) != len(parse_sections(stored_text, known_ids=None)) + 1:
+        return candidate
+    last = sections[-1]
+    if last.label != label or last.source_id in known_ids:
+        return candidate
+    sections[-1] = FactSection(label, source_id, last.lines)
+    return render_sections(sections)
+
+
+def _has_writer_heading(text: str, label: str, source_id: str | None) -> bool:
+    """True if ``text`` has a section for this call (by Source id, else by label)."""
+    return any(
+        sec.source_id == source_id if source_id else sec.label == label
+        for sec in parse_sections(text, known_ids=None)
+    )
+
+
+def _rewrite_is_faithful(
+    stored_text: str,
+    candidate_text: str,
+    label: str,
+    source_id: str | None,
+    allowed_keys: frozenset[str],
+    allowed_units: frozenset[str],
+) -> bool:
+    """True if a consolidation rewrite has this call's heading and passes the guard.
+
+    The guard (``no_lines_dropped``) allows only the writer's own section, units from
+    the new facts (``allowed_keys``), and tags and flags carrying the writer's label.
+    """
+    return _has_writer_heading(candidate_text, label, source_id) and no_lines_dropped(
+        stored_text,
+        candidate_text,
+        label=label,
+        source_id=source_id,
+        allowed_new_keys=allowed_keys,
+        allowed_new_units=allowed_units,
+    )
+
+
 def _apply_batch(client, space_id, items, meta, result) -> None:
+    """Apply ONE work-log batch (see ``_apply_batch_body``); its read client is always closed."""
+    read_holder: list[AnytypeReadClient] = []
+    try:
+        _apply_batch_body(client, space_id, items, meta, result, read_holder)
+    finally:
+        for read_client in read_holder:
+            read_client.close()
+
+
+def _apply_batch_body(client, space_id, items, meta, result, read_holder) -> None:
     """Apply ONE work-log batch (resolve/consolidate/create + relations + WikiLog).
 
     Accumulates into ``result`` (objects/counts/warnings). Does NOT touch the
@@ -622,6 +701,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
     wikilog_notes: list[str] = []
 
     source_state: dict = {"id": None, "created": False}
+    wrote = {"object": False}
 
     def _ensure_source() -> str | None:
         if source_state["created"]:
@@ -640,6 +720,33 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         source_state["id"] = sid
         result["source_object_id"] = sid
         return sid
+
+    source_label = fact_source_label(_remember_source_name(source))
+    object_cache: dict[str, dict] = {}
+    tag_cache: dict = {}
+
+    def _read_client() -> AnytypeReadClient:
+        if not read_holder:
+            read_holder.append(AnytypeReadClient())
+        return read_holder[0]
+
+    def _stored_object(object_id: str) -> dict:
+        """The object as stored: one fresh read per object per batch, kept current."""
+        if object_id not in object_cache:
+            object_cache[object_id] = _read_client().get_object(space_id, object_id)
+        return object_cache[object_id]
+
+    def _write_object(object_id: str, props: list[dict]) -> None:
+        """PATCH ``props`` and mirror them into the cached object."""
+        client.update_object(space_id, object_id, {"properties": props})
+        cached = object_cache.get(object_id)
+        if cached is not None:
+            written = {q["key"] for q in props}
+            kept = [
+                p for p in cached.get("properties") or []
+                if isinstance(p, dict) and p.get("key") not in written
+            ]
+            cached["properties"] = [*kept, *props]
 
     strip = _title_stripper(strip_titles)
     for subj in items:
@@ -688,13 +795,25 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 target = resolution["target"]
                 target_id = target.get("id")
                 obj_entry["object_id"] = target_id
-                existing_text = _existing_text(target, prop_key)
+                try:
+                    stored = _stored_object(target_id)
+                except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+                    result["warnings"].append(f"facts_read_failed: {clean_name!r}: {exc}")
+                    obj_entry["action"] = "error"
+                    obj_entry["error"] = "facts_read_failed"
+                    result["status"] = "partial"
+                    result["objects"].append(obj_entry)
+                    continue
+                existing_text = _existing_text(stored, prop_key)
+                stored_sources = _relation_ids(stored, "wiki_sources")
+                stored_canonical = canonical_facts(existing_text, frozenset(stored_sources))
 
                 cons = consolidate(
-                    existing_text=existing_text,
+                    existing_text=stored_canonical,
                     new_facts=subj_facts,
                     kind=subj_kind,
                     space_id=space_id,
+                    source_label=source_label,
                 )
 
                 if "consolidation_degraded" in str(cons.get("error", "")):
@@ -704,7 +823,21 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     result["objects"].append(obj_entry)
                     continue
 
-                consolidated_text = cons.get("consolidated_text", existing_text)
+                # The first write that needs it creates the Source (D19).
+                src_id = _ensure_source()
+                known_ids = frozenset([*stored_sources, *([src_id] if src_id else [])])
+                new_units = split_fact_units(subj_facts)
+                allowed_keys = frozenset(fact_key(u) for u in new_units)
+                allowed_units = frozenset(new_units)
+                merge = append_source_section(stored_canonical, source_label, src_id, subj_facts)
+                merged_text = canonical_facts(merge.text, known_ids)
+                if not no_lines_dropped(
+                    stored_canonical, merged_text, label=source_label, source_id=src_id,
+                    allowed_new_keys=allowed_keys, allowed_new_units=allowed_units,
+                ):
+                    result["warnings"].append("facts_guard_rejected")
+                    merged_text = stored_canonical
+
                 changed = bool(cons.get("changed"))
                 conflicts = cons.get("conflicts") or []
                 fact_actions = [
@@ -712,12 +845,36 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     if isinstance(fa, dict) and fa.get("action") in _VALID_FACT_ACTIONS
                 ]
 
+                # The model's rewrite is written only if it keeps everything stored and
+                # adds only this source's section, tags and flags (spec section 7).
+                final_text = merged_text
+                candidate = cons.get("consolidated_text")
+                if changed and isinstance(candidate, str):
+                    candidate_text = canonical_facts(
+                        _stamp_writer_heading(
+                            candidate, stored_canonical, source_label, src_id, known_ids
+                        ),
+                        known_ids,
+                    )
+                    if not merge.changed and _normalize_for_compare(
+                        candidate_text
+                    ) == _normalize_for_compare(stored_canonical):
+                        result["warnings"].append("consolidated_despite_changed_flag")
+                    elif _rewrite_is_faithful(
+                        stored_canonical, candidate_text, source_label, src_id,
+                        allowed_keys, allowed_units,
+                    ):
+                        final_text = candidate_text
+                    elif merge.new_units or _has_writer_heading(candidate_text, source_label, src_id):
+                        result["warnings"].append("consolidation_rewrite_rejected")
+                    # else: nothing new to write, so the model rightly left out the
+                    # heading; the deterministic merge already carries any tags.
+
                 n_conflicts = len(conflicts)
                 obj_entry["conflicts_flagged"] = n_conflicts
                 if n_conflicts:
                     result["conflicts_flagged"] += n_conflicts
-                    _flag_conflict_status(client, space_id, target_id, result)
-                    result["warnings"].append("sources_overwrite_on_conflict")
+                    _flag_conflict_status(client, space_id, target_id, result, tag_cache)
                     pair_detail = "; ".join(
                         f"{c.get('existing_fact', '')} vs {c.get('new_fact', '')}: "
                         f"{c.get('reason', '')}"
@@ -730,33 +887,30 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     if fa.get("action") == "supersede" and fa.get("supersedes"):
                         wikilog_notes.append(f"supersede: {fa.get('supersedes')}")
 
-                norm_equal = (
-                    _normalize_for_compare(consolidated_text)
-                    == _normalize_for_compare(existing_text)
+                text_changed = _normalize_for_compare(final_text) != _normalize_for_compare(
+                    stored_canonical
                 )
-                if not changed or norm_equal:
-                    obj_entry["action"] = "consolidated"
-                    if changed and norm_equal:
-                        result["warnings"].append("consolidated_despite_changed_flag")
-                else:
-                    src_id = _ensure_source()
-                    patch_props = [
-                        {"key": prop_key, "text": sanitize_property_value(consolidated_text)},
-                    ]
+                new_sources = union_ids(stored_sources, [src_id] if src_id else [])
+                sources_changed = new_sources != stored_sources
+                patch_props: list[dict] = []
+                if text_changed:
+                    patch_props.append({"key": prop_key, "text": final_text})
                     if not n_conflicts:
                         patch_props.append(
                             {"key": "wiki_last_reviewed",
                              "date": datetime.now(timezone.utc).isoformat()}
                         )
-                    if src_id:
-                        patch_props.append({"key": "wiki_sources", "objects": [src_id]})
                     if domain_tag_ids:
                         # SET (replace) — no merge with the existing value (OD-C).
                         patch_props.append(
                             {"key": "wiki_domain_tags", "multi_select": domain_tag_ids}
                         )
-                    client.update_object(space_id, target_id, {"properties": patch_props})
-                    obj_entry["action"] = "updated"
+                if sources_changed:
+                    patch_props.append({"key": "wiki_sources", "objects": new_sources})
+                if patch_props:
+                    _write_object(target_id, patch_props)
+                    wrote["object"] = True
+                obj_entry["action"] = "updated" if text_changed else "consolidated"
 
                 obj_entry["deeplink"] = _object_deeplink(space_id, target_id)
                 name_to_id[normalize_title(clean_name)] = target_id
@@ -764,7 +918,24 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
             else:
                 src_id = _ensure_source()
-                create_props = [{"key": prop_key, "text": subj_facts}]
+                section_text = canonical_facts(
+                    append_source_section("", source_label, src_id, subj_facts).text,
+                    frozenset([src_id] if src_id else []),
+                )
+                if section_text and not no_lines_dropped(
+                    "", section_text, label=source_label, source_id=src_id,
+                    allowed_new_keys=frozenset(
+                        fact_key(u) for u in split_fact_units(subj_facts)
+                    ),
+                    allowed_new_units=frozenset(split_fact_units(subj_facts)),
+                ):
+                    result["warnings"].append("facts_guard_rejected")
+                    obj_entry["action"] = "error"
+                    obj_entry["error"] = "facts_guard_rejected"
+                    result["status"] = "partial"
+                    result["objects"].append(obj_entry)
+                    continue
+                create_props = [{"key": prop_key, "text": section_text}]
                 if src_id:
                     create_props.append({"key": "wiki_sources", "objects": [src_id]})
                 if domain_tag_ids:
@@ -774,6 +945,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 created = client.create_object(
                     space_id, type_key=type_key, name=clean_name, properties=create_props,
                 )
+                wrote["object"] = True
                 obj_id = created.get("id")
                 obj_entry["object_id"] = obj_id
                 obj_entry["action"] = "created"
@@ -789,47 +961,48 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         result["objects"].append(obj_entry)
 
     # relations (SF5 type-safe; G1 per-object counts).
+    batch_links = 0  # links this batch created or sourced (result counts span a whole drain)
     if relations:
-        rel_tuples: list[tuple[str, str, str]] = []
-        endpoint_objs: list[str] = []
-        for rel in relations:
-            if not isinstance(rel, dict):
-                continue
-            from_name = strip(rel.get("from", ""))
-            to_name = strip(rel.get("to", ""))
-            label = rel.get("label", "related")
-            from_id = name_to_id.get(normalize_title(from_name))
-            to_id = name_to_id.get(normalize_title(to_name))
-            if from_id is None:
-                from_id = _resolve_existing_endpoint(
-                    client, space_id, from_name, name_to_id, kind_by_id,
-                    strip_titles=strip_titles,
-                )
-            if to_id is None:
-                to_id = _resolve_existing_endpoint(
-                    client, space_id, to_name, name_to_id, kind_by_id,
-                    strip_titles=strip_titles,
-                )
-            if from_id and to_id:
-                rel_tuples.append((from_id, to_id, label))
-                endpoint_objs.extend([from_id, to_id])
-            else:
-                for endpoint_name in (to_name, from_name):
-                    if endpoint_name and normalize_title(endpoint_name) not in name_to_id:
-                        result["warnings"].append(
-                            f"relation_endpoint_unresolved: {endpoint_name}"
-                        )
-        rel_total, rollback_notes = _write_bidirectional_relations(
-            client, space_id, rel_tuples, kind_by_id
+        stripped = [
+            {**rel, "from": strip(str(rel.get("from", ""))), "to": strip(str(rel.get("to", "")))}
+            for rel in relations
+            if isinstance(rel, dict)
+        ]
+        for rel in stripped:
+            for end in (rel["from"], rel["to"]):
+                if end and normalize_title(end) not in name_to_id:
+                    _resolve_existing_endpoint(
+                        client, space_id, end, name_to_id, kind_by_id,
+                        strip_titles=strip_titles,
+                    )
+        rel_tuples, relation_warnings = relation_specs({"relations": stripped}, name_to_id)
+        result["warnings"].extend(relation_warnings)
+        endpoint_objs = [i for spec in rel_tuples for i in (spec.from_id, spec.to_id)]
+        link_result = write_links(
+            client, _read_client(), space_id, rel_tuples,
+            source_id=_ensure_source() if rel_tuples else None, kind_by_id=kind_by_id,
         )
-        if rollback_notes:
-            result["warnings"].extend(rollback_notes)
+        rel_total = link_result.created
+        batch_links = link_result.created + link_result.sourced
+        result["relations_sourced"] += link_result.sourced
+        if link_result.notes:
+            result["warnings"].extend(link_result.notes)
+        if link_result.failed:
             result["status"] = "partial"
         for obj in result["objects"]:
             oid = obj.get("object_id")
             if oid and oid in endpoint_objs:
                 obj["relations_created"] = endpoint_objs.count(oid)
         result["relations_created"] += rel_total
+
+    # D20b: a Source no entity, concept or link refers to is cleaned up (best effort).
+    if source_state["id"] and not wrote["object"] and not batch_links:
+        try:
+            client.delete_object(space_id, source_state["id"])
+            result["source_object_id"] = None
+        except (httpx.HTTPError, KeyError, ValueError, TypeError):
+            result["warnings"].append("source_cleanup_failed")
+            result["status"] = "partial"
 
     # WikiLog for this batch (action_name="remember").
     action_tag_id, degraded = _resolve_wiki_action_tag(
@@ -865,7 +1038,7 @@ def _resolve_existing_endpoint(
     """Resolve a relation-endpoint name to an EXISTING object id (entity or
     concept) for cross-batch / resume relations whose endpoint was written by a
     prior run. Returns the id or None; caches a hit into name_to_id/kind_by_id so
-    the unresolved-warning check and _write_bidirectional_relations see it.
+    the unresolved-warning check and write_links see it.
 
     ``strip_titles`` (the space is in WIKI_STRIP_NAME_TITLES_SPACES,
     Aldeia-IT/aldeia-box#1430): the name loses its leading title word and the
@@ -943,20 +1116,3 @@ def _same_type_candidates(
         o for o in results
         if isinstance(o, dict) and o.get("type", {}).get("key") == type_key
     ]
-
-
-def _flag_conflict_status(
-    client: WikiClient, space_id: str, object_id: str, result: dict
-) -> None:
-    """Set wiki_status=needs-review (degrade+warn if the tag is absent)."""
-    tag_id, degraded = _resolve_wiki_status_tag(client, space_id, "needs-review")
-    if degraded or tag_id is None:
-        result["warnings"].append("wiki_status_tag_not_found")
-        return
-    try:
-        client.update_object(
-            space_id, object_id,
-            {"properties": [{"key": "wiki_status", "select": tag_id}]},
-        )
-    except (httpx.HTTPError, KeyError, ValueError, TypeError):
-        result["warnings"].append("wiki_status_tag_not_found")

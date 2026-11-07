@@ -64,11 +64,11 @@ class TestCanonicalTypeKeys:
         keys = [t["type_key"] for t in WIKI_TYPES]
         assert "wiki_log" in keys
 
-    def test_exactly_six_types(self):
-        """Exactly six types must be defined — no more, no fewer."""
+    def test_exactly_seven_types(self):
+        """Exactly seven types must be defined — no more, no fewer (wiki_link added in #1486)."""
         from anytype_llm_wiki.wiki.types_schema import WIKI_TYPES
         keys = [t["type_key"] for t in WIKI_TYPES]
-        assert len(keys) == 6, f"Expected 6 types, got {len(keys)}: {keys}"
+        assert len(keys) == 7, f"Expected 7 types, got {len(keys)}: {keys}"
 
     def test_all_type_keys_have_wiki_prefix(self):
         """All type keys must be prefixed wiki_."""

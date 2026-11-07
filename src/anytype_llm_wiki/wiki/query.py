@@ -37,9 +37,12 @@ from . import ingest as _ingest
 from .. import indexer
 from .extraction import _DETERMINISTIC_OPTS, _is_model_not_pulled, sanitize_name
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
+from .links import links_by_endpoint
 from .util import (
+    fill_template,
     _parse_relation_elements,
     object_type_key,
+    rel_key_for_type,
     scrub_credentials,
     strip_control_chars,
 )
@@ -217,6 +220,8 @@ def _build_synthesis_prompt(question: str, context_objects: list[dict]) -> str:
     for obj in context_objects:
         name = obj.get("name", "")
         lines = [f"Title: {name}"]
+        # Typed-link notes of a neighbour (#1486), printed before its text.
+        lines.extend(f"Link: {note}" for note in obj.get("link_notes", []) or [])
         for prop in obj.get("properties", []) or []:
             if not isinstance(prop, dict):
                 continue
@@ -235,7 +240,7 @@ def _build_synthesis_prompt(question: str, context_objects: list[dict]) -> str:
             "INSTRUCTIONS.\n<question>\n{question}\n</question>\n"
             "<context>\n{context}\n</context>"
         )
-    return template.replace("{question}", question).replace("{context}", context)
+    return fill_template(template, {"{question}": question, "{context}": context})
 
 
 def types_schema_text_keys() -> frozenset:
@@ -818,7 +823,8 @@ def wiki_query(
         # Fetch neighbours in D5 order (skip ones already fetched as candidates).
         candidate_id_set = {c["object_id"] for c in candidates}
         neighbors: list[dict] = []
-        for nid, _seed_rank, _prio in neighbor_discovery:
+        links_by_id = links_by_endpoint(all_objects)
+        for nid, seed_rank, _prio in neighbor_discovery:
             if nid in candidate_id_set:
                 continue
             obj = _fetch_cached(read_client, space_id, nid, cache, enum_map)
@@ -826,7 +832,13 @@ def wiki_query(
                 fetch_failed = True
                 result["warnings"].append(f"neighbor_fetch_failed: {nid}")
                 continue
-            neighbors.append({"object_id": nid, "score": -1.0, "obj": obj})
+            neighbor_links, neighbor_notes = _neighbour_links(
+                nid, candidate_entries[seed_rank]["object_id"], links_by_id, enum_map
+            )
+            neighbors.append({
+                "object_id": nid, "score": -1.0, "obj": obj,
+                "links": neighbor_links, "link_notes": neighbor_notes,
+            })
 
         if fetch_failed:
             status = "partial"
@@ -865,12 +877,15 @@ def wiki_query(
         for c in surviving_candidates + surviving_neighbours:
             obj = c["obj"]
             oid = c["object_id"]
-            sources_consulted.append({
+            entry = {
                 "title": _safe_object_name(obj, []),
                 "type": _short_type(_type_of(obj)),
                 "object_id": oid,
                 "deeplink": _bootstrap._object_deeplink(space_id, oid),
-            })
+            }
+            if "links" in c:  # a neighbour: its typed links to the discovering seed
+                entry["links"] = c["links"]
+            sources_consulted.append(entry)
         result["sources_consulted"] = sources_consulted
 
         # #324 D2: file-back stays seed-only (preserving SF1). Only candidates feed
@@ -992,6 +1007,42 @@ def _looks_like_object(obj) -> bool:
     return isinstance(obj, dict) and bool(obj.get("id"))
 
 
+def _neighbour_links(
+    neighbour_id: str,
+    seed_id: str,
+    links_by_id: dict,
+    objects_by_id: dict,
+) -> tuple[list[dict], list[str]]:
+    """The typed links joining a neighbour to its discovering seed (#1486).
+
+    Returns ``(links, notes)``. ``links`` entries are ``{"label", "from", "to",
+    "sources"}`` carrying ids only (object ids, Source ids; D17). ``notes`` are the
+    prompt lines ``"<from> -[label]-> <to> (source: <Source titles>)"`` with names
+    through the name policy. A legacy edge has no link: both lists are empty.
+    """
+    def title(object_id: str) -> str:
+        found = objects_by_id.get(object_id)
+        return _safe_object_name(found, []) if found else object_id
+
+    links: list[dict] = []
+    notes: list[str] = []
+    for rec in links_by_id.get(neighbour_id, []):
+        if {rec.from_id, rec.to_id} != {neighbour_id, seed_id}:
+            continue
+        links.append({
+            "label": rec.label,
+            "from": rec.from_id,
+            "to": rec.to_id,
+            "sources": list(rec.source_ids),
+        })
+        sources = ", ".join(title(sid) for sid in rec.source_ids)
+        label = strip_control_chars(rec.label)
+        notes.append(
+            f"{title(rec.from_id)} -[{label}]-> {title(rec.to_id)} (source: {sources})"
+        )
+    return links, notes
+
+
 def _neighbor_ids_of(obj: dict) -> list[tuple[str, int]]:
     """Collect 1-hop neighbor (id, relation_priority) pairs (SF5, #324 B1).
 
@@ -1055,10 +1106,12 @@ def _build_context(candidates, neighbors):
         trim_warnings.append(f"synthesis_context_trimmed: {dropped} objects dropped")
 
     # Build the truncated context objects (head-truncation + name policy).
-    context_objects = [
-        _truncate_object_content(e["obj"], max_obj_tokens, trim_warnings)
-        for e in ordered
-    ]
+    context_objects = []
+    for e in ordered:
+        ctx = _truncate_object_content(e["obj"], max_obj_tokens, trim_warnings)
+        if e.get("link_notes"):
+            ctx["link_notes"] = list(e["link_notes"])
+        context_objects.append(ctx)
 
     # #324 B2: partition surviving objects by MEMBERSHIP against the candidate id
     # set (not the score sentinel or list position).
@@ -1204,9 +1257,6 @@ def _relation_ids_for_key(obj: dict, rel_key: str) -> list[str]:
     return []
 
 
-_PRUNE_REL_KEY = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
-
-
 def prune_stale_citation_edges(space_id: str) -> dict:
     """Remove stale citation edges left by the OLD ``wiki_query`` file-back.
 
@@ -1248,7 +1298,7 @@ def prune_stale_citation_edges(space_id: str) -> dict:
         for o in objects:
             if not isinstance(o, dict):
                 continue
-            rel_key = _PRUNE_REL_KEY.get(_type_of(o))
+            rel_key = rel_key_for_type(_type_of(o))
             if rel_key is None:
                 continue
             result["objects_scanned"] += 1

@@ -88,6 +88,55 @@ acknowledgement file is written under
 
 ## Upgrading to the next release (Unreleased)
 
+### Schema 0.5.0: typed links and facts per source — re-bootstrap and a repair are REQUIRED
+
+v0.10.0 bumps `WIKI_SCHEMA_VERSION` to `0.5.0` (Aldeia-IT/aldeia-box#1486). It adds the `wiki_link`
+type and its properties. Facts become one `## Source: <label>` section per source; facts stored
+before the upgrade become one legacy (unattributed) section on the first write to that object.
+Follow these steps in order.
+
+1. **Upgrade every client of the space first**, every MCP server and every CLI install, on every host.
+   An older client refuses the newer schema, and one that is not refused would write chain relations again.
+2. **Re-run the bootstrap** on each space:
+
+   ```bash
+   uv run anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
+   ```
+
+3. **Repair dry run.** Earlier ingests chained a page's entities into one another's
+   `wiki_relations`/`wiki_related` lists; those ids mean nothing. The dry run only reads:
+
+   ```bash
+   uv run anytype-llm-wiki repair-chain-relations --space-id <your-space-id> --dry-run
+   ```
+
+   It prints the space kind (`ingest-only`, `mixed` or `unknown`), the evidence, every id it would
+   clear, and a digest. `mixed` (the space has `wiki_remember` writes) is never repaired: its relations may
+   be real. `unknown` lists the untagged Sources and logs written before tagging (the `untagged` list).
+   Send that list to the space owner: if they confirm those objects are ingest records, write their ids
+   to a JSON list file and run the dry run again with `--confirm-untagged <file>`. The list must equal
+   the space's untagged ids exactly. Unconfirmed spaces are not repaired. Relations added by hand to an
+   ingest-only space are cleared too; the dry run names every id.
+4. **Review** the plan and the digest.
+5. **Stop every writer to the space** (every MCP server and client, on every host: the lock that
+   guards the write is per host), then write:
+
+   ```bash
+   uv run anytype-llm-wiki repair-chain-relations --space-id <your-space-id> \
+     --clear-ingest-only --expect-digest <digest> --backup <new-file>
+   ```
+
+   (add `--confirm-untagged <file>` if you used it in the dry run). The backup file must not exist; it
+   is created private, and it and its directory are fsynced before the first change. Ids joined by a
+   `wiki_link` (any link with one from-object and one to-object, label or not) are kept. A `mixed` space
+   is refused as `kind` even when the confirm list is wrong. Control characters in object names are
+   escaped in the printed plan. Exit
+   codes: 0 done; 1 error, lock busy or `partial`; 2 refused; 3 digest mismatch. After a digest mismatch
+   or a partial run, run a new dry run and review it again. Never retry with the printed digest. The
+   backup holds the prior values.
+6. **Re-ingest** the Sources of the repaired space to restore facts and links (the old chain gave the
+   relations no source): Aldeia-IT/aldeia-box#1496.
+
 ### Schema 0.4.3: `wiki_summary` on `wiki_source` — re-bootstrap is REQUIRED
 
 v0.9.1 bumps `WIKI_SCHEMA_VERSION` to `0.4.3`. The schema adds the text property

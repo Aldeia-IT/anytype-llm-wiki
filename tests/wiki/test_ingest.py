@@ -366,138 +366,6 @@ class TestReindexFailureWarning:
         )
 
 
-class TestBidirectionalRelationRollback:
-    """AC#13 (v0.3.0): if either direction of a bidirectional relation fails, both are rolled back;
-    WikiLog records relation_rollback event.
-    """
-
-    @respx.mock
-    def test_bidi_relation_rollback_on_failure(self, monkeypatch, tmp_path):
-        """AC#13: B-side of a property-based bidi relation fails → A-side reverted; relation_rollback logged.
-
-        NOTE — UPDATED FROM THE STANDALONE-RELATION-OBJECT MODEL. The original
-        approved test encoded relations as standalone ``wiki_relation``-typed
-        objects with a DELETE-by-id rollback. That type does NOT exist in
-        ``types_schema.WIKI_TYPES``; the master spec (§ingest step 6) and the
-        verified native-backlinks model represent relations as BIDIRECTIONAL
-        OBJECTS-FORMAT PROPERTY LINKS — ``wiki_relations`` on an Entity (and
-        ``wiki_related`` on a Concept) set on BOTH sides. This test is rewritten
-        to that property-based mechanism while preserving its intent: when one
-        side of the bidirectional write fails, the succeeded side is rolled back
-        and the WikiLog records ``relation_rollback``.
-
-        Arrange: two heading entities (Alpha, Beta) are created → one A→B relation
-        is derived. The A-side relation PATCH (on the Alpha object id) succeeds;
-        the B-side relation PATCH (on the Beta object id) returns 500. This
-        triggers the rollback path.
-
-        Assertions:
-          1. A rollback PATCH was issued against the A object id that reverts the
-             link (the A-side property is PATCHed a SECOND time back to its prior
-             empty objects list).
-          2. A WikiLog POST payload's JSON contains "relation_rollback".
-
-        Covers: §9.1 AC#13 (v0.3.0 bidi relation rollback, property-based).
-        """
-        import json as _json
-
-        a_id = "entity-alpha-001"
-        b_id = "entity-beta-001"
-        wikilog_payloads: list[dict] = []
-        # All relation PATCHes targeting the A object id, with their objects list.
-        a_relation_patches: list[list] = []
-
-        def mock_post(request, **kwargs):
-            try:
-                payload = _json.loads(request.content)
-            except Exception:
-                payload = {}
-
-            if payload.get("type_key") == "wiki_log":
-                wikilog_payloads.append(payload)
-                return httpx.Response(201, json={"object": {"id": "wikilog-001", "name": "log"}})
-
-            # Entity creates: first → Alpha, second → Beta. Source/others → src.
-            type_key = payload.get("type_key")
-            if type_key == "wiki_entity":
-                name = payload.get("name", "")
-                if "Alpha" in name:
-                    return httpx.Response(201, json={"object": {"id": a_id, "name": name}})
-                if "Beta" in name:
-                    return httpx.Response(201, json={"object": {"id": b_id, "name": name}})
-            return httpx.Response(201, json={"object": {"id": "src-001", "name": "src"}})
-
-        def mock_patch(request, **kwargs):
-            try:
-                payload = _json.loads(request.content)
-            except Exception:
-                payload = {}
-            url = str(request.url)
-            # Extract the relation objects list (if this is a relation PATCH).
-            rel_objects = None
-            for prop in payload.get("properties", []) or []:
-                if prop.get("key") in ("wiki_relations", "wiki_related"):
-                    rel_objects = prop.get("objects")
-            # A-side relation PATCH (on Alpha) — record and succeed.
-            if a_id in url and rel_objects is not None:
-                a_relation_patches.append(rel_objects)
-                return httpx.Response(200, json={"object": {"id": a_id}})
-            # B-side relation PATCH (on Beta) — fail to trigger rollback.
-            if b_id in url and rel_objects is not None:
-                return httpx.Response(500, json={"error": "relation patch failed"})
-            return httpx.Response(200, json={"object": {"id": "patched"}})
-
-        # Two heading entities → one derived A->B relation.
-        md_content = (
-            "# Entity Alpha\n\nFact: Alpha relates to Beta.\n\n"
-            "# Entity Beta\n\nFact: Beta relates to Alpha.\n"
-        )
-        import tempfile
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False, dir=str(tmp_path)
-        ) as f:
-            f.write(md_content)
-            md_file = f.name
-
-        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
-        respx.post().mock(side_effect=mock_post)
-        respx.patch().mock(side_effect=mock_patch)
-
-        from anytype_llm_wiki.wiki.ingest import wiki_ingest
-        result = wiki_ingest(source=md_file, space_id=FAKE_SPACE_ID)
-
-        # AC#13 assertion 1: result is a dict (basic sanity)
-        assert isinstance(result, dict), (
-            f"wiki_ingest must return a dict even on rollback; got {type(result)}"
-        )
-
-        # AC#13 assertion 2: the A-side relation was PATCHed twice — once to set
-        # the link (objects == [b_id]) and once to revert it (objects == []).
-        assert len(a_relation_patches) >= 2, (
-            f"AC#13: A-side relation property must be PATCHed to set the link AND "
-            f"a SECOND time to roll it back when the B-side fails. "
-            f"A-side relation PATCHes captured: {a_relation_patches!r}"
-        )
-        assert b_id in (a_relation_patches[0] or []), (
-            f"AC#13: first A-side relation PATCH must set the link to B; got "
-            f"{a_relation_patches[0]!r}"
-        )
-        assert b_id not in (a_relation_patches[-1] or []), (
-            f"AC#13: rollback PATCH must REMOVE B from A's relation property; "
-            f"final A-side relation PATCH was {a_relation_patches[-1]!r}"
-        )
-
-        # AC#13 assertion 3: WikiLog records relation_rollback event
-        wikilog_records_rollback = any(
-            "relation_rollback" in _json.dumps(payload)
-            for payload in wikilog_payloads
-        )
-        assert wikilog_records_rollback, (
-            f"AC#13: WikiLog must record a 'relation_rollback' event when bidi rollback occurs. "
-            f"WikiLog payloads captured: {wikilog_payloads!r}"
-        )
-
-
 class TestConcurrentIngestLock:
     """AC#5: concurrent ingest against same space → [DATA ERROR] ingest_in_progress.
     Concurrent call against different space succeeds.
@@ -726,7 +594,16 @@ class TestUpdatePathNoBodyKey:
 
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
         _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
-        respx.get().mock(return_value=httpx.Response(200, json=_make_schema_ok_response()))
+        existing = {
+            "id": "existing-entity-001",
+            "name": source_url,
+            "type": {"key": "wiki_entity"},
+            "properties": [{"key": "wiki_facts", "text": "old"}],
+        }
+        respx.get().mock(side_effect=_object_aware_get(
+            {"existing-entity-001": existing},
+            lambda request: httpx.Response(200, json=_make_schema_ok_response()),
+        ))
         respx.post().mock(side_effect=capture_post)
         respx.patch().mock(side_effect=capture_patch)
 
@@ -1164,7 +1041,7 @@ class TestReingestIdempotencyWikilog:
 
         monkeypatch.setenv("WIKI_AUTO_REINDEX", "false")
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -1210,6 +1087,43 @@ def _kind_attrs(kind: str) -> tuple[str, str, str]:
     return "wiki_relations", "wiki_facts", "wiki_entity"
 
 
+def _object_aware_get(objects: dict, fallback):
+    """GET side_effect serving ``objects`` (id -> object dict) at ``/objects/<id>``.
+
+    Aldeia-IT/aldeia-box#1486: ingest reads each object it updates once per run (a
+    search hit may carry no properties), so a test that updates one must serve it.
+    ``fallback(request)`` answers every other GET.
+    """
+
+    def on_get(request, **kwargs):
+        path = request.url.path
+        oid = path.rsplit("/", 1)[-1]
+        answer = fallback(request)  # run first: tests record their GETs in it
+        if "/objects/" in path and oid in objects:
+            return httpx.Response(200, json={"object": objects[oid]})
+        return answer
+
+    return on_get
+
+
+_SEARCH_HITS: dict[str, dict] = {}
+
+
+@pytest.fixture(autouse=True)
+def _reset_search_hits():
+    _SEARCH_HITS.clear()
+
+
+def _serving_search_hits(fallback):
+    """GET side_effect: an object a search fixture built is served at ``/objects/<id>``.
+
+    Aldeia-IT/aldeia-box#1486: ingest reads each object it updates once per run (a
+    search hit may carry no properties), so the object the search returned must be
+    readable. Every other GET goes to ``fallback``.
+    """
+    return _object_aware_get(_SEARCH_HITS, fallback)
+
+
 def _make_objects_shaped_search_response(
     obj_id: str,
     name: str,
@@ -1245,15 +1159,14 @@ def _make_objects_shaped_search_response(
     ]
     if existing_contradictions is not None:
         props.append({"key": "wiki_contradictions", "objects": existing_contradictions})
-    return {
-        "data": [{
-            "id": obj_id,
-            "name": name,
-            "type": {"key": type_key},
-            "properties": props,
-        }],
-        "pagination": {"has_more": False},
+    hit = {
+        "id": obj_id,
+        "name": name,
+        "type": {"key": type_key},
+        "properties": props,
     }
+    _SEARCH_HITS[obj_id] = hit  # the fresh read of this object (#1486) serves the same object
+    return {"data": [hit], "pagination": {"has_more": False}}
 
 
 def _make_peer_get_object_response(
@@ -1390,7 +1303,7 @@ class TestContradictionDetection:
 
         _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -1412,12 +1325,10 @@ class TestContradictionDetection:
             f"AC-1: contradictions_detected must be >= 1; got {result['contradictions_detected']}"
         )
 
-        # BL-3: NO GET must fire against the TARGET object id
+        # Aldeia-IT/aldeia-box#1486 (replaces BL-3): exactly one fresh GET of the target per run.
         target_gets = [u for u in get_calls if f"/objects/{target_obj_id}" in u and "?" in u]
-        assert not target_gets, (
-            f"AC-1 / BL-3: NO GET must be issued for the target object id {target_obj_id!r}; "
-            f"target GETs found: {target_gets}. The target's relations/facts come from the "
-            f"in-memory search-result dict, not a separate GET."
+        assert len(target_gets) == 1, (
+            f"AC-1: the target must be read once per run; target GETs found: {target_gets}"
         )
 
         # wiki_last_reviewed must NOT be written in any PATCH
@@ -1478,7 +1389,7 @@ class TestContradictionDetection:
         def on_patch(request, **kwargs):
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -1550,7 +1461,7 @@ class TestContradictionDetection:
 
         _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -1620,7 +1531,7 @@ class TestContradictionDetection:
         def on_patch(request, **kwargs):
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -1893,13 +1804,15 @@ class TestContradictionDetection:
                         {"key": "wiki_relations", "objects": [peer_id_a, peer_id_b]},
                         {"key": "wiki_contradictions", "objects": []},
                     ]
+                    hit = {
+                        "id": target_obj_id,
+                        "name": source_url,
+                        "type": {"key": "wiki_entity"},
+                        "properties": props,
+                    }
+                    _SEARCH_HITS[target_obj_id] = hit
                     return httpx.Response(200, json={
-                        "data": [{
-                            "id": target_obj_id,
-                            "name": source_url,
-                            "type": {"key": "wiki_entity"},
-                            "properties": props,
-                        }],
+                        "data": [hit],
                         "pagination": {"has_more": False},
                     })
                 return httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
@@ -1916,7 +1829,7 @@ class TestContradictionDetection:
 
         _stub_extract_entity(monkeypatch, source_url)  # #1427 AC11: URL objects come from extraction
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -2035,7 +1948,7 @@ class TestContradictionDetection:
             patch_calls.append({"url": str(request.url), "payload": payload})
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -2161,7 +2074,7 @@ class TestContradictionDetection:
 
         _stub_extract_entity(monkeypatch, source_url, kind="concept")  # #1427 AC11: URL objects come from extraction
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -2178,10 +2091,10 @@ class TestContradictionDetection:
             f"AC-C1: contradictions_detected must be >= 1; got {result.get('contradictions_detected')}"
         )
 
-        # BL-3: NO GET against the target object id.
+        # Aldeia-IT/aldeia-box#1486 (replaces BL-3): exactly one fresh GET of the target per run.
         target_gets = [u for u in get_calls if f"/objects/{target_obj_id}" in u and "?" in u]
-        assert not target_gets, (
-            f"AC-C1 / BL-3: NO GET must be issued for the target id {target_obj_id!r}; got {target_gets}"
+        assert len(target_gets) == 1, (
+            f"AC-C1: the target must be read once per run; got {target_gets}"
         )
 
         # Bidirectional wiki_contradictions PATCHes (A-side + B-side).
@@ -2232,7 +2145,7 @@ class TestContradictionDetection:
         def on_patch(request, **kwargs):
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -2301,7 +2214,7 @@ class TestContradictionDetection:
 
         _stub_extract_entity(monkeypatch, source_url, kind="concept")  # #1427 AC11: URL objects come from extraction
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -2373,7 +2286,7 @@ class TestContradictionDetection:
         def on_patch(request, **kwargs):
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -2513,7 +2426,7 @@ class TestContradictionDetection:
             patch_calls.append({"url": str(request.url), "payload": payload})
             return httpx.Response(200, json={"object": {"id": "patched-001"}})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -2745,7 +2658,7 @@ class TestContradictionDetection:
 
         _stub_extract_entity(monkeypatch, source_url, kind="concept")  # #1427 AC11: URL objects come from extraction
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -3033,7 +2946,7 @@ class TestReingestIdempotency:
 
         _stub_extract_entity(monkeypatch, "Idempotent Entity")  # #1427 AC11: URL objects come from extraction
         _mock_article_page()  # #1427 AC9: an article-sized page passes the gate
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -3098,7 +3011,7 @@ class TestHeadingFallbackSuppression:
         def on_patch(request, **kwargs):
             return httpx.Response(200, json={"object": {"id": "patched"}})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -3158,7 +3071,7 @@ class TestHeadingFallbackSuppression:
                 return httpx.Response(201, json={"object": {"id": oid, "name": name}})
             return httpx.Response(200, json={"response": "not-json"})
 
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=lambda request, **kw: httpx.Response(200, json={"object": {"id": "patched"}}))
 
@@ -3904,6 +3817,10 @@ class TestIngestDomainTagsPersistence:
             router.get(url__regex=r".*/objects(\?.*)?$").mock(
                 return_value=httpx.Response(200, json=_make_schema_ok_response())
             )
+            # The fresh read of the object ingest updates (Aldeia-IT/aldeia-box#1486)
+            router.get(url__regex=r".*/objects/existing-entity-001.*").mock(
+                return_value=httpx.Response(200, json={"object": existing_entity})
+            )
             # All GETs → empty list (graceful degrade for tags/properties)
             router.get(url__regex=r".*").mock(
                 return_value=httpx.Response(200, json={"data": [], "pagination": {"has_more": False}})
@@ -4293,7 +4210,7 @@ class TestContradictionChecksBatchedPerIngest:
             return httpx.Response(200, json={"object": {"id": obj_id}})
 
         _mock_article_page()
-        respx.get().mock(side_effect=on_get)
+        respx.get().mock(side_effect=_serving_search_hits(on_get))
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 
@@ -4365,9 +4282,15 @@ class TestSourceSummaryStored:
             return httpx.Response(200, json={"object": {"id": "patched"}})
 
         _mock_article_page()
-        respx.get().mock(
-            side_effect=lambda request, **kw: httpx.Response(200, json=_make_schema_ok_response())
-        )
+        def on_get(request, **kw):
+            oid = request.url.path.rsplit("/", 1)[-1]
+            known = next((o for o in store.values() if o["id"] == oid), None)
+            if "/objects/" in request.url.path and known is not None:
+                # The fresh read of an object ingest updates (Aldeia-IT/aldeia-box#1486).
+                return httpx.Response(200, json={"object": {**known, "properties": []}})
+            return httpx.Response(200, json=_make_schema_ok_response())
+
+        respx.get().mock(side_effect=on_get)
         respx.post().mock(side_effect=on_post)
         respx.patch().mock(side_effect=on_patch)
 

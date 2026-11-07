@@ -1,10 +1,11 @@
 """wiki/lint.py — wiki_lint v0.5.0 structural health check.
 
 A read-only, report-only diagnostic over a bootstrapped wiki space. It enumerates
-the wiki ONCE, runs a battery of ten structural checks (asymmetric relations,
+the wiki ONCE, runs a battery of thirteen structural checks (asymmetric relations,
 orphans, pipeline orphans, unresolved contradictions, staleness, oversized
-descriptions, empty types, unreviewed/stale needs-review, and — opt-in — potential
-duplicates), assembles a severity-ranked LintReport, and files a single ``wiki_log``
+descriptions, empty types, unreviewed/stale needs-review, typed-link integrity
+(``link_dangling``, ``link_index_missing``), a source reference that no longer resolves
+(``source_dangling``), and — opt-in — potential duplicates), assembles a severity-ranked LintReport, and files a single ``wiki_log``
 receipt. ``wiki_lint`` mutates nothing but its own WikiLog receipt.
 
 Single-enumeration constraint (CTO-BLOCKING-1 / spec note G9): ``list_objects`` is
@@ -30,8 +31,15 @@ from . import bootstrap as _bootstrap
 from .. import indexer
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .query import _parse_relation_elements, _fetch_cached
+from .links import LINK_TYPE_KEY, parse_link
 from .remember import _resolve_select_tag
-from .util import normalize_title, object_type_key, scrub_credentials, strip_control_chars
+from .util import (
+    normalize_title,
+    object_type_key,
+    rel_key_for_type,
+    scrub_credentials,
+    strip_control_chars,
+)
 from ..anytype_client import AnytypeReadClient
 from .wiki_client import WikiClient
 
@@ -122,15 +130,6 @@ def _title_duplicate_reason(title_a: str, title_b: str) -> str | None:
     return None
 
 
-def _rel_key_for_type(type_key: str) -> str | None:
-    """Relation property key carrying outbound 1-hop links for a content type."""
-    if type_key == "wiki_entity":
-        return "wiki_relations"
-    if type_key == "wiki_concept":
-        return "wiki_related"
-    return None
-
-
 def _prop(obj: dict, key: str) -> dict | None:
     """Return the first property dict on ``obj`` matching ``key`` (or None)."""
     for p in obj.get("properties", []) or []:
@@ -141,7 +140,7 @@ def _prop(obj: dict, key: str) -> dict | None:
 
 def _outbound(obj: dict) -> list[str]:
     """Parse the type-appropriate outbound relation array → list of id strings."""
-    rel_key = _rel_key_for_type(_type_of(obj))
+    rel_key = rel_key_for_type(_type_of(obj))
     if rel_key is None:
         return []
     prop = _prop(obj, rel_key)
@@ -253,7 +252,7 @@ def wiki_lint(
     Sequential pipeline: enumerate
     once → QA#25 schema gate (3 branches) → filter content objects + counts →
     resolve the needs-review tag → fetch each object (per-run cache, D1 backlinks)
-    → run the ten-check battery → opt-in duplicate sweep → severity post-filter →
+    → run the thirteen-check battery → opt-in duplicate sweep → severity post-filter →
     summary → WikiLog receipt.
 
     The duplicate sweep is OPT-IN (``include_duplicates=True``) and can exceed the
@@ -543,6 +542,84 @@ def wiki_lint(
                 findings.append(_finding(
                     "low", "oversized", o, space_id,
                     f"description is {len(desc)} chars (> {config.lint_oversized_chars()})",
+                ))
+
+        # (j) link_dangling (High) / link_index_missing (Medium) — typed links (#1486).
+        # Read-only over the single enumeration. A link with a missing endpoint or
+        # Source, or with no Source at all, is dangling; a sound link whose endpoints
+        # do not index each other in wiki_relations/wiki_related is index-missing
+        # (a dangling link is not also reported index-missing).
+        # Anytype's delete only archives (``archived: true``): an archived object is as
+        # missing as an absent one, and an archived link or entity is not itself checked.
+        objects_by_id = {
+            o["id"]: o
+            for o in all_objects
+            if isinstance(o, dict) and o.get("id") and o.get("archived") is not True
+        }
+        for link_obj in all_objects:
+            if (
+                not isinstance(link_obj, dict)
+                or _type_of(link_obj) != LINK_TYPE_KEY
+                or link_obj.get("archived") is True
+            ):
+                continue
+            rec = parse_link(link_obj)
+            if rec is None:
+                findings.append(_finding(
+                    "high", "link_dangling", link_obj, space_id,
+                    "link is malformed (needs one from, one to, a label)",
+                ))
+                continue
+            problems = [
+                f"missing endpoint {end}" for end in (rec.from_id, rec.to_id)
+                if end not in objects_by_id
+            ] + [
+                f"missing source {sid}" for sid in rec.source_ids
+                if sid not in objects_by_id
+            ]
+            if not rec.source_ids:
+                problems.append("no source")
+            if problems:
+                findings.append(_finding(
+                    "high", "link_dangling", link_obj, space_id,
+                    f"link {rec.id} ({rec.label}) is dangling: {', '.join(problems)}",
+                ))
+                continue
+            for end, other in ((rec.from_id, rec.to_id), (rec.to_id, rec.from_id)):
+                end_key = rel_key_for_type(_type_of(objects_by_id[end]))
+                if end_key is None:
+                    continue
+                if other not in _parse_relation_elements(
+                    (_prop(objects_by_id[end], end_key) or {}).get("objects")
+                ):
+                    findings.append(_finding(
+                        "medium", "link_index_missing", link_obj, space_id,
+                        f"link {rec.id} ({rec.label}): {end} does not list {other} "
+                        f"in {end_key}",
+                    ))
+                    break
+
+        # (k) source_dangling (High) — an entity or concept whose wiki_sources lists an id
+        # that resolves to no object (a deleted Source). Same resolution as link_dangling:
+        # the single enumeration. One way to get here is a write that reached the server
+        # while the client saw an error, after which remember deleted the Source.
+        for o in all_objects:
+            if (
+                not isinstance(o, dict)
+                or rel_key_for_type(_type_of(o)) is None
+                or o.get("archived") is True
+            ):
+                continue
+            missing = [
+                sid
+                for sid in _parse_relation_elements((_prop(o, "wiki_sources") or {}).get("objects"))
+                if sid not in objects_by_id
+            ]
+            if missing:
+                findings.append(_finding(
+                    "high", "source_dangling", o, space_id,
+                    f"object {o['id']} ({_object_title(o)}) lists missing source(s): "
+                    f"{', '.join(missing)}",
                 ))
 
         # (i) empty_type (Informational) — one per content type with zero objects

@@ -30,6 +30,7 @@ The wiki is a small set of Anytype types created by `wiki_bootstrap`:
 | `wiki_query` | a filed Q&A from `wiki_query` | `wiki_question`, `wiki_answer`, `wiki_asked_at`, `wiki_drew_from` |
 | `wiki_source` | provenance of an ingest/remember | `wiki_url`/`wiki_file_path`, `wiki_excerpt`, `wiki_summary` (ingest only), source type tag, timestamps |
 | `wiki_log` | append-only audit receipt per run | `wiki_action`, `wiki_notes`, `wiki_timestamp`, `wiki_schema_version` |
+| `wiki_link` | a typed, sourced relation between two entities/concepts | `wiki_link_from`, `wiki_link_to`, `wiki_link_label`, `wiki_link_sources` |
 | `wiki_comparison` | (reserved) | — |
 
 Objects carry **properties, not body text** — Anytype silently drops a `body`
@@ -49,11 +50,25 @@ same backbone:
    decoding (temp 0 + fixed seed) so re-runs converge (known-limitations §6).
 2. **Resolve** — each subject's title is matched against existing objects
    (§5 below) to decide *update existing* vs *create new*.
-3. **Consolidate** — on an update, an LLM merges the new facts into the existing
-   `wiki_facts`/`wiki_definition` (§4 below). On a create, the object is created
-   with properties only.
+3. **Consolidate / write facts** — differs per tool:
+   - `wiki_remember`: each target is read fresh once per batch (a search hit may carry no
+     properties) and cached, then updated after each write. On an update, an LLM merges
+     the new facts into the existing `wiki_facts`/`wiki_definition` (§4 below); the
+     deterministic merge is the fallback whenever the rewrite fails the guard. On a
+     create, the object is created with properties only. The batch's Source is created
+     right before the first write that needs it, and deleted again (best effort,
+     `source_cleanup_failed` if that fails) when no object or link of that batch refers
+     to it.
+   - `wiki_ingest`: no LLM merge. An update appends the page's units as the page
+     Source's own `## Source:` section deterministically (duplicates tagged `[also:]`);
+     the model only judges contradictions afterwards, against linked peers and the
+     object's own earlier sections. A create writes one section, properties only.
 4. **Relations** — named `{from, to, label}` links are written **bidirectionally**
-   between resolved subjects (`wiki_relations`/`wiki_related`).
+   between resolved subjects: a typed `wiki_link` object (free label, Source) per relation, plus the `wiki_relations`/`wiki_related` 1-hop index.
+   If the second side of the index fails, the first is restored and the run reports
+   `relation_rollback` with `status: partial`. In `wiki_ingest` a model spelling is
+   resolved to an object through the primary-subject plan's own rename report, never
+   through a marker the plan did not use.
 5. **WikiLog** — one audit receipt per run, carrying the action and notes
    (supersede/conflict details).
 6. **Reindex** — the new/updated objects are embedded into Qdrant
@@ -66,12 +81,21 @@ writes: `wiki_remember` (incl. `/wiki-learn`), `wiki_ingest`, or a human editing
 in Anytype. The consolidation prompt (`wiki/prompts/consolidate.md`) classifies
 each incoming fact as `merge | add | supersede | keep | conflict`:
 
-- **supersede** → the old fact is replaced in the consolidated text (audited in
-  the WikiLog).
+- **supersede** → the old fact line is kept and tagged `[superseded: <new
+  source>]`; the new value sits in the writer's own `## Source:` section (the
+  superseded line is never deleted).
 - **conflict** → **both** facts are kept, the new one is inline-tagged
   `[CONFLICT: reason]`, and `wiki_status` flips to **`needs-review`**. Nothing is
   silently overwritten. `wiki_ingest` additionally writes `wiki_contradictions`
   links between the conflicting objects (cross-object detection, #287).
+
+Facts are stored as one `## Source: <label> (id:<Source id>)` section per source
+(`wiki/facts_sections.py`). Every write is canonical text, and every write goes
+through one guard (`no_lines_dropped`): it keeps every earlier line and tag, allows
+only the writer's own section, new lines that are the input's (no tag, no page
+citation the input lacked), and the writer's flags, and refuses an empty writer
+section. Page and note text is neutralised first: every run of `#` collapses to one and
+`(id:` is defused, so content can never forge a `## Source:` heading.
 
 `wiki_lint` then surfaces unresolved contradictions and staleness; a human
 resolves them. **Important nuance:** whether a correction lands as *supersede*
@@ -79,7 +103,8 @@ resolves them. **Important nuance:** whether a correction lands as *supersede*
 Phrasing nudges it — "X replaced Y / Y is no longer true" leans supersede; "X,
 but actually Y" leans conflict. So narrating a correction does not always reach
 clean truth on its own; you may then need to review the flagged object and edit
-out the stale clause. Re-asserting the *same* knowledge converges to a no-op.
+out the stale clause. Re-asserting the *same* knowledge with the same source note adds
+nothing to the facts (the new Source still joins `wiki_sources`).
 
 ## 5. Entity resolution & duplicate handling
 

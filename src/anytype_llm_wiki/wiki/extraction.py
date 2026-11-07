@@ -21,7 +21,7 @@ import httpx
 
 from . import config
 from . import profile
-from .util import scrub_credentials, strip_control_chars
+from .util import fence_safe, fill_template, scrub_credentials, strip_control_chars
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ def _fill_prompt(template: str, source: str, subject_block: str) -> str:
     """Fill ``{source}`` and ``{subject}`` in one pass, so text inside the page or
     the hint that looks like a placeholder is never substituted."""
     values = {"{source}": source, "{subject}": subject_block}
-    return _PLACEHOLDER_RE.sub(lambda m: values[m.group(0)], template)
+    return _PLACEHOLDER_RE.sub(lambda m: fence_safe(values[m.group(0)]), template)
 
 
 def _budget_chars(template: str, subject_block: str) -> int:
@@ -410,7 +410,8 @@ def consolidate(
     new_facts: str,
     kind: str,
     space_id: str,
-    **kw,
+    *,
+    source_label: str = "",
 ) -> dict:
     """Run LLM consolidation for one resolved subject (#289 D1/D2).
 
@@ -420,17 +421,24 @@ def consolidate(
     repair retry on malformed JSON. On a not-pulled model OR malformed-after-retry
     returns a degraded result whose ``error`` contains ``consolidation_degraded``
     (and ``ollama_model_not_pulled`` on the not-pulled path).
+
+    ``existing_text`` is the sectioned facts text; ``source_label`` (keyword) names this call's section
+    (Aldeia-IT/aldeia-box#1486). The caller judges
+    the rewrite with the facts_sections guard before writing it.
     """
     base = os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()
     base = base.rstrip("/")
 
     property_name = "wiki_definition" if kind == "concept" else "wiki_facts"
-    prompt = (
-        _load_consolidate_prompt()
-        .replace("{kind}", str(kind))
-        .replace("{property_name}", property_name)
-        .replace("{existing_facts}", existing_text or "")
-        .replace("{new_knowledge}", new_facts or "")
+    prompt = fill_template(
+        _load_consolidate_prompt(),
+        {
+            "{kind}": str(kind),
+            "{property_name}": property_name,
+            "{source_label}": str(source_label or ""),
+            "{existing_facts}": existing_text or "",
+            "{new_knowledge}": new_facts or "",
+        },
     )
 
     try:

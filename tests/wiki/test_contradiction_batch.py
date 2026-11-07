@@ -61,7 +61,19 @@ def model(monkeypatch):
 
 
 def _judge(checks):
+    """Each check's contradictions (or its exception); ``_judge_full`` keeps duplicates."""
+    return {
+        cid: out if isinstance(out, Exception) else out["contradictions"]
+        for cid, out in _judge_full(checks).items()
+    }
+
+
+def _judge_full(checks):
     return ingest._judge_contradiction_checks(checks, "space", None, None)
+
+
+def _verdict(contradictions, duplicates=()):
+    return {"contradictions": list(contradictions), "duplicates": list(duplicates)}
 
 
 def _batch_answer(*entries):
@@ -265,9 +277,9 @@ class TestRunContradictionChecks:
     def test_verdicts_become_links_warnings_and_counts(self, monkeypatch, writes):
         state, _patches, reader = writes
         monkeypatch.setattr(ingest, "_judge_contradiction_checks", lambda *a: {
-            "check_1": [{"object_id": "p1", "reason": "r"}],
+            "check_1": _verdict([{"object_id": "p1", "reason": "r"}]),
             "check_2": httpx.ConnectError("down"),
-            "check_3": [],
+            "check_3": _verdict([]),
         })
         result = {"warnings": [], "contradictions_detected": 0}
         checks = [_check(1, ["p1"]), _check(2, ["p2"], kind="concept"), _check(3, ["p3"])]
@@ -284,9 +296,9 @@ class TestRunContradictionChecks:
         # target was read before that write. Its own link to p2 must keep obj-1.
         state, _patches, reader = writes
         monkeypatch.setattr(ingest, "_judge_contradiction_checks", lambda *a: {
-            "check_1": [{"object_id": "obj-2", "reason": "r"}],
-            "check_2": [{"object_id": "obj-1", "reason": "r"},
-                        {"object_id": "p2", "reason": "r"}],
+            "check_1": _verdict([{"object_id": "obj-2", "reason": "r"}]),
+            "check_2": _verdict([{"object_id": "obj-1", "reason": "r"},
+                                 {"object_id": "p2", "reason": "r"}]),
         })
         result = {"warnings": [], "contradictions_detected": 0}
         checks = [_check(1, ["obj-2"]), _check(2, ["obj-1", "p2"])]
@@ -307,7 +319,7 @@ class TestRunContradictionChecks:
 
         monkeypatch.setattr(ingest, "_write_contradiction_links", boom)
         monkeypatch.setattr(ingest, "_judge_contradiction_checks", lambda *a: {
-            "check_1": [{"object_id": "p1", "reason": "r"}],
+            "check_1": _verdict([{"object_id": "p1", "reason": "r"}]),
         })
         result = {"warnings": [], "contradictions_detected": 0}
 

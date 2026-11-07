@@ -11,6 +11,7 @@
 """
 
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -113,6 +114,7 @@ def plan_primary_subject(
     marked: str | None,
     *,
     strip_titles: bool = False,
+    spellings: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Name the hinted primary subject among extracted candidates (Aldeia-IT/aldeia-box#1430 D1).
 
@@ -146,25 +148,45 @@ def plan_primary_subject(
         marked: the model's ``primary_subject`` field, any type (ignored unless a
             non-empty string).
         strip_titles: the space strips leading title words.
+        spellings: optional out-parameter, filled with ``{input spelling: final name}``
+            for every input name the plan renamed, collapsed into another candidate or
+            dropped as a duplicate of the primary, plus the model's ``marked`` spelling
+            only when step 2 used it (Aldeia-IT/aldeia-box#1486 IR1-B1). A marker the plan
+            did not use is never listed.
 
     Returns:
         ``(candidates, warnings)``: new candidate dicts in their original order.
     """
     strip = _title_stripper(strip_titles)
     planned = [dict(c, name=strip(c["name"])) for c in candidates]
+    # Input spellings each planned candidate stands for (its own, plus those collapsed into it).
+    origins: list[list[str]] = [[c["name"]] for c in candidates]
     if strip_titles:
         # Names that become equal once stripped collapse; the first one wins.
         deduped: list[dict] = []
-        seen: set[str] = set()
-        for cand in planned:
+        deduped_origins: list[list[str]] = []
+        seen: dict[str, int] = {}
+        for cand, origin in zip(planned, origins):
             key = normalize_title(cand["name"])
             if key in seen:
+                deduped_origins[seen[key]].extend(origin)
                 continue
-            seen.add(key)
+            seen[key] = len(deduped)
             deduped.append(cand)
-        planned = deduped
+            deduped_origins.append(list(origin))
+        planned, origins = deduped, deduped_origins
+
+    def _record(kept: list[dict], kept_origins: list[list[str]], used_marker: str | None = None) -> None:
+        if spellings is None:
+            return
+        for cand, origin in zip(kept, kept_origins):
+            for spelling in [*origin, *([used_marker] if used_marker and cand.get("primary") else [])]:
+                if normalize_title(spelling) != normalize_title(cand["name"]):
+                    spellings[spelling] = cand["name"]
+
     hint = hint.strip() if isinstance(hint, str) else ""
     if not hint:
+        _record(planned, origins)
         return planned, []
 
     hint = strip(hint)
@@ -181,18 +203,26 @@ def plan_primary_subject(
         )
 
     matches = [i for i, c in enumerate(planned) if is_hint(c["name"])]
+    used_marker: str | None = None
     if not matches and isinstance(marked, str) and marked.strip():
         key = normalize_title(strip(marked.strip()))
         matches = [
             i for i, c in enumerate(planned) if normalize_title(c["name"]) == key
         ][:1]
+        used_marker = marked if matches else None
     if not matches:
+        _record(planned, origins)
         return planned, [
             f'subject_hint_unmatched: no extracted entity is the primary subject "{hint}"'
         ]
     first, extras = matches[0], set(matches[1:])
     planned[first].update(name=hint, primary=True)
-    return [c for i, c in enumerate(planned) if i not in extras], []
+    for extra in extras:
+        origins[first].extend(origins[extra])
+    keep = [i for i in range(len(planned)) if i not in extras]
+    kept = [planned[i] for i in keep]
+    _record(kept, [origins[i] for i in keep], used_marker)
+    return kept, []
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +246,51 @@ _CONTROL_CHAR_RE = re.compile(
     "\U000e0020-\U000e007f"  # tag block
     "]"
 )
+
+
+_FENCE_CLOSER_RE = re.compile(r"</\s*([A-Za-z_][A-Za-z0-9_]*)\s*>")
+_FENCE_FALLBACK_TAGS = frozenset({"question", "context", "checks"})
+
+
+@functools.lru_cache(maxsize=1)
+def _fence_closer_re() -> re.Pattern[str]:
+    """Matches ``</`` before a fence tag name any prompt template closes (derived, not listed).
+
+    The names come from the closing tags found in ``prompts/*.md`` plus the inline
+    fallback templates, so a new fence is covered when its template is added.
+    """
+    names = set(_FENCE_FALLBACK_TAGS)
+    prompts = Path(__file__).parent / "prompts"
+    for path in prompts.glob("*.md"):
+        try:
+            names.update(m.group(1).lower() for m in _FENCE_CLOSER_RE.finditer(path.read_text("utf-8")))
+        except OSError:
+            continue
+    alternation = "|".join(sorted(map(re.escape, names), key=len, reverse=True))
+    return re.compile(rf"</(?=\s*(?:{alternation})\s*>)", re.IGNORECASE)
+
+
+def fence_safe(text: str) -> str:
+    """``text`` with the ``</`` of every prompt fence's closing tag written ``<\\/``.
+
+    Prompts fence caller text between tags (``<new_knowledge>...</new_knowledge>``) and
+    call the fenced part DATA. A value holding a real closing tag would end the fence
+    early and let the rest read as instructions. Only the fence tag names the prompt
+    templates use are touched; ``</div>`` and code text pass through unchanged.
+    """
+    return _fence_closer_re().sub("<\\\\/", text) if isinstance(text, str) else str(text)
+
+
+def fill_template(template: str, values: dict[str, str]) -> str:
+    """Fill ``{placeholder}`` keys of ``template`` in one pass with fence-safe values.
+
+    ``values`` maps the whole placeholder (``"{source_label}"``) to its text. One
+    pass means text that looks like another placeholder is never substituted again.
+    """
+    if not values:
+        return template
+    pattern = re.compile("|".join(re.escape(k) for k in values))
+    return pattern.sub(lambda m: fence_safe(values[m.group(0)] or ""), template)
 
 
 def strip_control_chars(text: str) -> str:
@@ -275,6 +350,27 @@ def _parse_relation_elements(elements) -> list[str]:
         if val:
             out.append(val)
     return out
+
+
+# Relation property keys are real objects-format properties on the wiki types
+# (types_schema.WIKI_TYPES): Entity uses ``wiki_relations``; Concept uses
+# ``wiki_related``. They hold the untyped index of related objects; the typed,
+# sourced edge is a ``wiki_link`` object (``wiki/links.py``).
+_REL_KEY_BY_TYPE = {"wiki_entity": "wiki_relations", "wiki_concept": "wiki_related"}
+_REL_KEY_BY_KIND = {"entity": _REL_KEY_BY_TYPE["wiki_entity"], "concept": _REL_KEY_BY_TYPE["wiki_concept"]}
+
+
+def rel_key_for_type(type_key: str) -> str | None:
+    """The relation index property key of a content type; None for any other type.
+
+    The one type to key map: ingest, remember, lint, query and repair all read it.
+    """
+    return _REL_KEY_BY_TYPE.get(type_key)
+
+
+def _rel_key(kind: str) -> str:
+    """The relation index property key for an object kind (entity/concept)."""
+    return _REL_KEY_BY_KIND.get(kind, "wiki_relations")
 
 
 def _relation_ids(obj: dict, prop_key: str) -> list[str]:
@@ -345,7 +441,7 @@ def scrub_credentials(url: str) -> str:
 
 # A URL in prose ends at whitespace or a closing delimiter of the markup around
 # it: markdown link ``)``/``]``, autolink ``>``, or a quote.
-_TEXT_URL_RE = re.compile(r"""https?://[^\s)\]>"']+""")
+_TEXT_URL_RE = re.compile(r"""https?://[^\s)\]>"']+""", re.IGNORECASE)
 
 
 def scrub_text_urls(text: str) -> str:

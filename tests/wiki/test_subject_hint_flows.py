@@ -7,6 +7,7 @@ extraction, Source/WikiLog writes, relation writes, reindex) are stubbed.
 import pytest
 
 from anytype_llm_wiki.wiki import ingest, remember
+from anytype_llm_wiki.wiki.links import LinkWriteResult
 
 SPACE = "space-1430"
 URL = "https://example.com/bimba"
@@ -44,6 +45,9 @@ class FakeRead:
     def close(self):
         pass
 
+    def get_object(self, space_id, object_id):
+        return {"id": object_id, "properties": []}
+
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
@@ -76,11 +80,11 @@ def run(monkeypatch):
         monkeypatch.setattr(ingest, "_maybe_reindex", lambda *a, **k: None)
         monkeypatch.setattr(ingest, "detect_contradictions", lambda *a, **k: [])
 
-        def fake_rel(client_, space_id, relations, kind_by_id):
-            calls["relations"].extend(relations)
-            return len(relations), []
+        def fake_links(client_, read_client_, space_id, specs, **kw):
+            calls["relations"].extend((s.from_id, s.to_id, s.label) for s in specs)
+            return LinkWriteResult(created=len(specs))
 
-        monkeypatch.setattr(ingest, "_write_bidirectional_relations", fake_rel)
+        monkeypatch.setattr(ingest, "write_links", fake_links)
         kwargs = {} if hint is None else {"subject_hint": hint}
         source = URL if is_url else "/tmp/page.md"
         result = ingest._run_ingest(client, source, SPACE, None, [], **kwargs)
@@ -100,6 +104,7 @@ EXTRACTED = {
     ],
     "concepts": [],
     "primary_subject": "Manoel dos Reis Machado",
+    "relations": [{"from": "Manoel dos Reis Machado", "to": "Salvador", "label": "related"}],
 }
 
 
@@ -143,6 +148,7 @@ class TestIngestSubjectHint:
             "entities": [{"name": "Mestre Onça", "description": "a"},
                          {"name": "Onça (Rio)", "description": "b"}],
             "concepts": [],
+            "relations": [{"from": "Mestre Onça", "to": "Onça (Rio)", "label": "related"}],
         }
         result, client, calls = run(extracted, hint="Onça (São Paulo)")
         assert _titles(result) == ["Onça (São Paulo)", "Onça (Rio)"]
@@ -269,7 +275,9 @@ class TestIngestTitleStrip:
         monkeypatch.setenv("WIKI_STRIP_NAME_TITLES_SPACES", SPACE)
         extracted = {"entities": [{"name": "Mestre Bimba", "description": "a"},
                                   {"name": "Mestre Pastinha", "description": "b"}],
-                     "concepts": []}
+                     "concepts": [],
+                     "relations": [{"from": "Mestre Bimba", "to": "Mestre Pastinha",
+                                    "label": "student of"}]}
         result, _client, calls = run(extracted)
         assert len(calls["relations"]) == 1
         assert result["relations_created"] == 1
@@ -340,6 +348,7 @@ class TestRememberTitleStrip:
     @pytest.fixture
     def apply(self, monkeypatch):
         seen: dict = {"relations": []}
+        monkeypatch.setattr(remember, "AnytypeReadClient", FakeRead)
         monkeypatch.setattr(remember, "_create_remember_source", lambda *a, **k: "src-1")
         monkeypatch.setattr(remember, "_resolve_wiki_source_type_tag", lambda *a, **k: ("t", False))
         monkeypatch.setattr(remember, "_resolve_wiki_action_tag", lambda *a, **k: ("t", False))
@@ -350,11 +359,11 @@ class TestRememberTitleStrip:
                           "fact_actions": [], "conflicts": []},
         )
 
-        def fake_rel(client, space_id, relations, kind_by_id):
-            seen["relations"].extend(relations)
-            return len(relations), []
+        def fake_links(client, read_client, space_id, specs, **kw):
+            seen["relations"].extend((s.from_id, s.to_id, s.label) for s in specs)
+            return LinkWriteResult(created=len(specs))
 
-        monkeypatch.setattr(remember, "_write_bidirectional_relations", fake_rel)
+        monkeypatch.setattr(remember, "write_links", fake_links)
 
         def go(items, relations=(), client=None):
             client = client or FakeClient()
@@ -402,7 +411,7 @@ class TestRememberTitleStrip:
             relations=[{"from": "Mestre Bimba", "to": "Salvador", "label": "born_in"}],
         )
         ids = {c["name"]: c["id"] for c in client.created}
-        assert seen["relations"] == [(ids["Bimba"], ids["Salvador"], "born_in")]
+        assert seen["relations"] == [(ids["Bimba"], ids["Salvador"], "born in")]
         assert not any(w.startswith("relation_endpoint_unresolved") for w in result["warnings"])
 
     def test_existing_endpoint_lookup_strips_in_a_listed_space(self, monkeypatch):

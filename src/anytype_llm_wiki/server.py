@@ -225,9 +225,11 @@ def wiki_remember(
     -> relations -> WikiLog -> reindex pipeline. The consolidation step merges new
     facts into an existing entity/concept's wiki_facts/wiki_definition rather than
     overwriting them: equivalent facts are deduplicated, genuinely new facts are
-    added, superseding facts replace old ones (audited in the WikiLog), and
-    contradictions are flagged (wiki_status=needs-review, never silently
-    overwritten). Re-asserting the same knowledge converges to a no-op.
+    added as a per-source section, superseded facts are kept and tagged
+    [superseded: <new source>], and contradictions are flagged
+    (wiki_status=needs-review, never silently overwritten). Re-asserting the
+    same knowledge with the same source note adds nothing to the facts; the new
+    Source still joins wiki_sources.
 
     Naming: subject_hint names the primary subject even when extraction finds
     subjects; the primary gets the whole knowledge text. Extracted subjects that

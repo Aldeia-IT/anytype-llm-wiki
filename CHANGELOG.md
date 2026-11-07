@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-06
+
+Typed, sourced links and facts per source (Aldeia-IT/aldeia-box#1486). Schema 0.5.0: run
+`wiki_bootstrap` on every space before using any wiki tool, and read the "Schema 0.5.0" section of
+MIGRATIONS.md first.
+
+### Added
+
+- **Typed links.** A new `wiki_link` object type (`wiki_link_from`, `wiki_link_to`, `wiki_link_label`,
+  `wiki_link_sources`) stores each relation between two entities or concepts with a free label taken
+  from the page (lowercased, trimmed) and the Source it came from. `wiki_ingest` and
+  `wiki_remember` results carry `relations_created` (links created) and `relations_sourced` (an
+  existing link that gained a Source). The untyped `wiki_relations`/`wiki_related` lists remain the
+  1-hop index.
+- **Facts per source.** `wiki_facts`/`wiki_definition` hold one `## Source: <label>` section per
+  source. A new source adds its section and never overwrites; duplicates are tagged `[also: <label>]`;
+  contradictions with earlier sections are flagged and both versions kept. A deterministic guard
+  rejects any rewrite that drops an earlier line. `wiki_sources` accumulates.
+- **Query link notes and synthesis rule.** `wiki_query` neighbour entries in `sources_consulted` gain
+  `links` (`label`, `from`, `to`, `sources`, all ids), and the synthesis prompt prints each link with
+  its Source titles before the neighbour's text. A synthesis rule explains the section headings and
+  the `[superseded]`, `[CONFLICT]` and `[also]` markers.
+- **Lint.** `link_dangling` (high), `link_index_missing` (medium) and `source_dangling` (high: an entity
+  or concept whose `wiki_sources` names an object that no longer exists); `wiki_lint` now runs thirteen
+  checks.
+- **`repair-chain-relations` CLI.** Clears the meaningless chain relations earlier ingests wrote, only
+  in a space proven ingest-only, behind a read-only dry run, a plan digest and a backup file. See
+  MIGRATIONS.md.
+- **New result keys and warnings.** `wiki_ingest` and `wiki_remember` results carry
+  `relations_created` and `relations_sourced`. New warnings: `relation_endpoint_unresolved: <name>`,
+  `relations_capped`, `relation_rollback: ...`, `relation_index_read_failed: ...`,
+  `relation_index_write_failed: ...`, `facts_guard_rejected` (ingest names the object), and
+  `facts_read_failed: <name>: <reason>`. A failed second-side link write makes the run `partial`
+  and its `relation_rollback` note also lands in the WikiLog notes.
+- **More result keys and warnings.** `wiki_ingest` results carry `self_conflicts_flagged` (a new
+  section judged against the object's own earlier sections) and `duplicates_tagged` (units tagged
+  `[also: <label>]`). `wiki_remember` warns `consolidation_rewrite_rejected` when the model's rewrite
+  fails the guard (the deterministic merge is written instead) and `source_cleanup_failed` (with
+  `status: partial`) when deleting an unused Source fails. The `sources_overwrite_on_conflict` warning
+  of earlier `wiki_remember` versions is gone: sources never overwrite.
+- **Source cleanup.** `wiki_remember` creates its Source right before the first write that needs it and
+  deletes it again, best effort, when no object or link of that batch refers to it (judged per batch,
+  also inside a multi-batch drain). A write that reached the server while the client saw an error can
+  leave a reference to the deleted Source; `wiki_lint` reports it (`source_dangling`, or
+  `link_dangling` for a link). See known-limitations section 14.
+
+### Changed
+
+- **`wiki_remember` supersede keeps the old fact line**, tagged `[superseded: <new source>]`, instead of
+  replacing it. Re-asserting the same knowledge adds nothing to the facts but records a new Source.
+  `wiki_remember` still links a hint to its secondary subjects with a `related` link.
+- Ingest no longer chains the entities of a page into one another.
+- **Safer facts writes (review round 1).** Content can no longer forge a `## Source:` heading (every
+  `#` run collapses, `(id:` is defused) on any write. Ingest's create and remember's create and
+  fallback writes go through the same canonical text and guard as an update. The guard refuses
+  `[also:]`/`[superseded:]` tags or page citations on the writer's own new lines that the input
+  lacked, and an empty writer section. A relation spelling is aliased only to the candidate the
+  primary-subject plan kept for it (a hint's duplicates and title-stripped twins resolve; an unused
+  `primary_subject` marker no longer moves a link onto the hinted entity). The Source label scrubber is
+  case-insensitive on the scheme, drops userinfo and query of any scheme and elides every path segment
+  of 20 or more characters. `wiki_remember` reads each target fresh once per batch and creates its
+  Source lazily, right before the first write that needs it.
+- **Prompt fences (security).** Text from a caller, a page or stored facts can no longer close a prompt
+  fence (`</` is written `<\/`), and prompts are filled in one pass so a value is never expanded as a
+  placeholder. A URL glued to a word character (`x_postgres://u:pw@host`) is scrubbed from a Source label.
+- **`repair-chain-relations`.** The printed plan escapes control characters in names. A `wiki_link`
+  with one from-id and one to-id protects its pair even without a label. `--confirm-untagged` lists the
+  space once. A mixed space refuses as `kind` before the confirm list is checked.
+
+### Follow-ups
+
+- Per-entity current summary: Aldeia-IT/aldeia-box#1493. Re-ingest of repaired spaces:
+  Aldeia-IT/aldeia-box#1496. Per-unit consolidate verdicts: Aldeia-IT/aldeia-box#1497.
+
 ## [0.9.1] - 2026-11-06
 
 Faster `wiki_ingest` (Aldeia-IT/aldeia-box#1485). The model's decode time and the number of calls

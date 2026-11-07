@@ -20,6 +20,16 @@ new claim (conflicting values, dates, mutually exclusive statements). Mere absen
 of overlap is NOT a contradiction. A check never sees another check's claim or
 candidates.
 
+Some candidates are the same object's own earlier sources: their `object_id` ends
+in `#s` and a number, and their name says "earlier source". For those, judge two
+things. A candidate that asserts something incompatible with the new claim is a
+`contradictions` entry as for any other candidate. A new unit that merely restates
+a unit of such a candidate (same fact, other words or spelling) is a `duplicates`
+entry: `earlier` is that earlier unit copied word for word, `new` is the new unit
+copied word for word from the new claim, `object_id` is the candidate holding it.
+A claim that adds detail beyond the earlier unit, or differs from it, is not a
+duplicate. Only candidates ending in `#s<number>` can appear in `duplicates`.
+
 ## INPUT
 
 <checks>
@@ -31,7 +41,7 @@ candidates.
 Return ONLY a single JSON object matching this schema (no prose, no backticks),
 with exactly one entry for every check_id of the input, in input order:
 
-{"results": [{"check_id": "<check_id>", "contradictions": [{"object_id": "<id from that check's candidates>", "reason": "<1-sentence explanation>"}]}]}
+{"results": [{"check_id": "<check_id>", "contradictions": [{"object_id": "<id from that check's candidates>", "reason": "<1-sentence explanation>"}], "duplicates": [{"object_id": "<a #s candidate id of that check>", "earlier": "<earlier unit>", "new": "<new unit>"}]}]}
 
 A check where no candidate contradicts the new claim gets
-`"contradictions": []`.
+`"contradictions": []`, and one with no restated unit gets `"duplicates": []`.
