@@ -235,6 +235,8 @@ def _query(monkeypatch, question="Who is Mestre Bimba?"):
     # Tier 1 makes every object a seed, so no object would be a neighbour. Force Tier 2
     # with the first entity as the only seed; its relation index makes the rest 1-hop
     # neighbours (a neighbour's links are those to its discovering seed, spec section 8).
+    # So link notes in Tier 1 are not pinned here: there every object is a seed and has no
+    # discovering seed, hence no neighbour link notes (nothing to show, by design).
     monkeypatch.setenv("WIKI_INDEX_THRESHOLD", "1")
     monkeypatch.setattr(
         q.indexer,
