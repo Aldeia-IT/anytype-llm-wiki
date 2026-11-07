@@ -6,6 +6,15 @@ STUB: signatures only, every body raises ``NotImplementedError``.
 from __future__ import annotations
 
 
+class RepairRefusedError(Exception):
+    """A refused repair; writes nothing."""
+
+    reason: str
+    exit_code: int
+    live_digest: str
+    plan: dict
+
+
 def classify_space(
     objects: list[dict], *, confirmed_untagged: frozenset[str] = frozenset()
 ) -> dict:

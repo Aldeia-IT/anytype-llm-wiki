@@ -5,8 +5,7 @@ untagged ``remember ...`` log is ``mixed``) and T19 (write mode: exit 2 / 3 / 1,
 ids in the digest, link-backed ids kept, fsynced backup before the first PATCH, file and
 symlink refused, lock busy, partial) for Aldeia-IT/aldeia-box#1486 (AC4, AC13).
 Anytype is the ``FakeWiki`` respx fake; dry-run tests use ``read_only=True`` and assert zero
-writes. The result dicts' key names are not fixed by the spec beyond ``digest``,
-``untagged`` and the plan items, so the helpers below find the kind and the items by value.
+writes. Result keys and refusals follow spec section 9 (D16).
 """
 
 import json
@@ -18,6 +17,7 @@ import pytest
 import respx
 
 from anytype_llm_wiki.wiki import cli, repair
+from anytype_llm_wiki.wiki.repair import RepairRefusedError
 from anytype_llm_wiki.wiki.util import space_ingest_lock
 
 from .fakes import ANYTYPE_BASE, SPACE, FakeWiki, prop_value
@@ -63,50 +63,16 @@ def _entity(oid, name, rels=()):
 
 
 def _kind(result):
-    """The first classification string found anywhere in a result dict."""
-    if isinstance(result, str):
-        return result if result in KINDS else None
-    if isinstance(result, dict):
-        for value in result.values():
-            found = _kind(value)
-            if found:
-                return found
-    if isinstance(result, list):
-        for value in result:
-            found = _kind(value)
-            if found:
-                return found
-    return None
+    return result["kind"]
 
 
 def _deep(result, key):
-    if isinstance(result, dict):
-        if key in result:
-            return result[key]
-        for value in result.values():
-            found = _deep(value, key)
-            if found is not None:
-                return found
-    return None
+    return result[key]
 
 
 def _items(plan):
-    """The plan items: dicts carrying ``object_id`` and ``clear``, wherever they sit."""
-    out = []
-
-    def walk(node):
-        if isinstance(node, dict):
-            if "object_id" in node and "clear" in node:
-                out.append(node)
-            else:
-                for v in node.values():
-                    walk(v)
-        elif isinstance(node, list):
-            for v in node:
-                walk(v)
-
-    walk(plan)
-    return out
+    """The plan items of a ``plan_chain_repair`` result (or its JSON form)."""
+    return plan["plan"]
 
 
 def _item(plan, object_id):
@@ -290,6 +256,29 @@ class TestClassifySpace:
         assert _kind(out) == "unknown"
         assert [u["id"] for u in _deep(out, "untagged")] == ["old-2"]
 
+    def test_mixed_is_decided_before_unknown(self):
+        objs = [
+            _log("l1", "ingest x", "ingest"),
+            _source("s2", "Agent note", "agent"),
+            _source("old-1", "Old page"),
+        ]
+        assert _kind(repair.classify_space(objs)) == "mixed"
+
+    def test_evidence_counts_actions_and_source_types(self):
+        objs = [
+            _log("l1", "ingest x", "ingest"),
+            _log("l2", "ingest y", "ingest"),
+            _log("l3", "remember n", "remember"),
+            _source("s1", "Page", "document"),
+            _source("s2", "Note", "agent"),
+        ]
+        evidence = repair.classify_space(objs)["evidence"]
+        assert evidence["actions"] == {"ingest": 2, "remember": 1}
+        assert evidence["source_types"] == {"document": 1, "agent": 1}
+
+    def test_result_keys(self):
+        assert set(repair.classify_space([])) == {"kind", "evidence", "untagged"}
+
     def test_confirmed_untagged_remember_log_is_mixed(self):
         objs = [_log("l1", "ingest x", "ingest"), _log("old-r", "remember an old note")]
         out = repair.classify_space(objs, confirmed_untagged=frozenset({"old-r"}))
@@ -299,11 +288,11 @@ class TestClassifySpace:
         objs = [_log("l1", "remember old note", "ingest")]
         assert _kind(repair.classify_space(objs)) == "mixed"
 
-    def test_untagged_remember_log_stays_untagged_until_confirmed(self):
+    def test_untagged_remember_log_is_mixed_even_when_unconfirmed(self):
         objs = [_log("l1", "ingest x", "ingest"), _log("old-r", "remember an old note")]
         out = repair.classify_space(objs)
         assert "old-r" in [u["id"] for u in _deep(out, "untagged")]
-        assert _kind(out) in ("unknown", "mixed")
+        assert _kind(out) == "mixed"
 
 
 # -- plan_chain_repair (T18, T19: link-backed ids) -------------------------
@@ -317,6 +306,19 @@ class TestPlanChainRepair:
         assert _kind(plan) == "ingest-only"
         assert HEX64.match(plan["digest"])
         _no_writes(fake)
+
+    @respx.mock
+    def test_plan_result_keys(self):
+        _fake(read_only=True)
+        plan = repair.plan_chain_repair(SPACE)
+        assert set(plan) == {
+            "space_id", "kind", "evidence", "untagged", "plan", "digest", "status", "error",
+            "warnings",
+        }
+        assert plan["space_id"] == SPACE and plan["status"] == "ok"
+        assert plan["error"] is None and plan["warnings"] == []
+        assert plan["evidence"]["actions"] == {"ingest": 1}
+        assert plan["evidence"]["source_types"] == {"document": 1}
 
     @respx.mock
     def test_plan_item_shape(self):
@@ -341,7 +343,7 @@ class TestPlanChainRepair:
         plan = repair.plan_chain_repair(SPACE)
         assert E3 in _item(plan, E1)["keep"]
         e3 = _item(plan, E3)
-        assert e3 is None or (_ids(e3["clear"]) == [] and E1 in e3["keep"])
+        assert _ids(e3["clear"]) == [] and E1 in e3["keep"]
 
     @respx.mock
     def test_without_a_link_the_pair_is_cleared_on_both_sides(self):
@@ -533,6 +535,14 @@ class TestCliWriteMode:
         assert fake.created == []
 
     @respx.mock
+    def test_objects_with_nothing_to_clear_are_not_patched(self, tmp_path, capsys):
+        fake = _fake(link="fwd")
+        digest = _live_digest(capsys)
+        assert _cli(*_write_args(digest, tmp_path / "b.json")) == 0
+        assert E3 not in {oid for oid, _ in fake.patch_attempts}
+        assert sorted(oid for oid, _ in fake.patch_attempts) == [C1, E1, E2]
+
+    @respx.mock
     @pytest.mark.parametrize("world", [{"remember_log": True}, {"ingest_log": False}, {"agent_source": True}])
     def test_mixed_or_unknown_space_is_refused_with_exit_2(self, world, tmp_path):
         fake = _fake(**world)
@@ -634,7 +644,7 @@ class TestBackup:
         digest = _live_digest(capsys)
         backup = tmp_path / "b.json"
         backup.write_text("precious")
-        assert _cli(*_write_args(digest, backup)) in (1, 2)
+        assert _cli(*_write_args(digest, backup)) == 2
         assert backup.read_text() == "precious" and fake.patch_attempts == []
 
     @respx.mock
@@ -645,7 +655,7 @@ class TestBackup:
         target.write_text("precious")
         link = tmp_path / "b.json"
         link.symlink_to(target)
-        assert _cli(*_write_args(digest, link)) in (1, 2)
+        assert _cli(*_write_args(digest, link)) == 2
         assert target.read_text() == "precious" and fake.patch_attempts == []
 
     @respx.mock
@@ -655,8 +665,20 @@ class TestBackup:
         target = tmp_path / "missing.json"
         link = tmp_path / "b.json"
         link.symlink_to(target)
-        assert _cli(*_write_args(digest, link)) in (1, 2)
+        assert _cli(*_write_args(digest, link)) == 2
         assert not target.exists() and fake.patch_attempts == []
+
+    @respx.mock
+    def test_fsync_error_exits_1_with_no_patch(self, tmp_path, capsys, monkeypatch):
+        fake = _fake()
+        digest = _live_digest(capsys)
+
+        def broken_fsync(fd):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "fsync", broken_fsync)
+        assert _cli(*_write_args(digest, tmp_path / "b.json")) == 1
+        assert fake.patch_attempts == []
 
     @respx.mock
     def test_unwritable_backup_location_exits_1_with_no_patch(self, tmp_path, capsys):
@@ -719,29 +741,91 @@ class TestLockAndPartial:
 
 
 class TestApplyChainRepair:
-    """The API behind write mode."""
+    """The API behind write mode: result keys and refusals (D16)."""
 
     @respx.mock
-    def test_apply_with_the_live_digest_clears_and_backs_up(self, tmp_path):
-        fake = _fake(link="rev")
+    def test_apply_with_the_live_digest_clears_backs_up_and_reports(self, tmp_path):
+        fake = _fake()
         digest = repair.plan_chain_repair(SPACE)["digest"]
         backup = tmp_path / "b.json"
         result = repair.apply_chain_repair(SPACE, expect_digest=digest, backup_path=str(backup))
-        assert result.get("status") != "partial"
+        assert set(result) == {
+            "space_id", "kind", "digest", "backup_path", "objects_modified", "ids_cleared",
+            "status", "error", "warnings",
+        }
+        assert result["status"] == "ok" and result["error"] is None
+        assert result["space_id"] == SPACE and result["kind"] == "ingest-only"
+        assert result["digest"] == digest and result["backup_path"] == str(backup)
+        assert result["objects_modified"] == 4 and result["ids_cleared"] == 5
         assert backup.exists()
         assert prop_value(fake.objects[E2], "wiki_relations") == ["ghost"]
-        assert E1 in prop_value(fake.objects[E3], "wiki_relations")
 
     @respx.mock
-    def test_apply_with_a_wrong_digest_writes_nothing(self, tmp_path):
+    def test_link_backed_pair_survives_apply(self, tmp_path):
+        fake = _fake(link="rev")
+        digest = repair.plan_chain_repair(SPACE)["digest"]
+        result = repair.apply_chain_repair(
+            SPACE, expect_digest=digest, backup_path=str(tmp_path / "b.json")
+        )
+        assert result["objects_modified"] == 3 and result["ids_cleared"] == 3
+        assert E1 in prop_value(fake.objects[E3], "wiki_relations")
+        assert E3 in prop_value(fake.objects[E1], "wiki_relations")
+
+    @respx.mock
+    def test_failed_patch_gives_partial(self, tmp_path):
         fake = _fake()
+        digest = repair.plan_chain_repair(SPACE)["digest"]
+        fake.fail("PATCH", object_id=E2)
+        result = repair.apply_chain_repair(
+            SPACE, expect_digest=digest, backup_path=str(tmp_path / "b.json")
+        )
+        assert result["status"] == "partial"
+        assert result["objects_modified"] == 3
+
+    @respx.mock
+    def test_wrong_digest_raises_with_the_live_digest_and_writes_nothing(self, tmp_path):
+        fake = _fake()
+        live = repair.plan_chain_repair(SPACE)
         backup = tmp_path / "b.json"
-        outcome = None
-        try:
-            outcome = repair.apply_chain_repair(SPACE, expect_digest=SPENT, backup_path=str(backup))
-        except NotImplementedError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - a refusal may raise or return
-            outcome = exc
-        assert outcome is not None
+        with pytest.raises(RepairRefusedError) as raised:
+            repair.apply_chain_repair(SPACE, expect_digest=SPENT, backup_path=str(backup))
+        err = raised.value
+        assert err.reason == "digest_mismatch" and err.exit_code == 3
+        assert err.live_digest == live["digest"]
+        assert err.plan["plan"] == live["plan"]
         assert fake.patch_attempts == [] and not backup.exists()
+
+    @respx.mock
+    @pytest.mark.parametrize("world", [{"remember_log": True}, {"ingest_log": False}])
+    def test_wrong_kind_raises_exit_2(self, world, tmp_path):
+        fake = _fake(**world)
+        with pytest.raises(RepairRefusedError) as raised:
+            repair.apply_chain_repair(
+                SPACE, expect_digest=SPENT, backup_path=str(tmp_path / "b.json")
+            )
+        assert raised.value.reason == "kind" and raised.value.exit_code == 2
+        assert fake.patch_attempts == []
+
+    @respx.mock
+    def test_confirm_list_that_is_not_the_untagged_ids_raises_exit_2(self, tmp_path):
+        fake = _fake(untagged_sources=["old-1", "old-2"])
+        with pytest.raises(RepairRefusedError) as raised:
+            repair.apply_chain_repair(
+                SPACE,
+                expect_digest=SPENT,
+                backup_path=str(tmp_path / "b.json"),
+                confirmed_untagged=frozenset({"old-1"}),
+            )
+        assert raised.value.reason == "confirm_list" and raised.value.exit_code == 2
+        assert fake.patch_attempts == []
+
+    @respx.mock
+    def test_existing_backup_raises_exit_2(self, tmp_path):
+        fake = _fake()
+        digest = repair.plan_chain_repair(SPACE)["digest"]
+        backup = tmp_path / "b.json"
+        backup.write_text("precious")
+        with pytest.raises(RepairRefusedError) as raised:
+            repair.apply_chain_repair(SPACE, expect_digest=digest, backup_path=str(backup))
+        assert raised.value.reason == "backup_exists" and raised.value.exit_code == 2
+        assert backup.read_text() == "precious" and fake.patch_attempts == []
