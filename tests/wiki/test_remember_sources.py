@@ -640,3 +640,53 @@ class TestSourceCleanup:
         client.close()
         sources = [o for o in fake.created if o.get("type_key") == "wiki_source"]
         assert len(sources) == 2 and len(deleted) == 1, (sources, deleted)
+
+
+class TestBatchHygiene:
+    @respx.mock
+    def test_read_client_is_closed_when_the_batch_raises(self, monkeypatch):
+        """Architecture NIT-1: an exception outside the per-subject try cannot leak the client."""
+        from anytype_llm_wiki.wiki import remember
+        from anytype_llm_wiki.wiki.wiki_client import WikiClient
+
+        fake = _space()
+        _seed_bimba(fake)
+        fake.seed("wiki_concept", "Capoeira Regional", [{"key": "wiki_definition", "text": "Old."}], CON)
+        _patch_calls(monkeypatch, [CONCEPT])
+        closed: list[bool] = []
+        real_close = remember.AnytypeReadClient.close
+        monkeypatch.setattr(
+            remember.AnytypeReadClient, "close",
+            lambda self: (closed.append(True), real_close(self))[1],
+        )
+
+        def boom(*a, **k):
+            raise RuntimeError("tag lookup exploded")
+
+        monkeypatch.setattr(remember, "_resolve_wiki_action_tag", boom)
+        client = WikiClient()
+        result = remember._empty_remember_result()
+        meta = {
+            "relations": [{"from": "Mestre Bimba", "to": "Capoeira Regional", "label": "founded"}],
+            "source": LABEL,
+        }
+        items = [{"name": "Capoeira Regional", "kind": "concept", "facts": "A capoeira style.",
+                  "id": "a", "_work_id": "w"}]
+        with pytest.raises(RuntimeError):
+            remember._apply_batch(client, SPACE, items, meta, result)
+        client.close()
+        assert closed, "the read client must be closed even when the batch raises"
+
+    @respx.mock
+    def test_repeat_with_no_new_unit_needs_no_heading_from_the_model(self, monkeypatch):
+        """Architecture NIT-2: a model that rightly omits the heading is not reported as rejected."""
+        fake = _space()
+        _seed_bimba(fake)
+        _patch_calls(
+            monkeypatch,
+            [{"name": "Mestre Bimba", "kind": "entity", "facts": OLD_UNIT_2}],
+            lambda kw: {"consolidated_text": kw["existing_text"], "changed": True,
+                        "fact_actions": [], "conflicts": []},
+        )
+        result = _remember()
+        assert "consolidation_rewrite_rejected" not in result["warnings"], result["warnings"]

@@ -1112,7 +1112,9 @@ class TestConflictFlagging:
             )
 
             from anytype_llm_wiki.wiki.remember import wiki_remember
-            wiki_remember(space_id=FAKE_SPACE_ID, knowledge="TestEntity supports Python.")
+            wiki_remember(
+                space_id=FAKE_SPACE_ID, knowledge="TestEntity supports Python.", source="a note"
+            )
 
         fact_values = [
             prop.get("text", "")
@@ -1124,7 +1126,10 @@ class TestConflictFlagging:
         # The raw model rewrite is not a faithful sectioned text, so it is never written;
         # whatever is written carries no control or format character.
         for val in fact_values:
-            assert val == sanitize_property_value(val) and raw_text != val
+            assert val == (
+                "## Source: unattributed (before per-source facts)\n"
+                f"{sanitized} [also: a note]"
+            )
             assert "\u200c" not in val
 
     def test_unknown_fact_action_dropped(self, monkeypatch, tmp_path):
@@ -3955,14 +3960,16 @@ class TestSubjectHintNaming:
         assert creates[0]["type_key"] == "wiki_entity"
 
     @pytest.mark.parametrize(
-        "caller_rel",
+        ("caller_rel", "stored_label"),
         [
-            {"from": _HINT_ACM, "to": "Mestre Bimba", "label": "founded_by"},
+            ({"from": _HINT_ACM, "to": "Mestre Bimba", "label": "founded_by"}, "founded by"),
             # Reverse direction and different case still count as the same pair.
-            {"from": "mestre bimba", "to": _HINT_ACM.upper(), "label": "founded"},
+            ({"from": "mestre bimba", "to": _HINT_ACM.upper(), "label": "founded"}, "founded"),
         ],
     )
-    def test_ac9_caller_relations_not_duplicated(self, monkeypatch, tmp_path, caller_rel):
+    def test_ac9_caller_relations_not_duplicated(
+        self, monkeypatch, tmp_path, caller_rel, stored_label
+    ):
         _result, creates, rels = _run_remember_capturing(
             monkeypatch, tmp_path, [_ent("Mestre Bimba"), _ent("Salvador")],
             knowledge="Mestre Bimba founded the academy in Salvador.",
@@ -3971,7 +3978,7 @@ class TestSubjectHintNaming:
         assert [p["name"] for p in creates] == [_HINT_ACM, "Mestre Bimba", "Salvador"]
         # The caller's relation comes first, then only the missing auto link.
         # (labels are normalised by the link writer: "founded_by" -> "founded by")
-        assert [r[2] for r in rels] == [caller_rel["label"].replace("_", " "), "related"]
+        assert [r[2] for r in rels] == [stored_label, "related"]
         assert rels[1] == (_HINT_ACM, "Salvador", "related")
 
     def test_ac10_no_hint_proper_names_unchanged(self, monkeypatch, tmp_path):

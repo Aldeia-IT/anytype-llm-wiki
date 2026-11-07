@@ -629,6 +629,14 @@ def _stamp_writer_heading(
     return render_sections(sections)
 
 
+def _has_writer_heading(text: str, label: str, source_id: str | None) -> bool:
+    """True if ``text`` has a section for this call (by Source id, else by label)."""
+    return any(
+        sec.source_id == source_id if source_id else sec.label == label
+        for sec in parse_sections(text, known_ids=None)
+    )
+
+
 def _rewrite_is_faithful(
     stored_text: str,
     candidate_text: str,
@@ -642,11 +650,7 @@ def _rewrite_is_faithful(
     The guard (``no_lines_dropped``) allows only the writer's own section, units from
     the new facts (``allowed_keys``), and tags and flags carrying the writer's label.
     """
-    wrote_heading = any(
-        sec.source_id == source_id if source_id else sec.label == label
-        for sec in parse_sections(candidate_text, known_ids=None)
-    )
-    return wrote_heading and no_lines_dropped(
+    return _has_writer_heading(candidate_text, label, source_id) and no_lines_dropped(
         stored_text,
         candidate_text,
         label=label,
@@ -657,6 +661,16 @@ def _rewrite_is_faithful(
 
 
 def _apply_batch(client, space_id, items, meta, result) -> None:
+    """Apply ONE work-log batch (see ``_apply_batch_body``); its read client is always closed."""
+    read_holder: list[AnytypeReadClient] = []
+    try:
+        _apply_batch_body(client, space_id, items, meta, result, read_holder)
+    finally:
+        for read_client in read_holder:
+            read_client.close()
+
+
+def _apply_batch_body(client, space_id, items, meta, result, read_holder) -> None:
     """Apply ONE work-log batch (resolve/consolidate/create + relations + WikiLog).
 
     Accumulates into ``result`` (objects/counts/warnings). Does NOT touch the
@@ -708,7 +722,6 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         return sid
 
     source_label = fact_source_label(_remember_source_name(source))
-    read_holder: list[AnytypeReadClient] = []
     object_cache: dict[str, dict] = {}
     tag_cache: dict = {}
 
@@ -852,8 +865,10 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                         allowed_keys, allowed_units,
                     ):
                         final_text = candidate_text
-                    else:
+                    elif merge.new_units or _has_writer_heading(candidate_text, source_label, src_id):
                         result["warnings"].append("consolidation_rewrite_rejected")
+                    # else: nothing new to write, so the model rightly left out the
+                    # heading; the deterministic merge already carries any tags.
 
                 n_conflicts = len(conflicts)
                 obj_entry["conflicts_flagged"] = n_conflicts
@@ -988,9 +1003,6 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         except (httpx.HTTPError, KeyError, ValueError, TypeError):
             result["warnings"].append("source_cleanup_failed")
             result["status"] = "partial"
-
-    for read_client in read_holder:
-        read_client.close()
 
     # WikiLog for this batch (action_name="remember").
     action_tag_id, degraded = _resolve_wiki_action_tag(
