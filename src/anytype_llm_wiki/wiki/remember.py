@@ -41,6 +41,7 @@ from ..anytype_client import AnytypeReadClient
 from .ingest import (
     _cmp_versions,
     _domain_taxonomy,
+    _flag_conflict_status,
     _resolve_multi_select_tags,
     _resolve_select_tag,
     _resolve_wiki_action_tag,
@@ -49,14 +50,16 @@ from .ingest import (
 )
 from .facts_sections import (
     append_source_section,
+    FactSection,
     canonical_facts,
     fact_key,
     fact_source_label,
     no_lines_dropped,
     parse_sections,
+    render_sections,
     split_fact_units,
 )
-from .links import LinkSpec, normalize_label, union_ids, write_links
+from .links import relation_specs, union_ids, write_links
 from .ingest import _maybe_reindex as _ingest_maybe_reindex
 from .util import (
     _existing_text,
@@ -143,11 +146,6 @@ def _normalize_for_compare(text) -> str:
 # imported above and re-exported here so lint.py's
 # ``from .remember import _resolve_select_tag`` keeps resolving post-refactor.
 
-
-def _resolve_wiki_status_tag(
-    client: WikiClient, space_id: str, tag_name: str
-) -> tuple[str | None, bool]:
-    return _resolve_select_tag(client, space_id, "wiki_status", tag_name)
 
 
 def _resolve_wiki_source_type_tag(
@@ -606,17 +604,43 @@ def _queued_remember_result(n: int, base_warnings: list[str]) -> dict:
     return result
 
 
+def _stamp_writer_heading(
+    candidate: str,
+    stored_text: str,
+    label: str,
+    source_id: str | None,
+    known_ids: frozenset[str],
+) -> str:
+    """Give the model's new section for this call its Source id.
+
+    The model writes ``## Source: <label>`` (the Source does not exist yet while it
+    runs, D19). If the candidate has exactly one section more than the stored text, last,
+    with this call's label and no known id, that section gets ``source_id``.
+    """
+    if not source_id:
+        return candidate
+    sections = parse_sections(candidate, known_ids=None)
+    if len(sections) != len(parse_sections(stored_text, known_ids=None)) + 1:
+        return candidate
+    last = sections[-1]
+    if last.label != label or last.source_id in known_ids:
+        return candidate
+    sections[-1] = FactSection(label, source_id, last.lines)
+    return render_sections(sections)
+
+
 def _rewrite_is_faithful(
     stored_text: str,
     candidate_text: str,
     label: str,
     source_id: str | None,
-    new_facts: str,
+    allowed_keys: frozenset[str],
+    allowed_units: frozenset[str],
 ) -> bool:
     """True if a consolidation rewrite has this call's heading and passes the guard.
 
     The guard (``no_lines_dropped``) allows only the writer's own section, units from
-    ``new_facts``, and tags and flags carrying the writer's label.
+    the new facts (``allowed_keys``), and tags and flags carrying the writer's label.
     """
     wrote_heading = any(
         sec.source_id == source_id if source_id else sec.label == label
@@ -627,7 +651,8 @@ def _rewrite_is_faithful(
         candidate_text,
         label=label,
         source_id=source_id,
-        allowed_new_keys=frozenset(fact_key(u) for u in split_fact_units(new_facts)),
+        allowed_new_keys=allowed_keys,
+        allowed_new_units=allowed_units,
     )
 
 
@@ -683,19 +708,31 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
     source_label = fact_source_label(_remember_source_name(source))
     read_holder: list[AnytypeReadClient] = []
+    object_cache: dict[str, dict] = {}
+    tag_cache: dict = {}
 
-    def _fresh_target(target: dict) -> dict:
-        """The target with its stored properties.
-
-        A search hit normally carries them; one without is read fresh (the batch holds
-        the space lock, so a hit with properties cannot be stale).
-        """
-        if isinstance(target.get("properties"), list):
-            return target
-        target_id = target["id"]
+    def _read_client() -> AnytypeReadClient:
         if not read_holder:
             read_holder.append(AnytypeReadClient())
-        return read_holder[0].get_object(space_id, target_id)
+        return read_holder[0]
+
+    def _stored_object(object_id: str) -> dict:
+        """The object as stored: one fresh read per object per batch, kept current."""
+        if object_id not in object_cache:
+            object_cache[object_id] = _read_client().get_object(space_id, object_id)
+        return object_cache[object_id]
+
+    def _write_object(object_id: str, props: list[dict]) -> None:
+        """PATCH ``props`` and mirror them into the cached object."""
+        client.update_object(space_id, object_id, {"properties": props})
+        cached = object_cache.get(object_id)
+        if cached is not None:
+            written = {q["key"] for q in props}
+            kept = [
+                p for p in cached.get("properties") or []
+                if isinstance(p, dict) and p.get("key") not in written
+            ]
+            cached["properties"] = [*kept, *props]
 
     strip = _title_stripper(strip_titles)
     for subj in items:
@@ -744,11 +781,8 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 target = resolution["target"]
                 target_id = target.get("id")
                 obj_entry["object_id"] = target_id
-                # Source first (its id heads this call's facts section), then read
-                # the target fresh: a search hit may carry no properties.
-                src_id = _ensure_source()
                 try:
-                    stored = _fresh_target(target)
+                    stored = _stored_object(target_id)
                 except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
                     result["warnings"].append(f"facts_read_failed: {clean_name!r}: {exc}")
                     obj_entry["action"] = "error"
@@ -758,9 +792,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     continue
                 existing_text = _existing_text(stored, prop_key)
                 stored_sources = _relation_ids(stored, "wiki_sources")
-                known_ids = frozenset([*stored_sources, *([src_id] if src_id else [])])
-                stored_canonical = canonical_facts(existing_text, known_ids)
-                merge = append_source_section(existing_text, source_label, src_id, subj_facts)
+                stored_canonical = canonical_facts(existing_text, frozenset(stored_sources))
 
                 cons = consolidate(
                     existing_text=stored_canonical,
@@ -768,7 +800,6 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     kind=subj_kind,
                     space_id=space_id,
                     source_label=source_label,
-                    source_id=src_id,
                 )
 
                 if "consolidation_degraded" in str(cons.get("error", "")):
@@ -777,6 +808,21 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     result["status"] = "partial"
                     result["objects"].append(obj_entry)
                     continue
+
+                # The first write that needs it creates the Source (D19).
+                src_id = _ensure_source()
+                known_ids = frozenset([*stored_sources, *([src_id] if src_id else [])])
+                new_units = split_fact_units(subj_facts)
+                allowed_keys = frozenset(fact_key(u) for u in new_units)
+                allowed_units = frozenset(new_units)
+                merge = append_source_section(stored_canonical, source_label, src_id, subj_facts)
+                merged_text = canonical_facts(merge.text, known_ids)
+                if not no_lines_dropped(
+                    stored_canonical, merged_text, label=source_label, source_id=src_id,
+                    allowed_new_keys=allowed_keys, allowed_new_units=allowed_units,
+                ):
+                    result["warnings"].append("facts_guard_rejected")
+                    merged_text = stored_canonical
 
                 changed = bool(cons.get("changed"))
                 conflicts = cons.get("conflicts") or []
@@ -787,17 +833,22 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
                 # The model's rewrite is written only if it keeps everything stored and
                 # adds only this source's section, tags and flags (spec section 7).
-                merged_text = canonical_facts(merge.text, known_ids)
                 final_text = merged_text
                 candidate = cons.get("consolidated_text")
                 if changed and isinstance(candidate, str):
-                    candidate_text = canonical_facts(candidate, known_ids)
+                    candidate_text = canonical_facts(
+                        _stamp_writer_heading(
+                            candidate, stored_canonical, source_label, src_id, known_ids
+                        ),
+                        known_ids,
+                    )
                     if not merge.changed and _normalize_for_compare(
                         candidate_text
                     ) == _normalize_for_compare(stored_canonical):
                         result["warnings"].append("consolidated_despite_changed_flag")
                     elif _rewrite_is_faithful(
-                        stored_canonical, candidate_text, source_label, src_id, subj_facts
+                        stored_canonical, candidate_text, source_label, src_id,
+                        allowed_keys, allowed_units,
                     ):
                         final_text = candidate_text
                     else:
@@ -807,7 +858,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 obj_entry["conflicts_flagged"] = n_conflicts
                 if n_conflicts:
                     result["conflicts_flagged"] += n_conflicts
-                    _flag_conflict_status(client, space_id, target_id, result)
+                    _flag_conflict_status(client, space_id, target_id, result, tag_cache)
                     pair_detail = "; ".join(
                         f"{c.get('existing_fact', '')} vs {c.get('new_fact', '')}: "
                         f"{c.get('reason', '')}"
@@ -827,9 +878,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 sources_changed = new_sources != stored_sources
                 patch_props: list[dict] = []
                 if text_changed:
-                    patch_props.append(
-                        {"key": prop_key, "text": sanitize_property_value(final_text)}
-                    )
+                    patch_props.append({"key": prop_key, "text": final_text})
                     if not n_conflicts:
                         patch_props.append(
                             {"key": "wiki_last_reviewed",
@@ -843,7 +892,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 if sources_changed:
                     patch_props.append({"key": "wiki_sources", "objects": new_sources})
                 if patch_props:
-                    client.update_object(space_id, target_id, {"properties": patch_props})
+                    _write_object(target_id, patch_props)
                 obj_entry["action"] = "updated" if text_changed else "consolidated"
 
                 obj_entry["deeplink"] = _object_deeplink(space_id, target_id)
@@ -852,10 +901,24 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
             else:
                 src_id = _ensure_source()
-                section_text = append_source_section(
-                    "", source_label, src_id, subj_facts
-                ).text
-                create_props = [{"key": prop_key, "text": section_text or subj_facts}]
+                section_text = canonical_facts(
+                    append_source_section("", source_label, src_id, subj_facts).text,
+                    frozenset([src_id] if src_id else []),
+                )
+                if section_text and not no_lines_dropped(
+                    "", section_text, label=source_label, source_id=src_id,
+                    allowed_new_keys=frozenset(
+                        fact_key(u) for u in split_fact_units(subj_facts)
+                    ),
+                    allowed_new_units=frozenset(split_fact_units(subj_facts)),
+                ):
+                    result["warnings"].append("facts_guard_rejected")
+                    obj_entry["action"] = "error"
+                    obj_entry["error"] = "facts_guard_rejected"
+                    result["status"] = "partial"
+                    result["objects"].append(obj_entry)
+                    continue
+                create_props = [{"key": prop_key, "text": section_text}]
                 if src_id:
                     create_props.append({"key": "wiki_sources", "objects": [src_id]})
                 if domain_tag_ids:
@@ -881,43 +944,25 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
     # relations (SF5 type-safe; G1 per-object counts).
     if relations:
-        rel_tuples: list[LinkSpec] = []
-        endpoint_objs: list[str] = []
-        for rel in relations:
-            if not isinstance(rel, dict):
-                continue
-            from_name = strip(rel.get("from", ""))
-            to_name = strip(rel.get("to", ""))
-            label = normalize_label(rel.get("label", "related"))
-            from_id = name_to_id.get(normalize_title(from_name))
-            to_id = name_to_id.get(normalize_title(to_name))
-            if from_id is None:
-                from_id = _resolve_existing_endpoint(
-                    client, space_id, from_name, name_to_id, kind_by_id,
-                    strip_titles=strip_titles,
-                )
-            if to_id is None:
-                to_id = _resolve_existing_endpoint(
-                    client, space_id, to_name, name_to_id, kind_by_id,
-                    strip_titles=strip_titles,
-                )
-            if from_id and to_id:
-                rel_tuples.append(LinkSpec(from_id, to_id, label))
-                endpoint_objs.extend([from_id, to_id])
-            else:
-                for endpoint_name in (to_name, from_name):
-                    if endpoint_name and normalize_title(endpoint_name) not in name_to_id:
-                        result["warnings"].append(
-                            f"relation_endpoint_unresolved: {endpoint_name}"
-                        )
-        index_reader = AnytypeReadClient()
-        try:
-            link_result = write_links(
-                client, index_reader, space_id, rel_tuples,
-                source_id=_ensure_source() if rel_tuples else None, kind_by_id=kind_by_id,
-            )
-        finally:
-            index_reader.close()
+        stripped = [
+            {**rel, "from": strip(str(rel.get("from", ""))), "to": strip(str(rel.get("to", "")))}
+            for rel in relations
+            if isinstance(rel, dict)
+        ]
+        for rel in stripped:
+            for end in (rel["from"], rel["to"]):
+                if end and normalize_title(end) not in name_to_id:
+                    _resolve_existing_endpoint(
+                        client, space_id, end, name_to_id, kind_by_id,
+                        strip_titles=strip_titles,
+                    )
+        rel_tuples, relation_warnings = relation_specs({"relations": stripped}, name_to_id)
+        result["warnings"].extend(relation_warnings)
+        endpoint_objs = [i for spec in rel_tuples for i in (spec.from_id, spec.to_id)]
+        link_result = write_links(
+            client, _read_client(), space_id, rel_tuples,
+            source_id=_ensure_source() if rel_tuples else None, kind_by_id=kind_by_id,
+        )
         rel_total = link_result.created
         result["relations_sourced"] += link_result.sourced
         if link_result.notes:
@@ -1045,20 +1090,3 @@ def _same_type_candidates(
         o for o in results
         if isinstance(o, dict) and o.get("type", {}).get("key") == type_key
     ]
-
-
-def _flag_conflict_status(
-    client: WikiClient, space_id: str, object_id: str, result: dict
-) -> None:
-    """Set wiki_status=needs-review (degrade+warn if the tag is absent)."""
-    tag_id, degraded = _resolve_wiki_status_tag(client, space_id, "needs-review")
-    if degraded or tag_id is None:
-        result["warnings"].append("wiki_status_tag_not_found")
-        return
-    try:
-        client.update_object(
-            space_id, object_id,
-            {"properties": [{"key": "wiki_status", "select": tag_id}]},
-        )
-    except (httpx.HTTPError, KeyError, ValueError, TypeError):
-        result["warnings"].append("wiki_status_tag_not_found")

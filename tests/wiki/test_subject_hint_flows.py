@@ -348,6 +348,7 @@ class TestRememberTitleStrip:
     @pytest.fixture
     def apply(self, monkeypatch):
         seen: dict = {"relations": []}
+        monkeypatch.setattr(remember, "AnytypeReadClient", FakeRead)
         monkeypatch.setattr(remember, "_create_remember_source", lambda *a, **k: "src-1")
         monkeypatch.setattr(remember, "_resolve_wiki_source_type_tag", lambda *a, **k: ("t", False))
         monkeypatch.setattr(remember, "_resolve_wiki_action_tag", lambda *a, **k: ("t", False))

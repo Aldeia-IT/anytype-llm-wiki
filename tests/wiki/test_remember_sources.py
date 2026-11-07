@@ -138,6 +138,10 @@ def _rewrite(fake: FakeWiki, mutate):
 
 def _assert_deterministic_merge(fake, result):
     lines = _facts_lines(fake)
+    assert "\n".join(lines) == (
+        f"## Source: page one (id:{SRC_OLD})\n{OLD_UNIT_1}\n{OLD_UNIT_2}\n"
+        f"{_heading(fake)}\n{NEW_UNIT}"
+    ), lines
     assert OLD_UNIT_1 in lines and OLD_UNIT_2 in lines, lines
     assert lines.count(_heading(fake)) == 1, lines
     assert lines.count(NEW_UNIT) == 1, lines
@@ -499,3 +503,57 @@ class TestHintLinks:
         _remember(KNOWLEDGE, subject_hint="Mestre Bimba")
         ids = prop_value(fake.objects[ENT], "wiki_relations")
         assert ids[0] == "old-1" and len(ids) == 2
+
+
+CON = "con-regional"
+
+
+class TestFreshReadAndPartialLinks:
+    """IR1-B2 (fresh read, not the search hit) and IR1-B4 (a failed second-side link PATCH)."""
+
+    @respx.mock
+    def test_remember_builds_on_the_fresh_read_not_the_search_hit(self, monkeypatch):
+        from anytype_llm_wiki.wiki import remember
+
+        fake = _space()
+        _seed_bimba(fake)
+        stale_hit = {
+            "id": ENT,
+            "name": "Mestre Bimba",
+            "type": {"key": "wiki_entity"},
+            "properties": [
+                {"key": "wiki_facts", "text": f"## Source: page one (id:{SRC_OLD})\n{OLD_UNIT_1}"},
+                {"key": "wiki_sources", "objects": [SRC_OLD]},
+            ],
+        }
+        monkeypatch.setattr(
+            remember, "resolve_entity", lambda *a, **k: {"action": "update", "target": stale_hit}
+        )
+        _patch_calls(monkeypatch, [SUBJECT])
+        _remember()
+        lines = _facts_lines(fake)
+        assert OLD_UNIT_2 in lines, "the unit only the fresh read holds must survive"
+        assert OLD_UNIT_1 in lines and NEW_UNIT in lines, lines
+
+    @respx.mock
+    def test_failed_second_side_link_patch_is_partial_with_a_rollback_warning(self, monkeypatch):
+        fake = _space()
+        fake.seed("wiki_entity", "Mestre Bimba", [{"key": "wiki_facts", "text": "Old."}], ENT)
+        fake.seed("wiki_concept", "Capoeira Regional", [{"key": "wiki_definition", "text": "Old."}], CON)
+        _patch_calls(monkeypatch, [CONCEPT])
+        fake.fail("PATCH", object_id=CON, nth=2)
+        result = _remember(KNOWLEDGE, subject_hint="Mestre Bimba")
+        assert result["status"] == "partial", result
+        assert any(w.startswith("relation_rollback") for w in result["warnings"]), result["warnings"]
+
+    @respx.mock
+    def test_forged_citation_on_the_writers_new_unit_falls_back_to_the_merge(self, monkeypatch):
+        fake = _space()
+        _seed_bimba(fake)
+        _patch_calls(
+            monkeypatch,
+            [SUBJECT],
+            _rewrite(fake, lambda t: t.replace(NEW_UNIT, f"{NEW_UNIT} [p. 99]")),
+        )
+        _assert_deterministic_merge(fake, _remember())
+        assert "[p. 99]" not in "\n".join(_facts_lines(fake))

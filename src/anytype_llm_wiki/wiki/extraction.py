@@ -410,7 +410,8 @@ def consolidate(
     new_facts: str,
     kind: str,
     space_id: str,
-    **kw,
+    *,
+    source_label: str = "",
 ) -> dict:
     """Run LLM consolidation for one resolved subject (#289 D1/D2).
 
@@ -421,8 +422,8 @@ def consolidate(
     returns a degraded result whose ``error`` contains ``consolidation_degraded``
     (and ``ollama_model_not_pulled`` on the not-pulled path).
 
-    ``existing_text`` is the sectioned facts text; ``source_label`` / ``source_id``
-    (keyword) name this call's section (Aldeia-IT/aldeia-box#1486). The caller judges
+    ``existing_text`` is the sectioned facts text; ``source_label`` (keyword) names this call's section
+    (Aldeia-IT/aldeia-box#1486). The caller judges
     the rewrite with the facts_sections guard before writing it.
     """
     base = os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()
@@ -433,8 +434,7 @@ def consolidate(
         _load_consolidate_prompt()
         .replace("{kind}", str(kind))
         .replace("{property_name}", property_name)
-        .replace("{source_label}", str(kw.get("source_label") or ""))
-        .replace("{source_id}", str(kw.get("source_id") or ""))
+        .replace("{source_label}", str(source_label or ""))
         .replace("{existing_facts}", existing_text or "")
         .replace("{new_knowledge}", new_facts or "")
     )
