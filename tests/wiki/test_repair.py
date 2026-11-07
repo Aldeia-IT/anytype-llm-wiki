@@ -639,6 +639,60 @@ class TestBackup:
         assert "backup-missing" not in events
 
     @respx.mock
+    def test_backup_fsync_hits_the_backup_descriptor_before_the_first_patch(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """The lock fsyncs its own file first, so only the backup's own fd counts."""
+        fake = FakeWiki(serve_objects=True)
+        backup = tmp_path / "b.json"
+        events: list[tuple[str, int | None]] = []
+        backup_fds: list[int] = []
+        real_patch, real_fsync, real_open = fake._patch, os.fsync, os.open
+
+        def spy_patch(request):
+            events.append(("patch", None))
+            return real_patch(request)
+
+        def spy_open(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if os.fspath(path) == str(backup):
+                backup_fds.append(fd)
+            return fd
+
+        def spy_fsync(fd):
+            events.append(("fsync", fd))
+            return real_fsync(fd)
+
+        fake._patch = spy_patch
+        fake.install()
+        _world(fake)
+        digest = _live_digest(capsys)
+        monkeypatch.setattr(os, "open", spy_open)
+        monkeypatch.setattr(os, "fsync", spy_fsync)
+        assert _cli(*_write_args(digest, backup)) == 0
+        assert len(backup_fds) == 1
+        first_patch = next(i for i, (kind, _) in enumerate(events) if kind == "patch")
+        assert ("fsync", backup_fds[0]) in events[:first_patch]
+
+    @respx.mock
+    def test_o_excl_refuses_a_file_that_appears_after_the_precheck(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Race: the path is free at the pre-check and taken before the open."""
+        fake = _fake()
+        digest = _live_digest(capsys)
+        backup = tmp_path / "b.json"
+        backup.write_text("precious")
+        real_lexists = os.path.lexists
+        monkeypatch.setattr(
+            repair.os.path,
+            "lexists",
+            lambda path: False if os.fspath(path) == str(backup) else real_lexists(path),
+        )
+        assert _cli(*_write_args(digest, backup)) == 2
+        assert backup.read_text() == "precious" and fake.patch_attempts == []
+
+    @respx.mock
     def test_existing_backup_file_is_refused_and_untouched(self, tmp_path, capsys):
         fake = _fake()
         digest = _live_digest(capsys)
