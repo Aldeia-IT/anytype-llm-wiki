@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     licence notice or a bare domain, in every space, with the warning
     `name_policy_rejected: page_furniture: <name>`. A licence notice must be the whole name,
     with at most a year and a holder besides (`© 2016 Grupo X`, `CC BY-SA 4.0`, `All rights
-    reserved`); `Creative Commons`, `Copyright Act`, `MIT License`, `Socket.io` and a longer
-    name that only contains a notice (`History of CC BY-SA 4.0 adoption`) pass. The hinted primary subject and the heading candidates a
+    reserved`); `Creative Commons`, `Copyright Act`, `MIT License`, `Socket.io`, a lettered
+    list item opening with `(c)` and a longer name that only contains a notice (`History of
+    CC BY-SA 4.0 adoption`) pass. The hinted primary subject and the heading candidates a
     local file or text keeps when extraction degrades are exempt.
     **Limitation:** a real entity named only by a year or a date (a group or an event literally
     called "1968") or by its domain is dropped as well unless it is the hinted subject.
