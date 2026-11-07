@@ -127,7 +127,10 @@ Follow these steps in order.
    ```
 
    (add `--confirm-untagged <file>` if you used it in the dry run). The backup file must not exist; it
-   is created private, and fsynced before the first change. Ids joined by a `wiki_link` are kept. Exit
+   is created private, and it and its directory are fsynced before the first change. Ids joined by a
+   `wiki_link` (any link with one from-object and one to-object, label or not) are kept. A `mixed` space
+   is refused as `kind` even when the confirm list is wrong. Control characters in object names are
+   escaped in the printed plan. Exit
    codes: 0 done; 1 error, lock busy or `partial`; 2 refused; 3 digest mismatch. After a digest mismatch
    or a partial run, run a new dry run and review it again. Never retry with the printed digest. The
    backup holds the prior values.

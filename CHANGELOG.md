@@ -33,6 +33,12 @@ MIGRATIONS.md first.
 - **`repair-chain-relations` CLI.** Clears the meaningless chain relations earlier ingests wrote, only
   in a space proven ingest-only, behind a read-only dry run, a plan digest and a backup file. See
   MIGRATIONS.md.
+- **New result keys and warnings.** `wiki_ingest` and `wiki_remember` results carry
+  `relations_created` and `relations_sourced`. New warnings: `relation_endpoint_unresolved: <name>`,
+  `relations_capped`, `relation_rollback: ...`, `relation_index_read_failed: ...`,
+  `relation_index_write_failed: ...`, `facts_guard_rejected` (ingest names the object), and
+  `facts_read_failed: <name>: <reason>`. A failed second-side link write makes the run `partial`
+  and its `relation_rollback` note also lands in the WikiLog notes.
 
 ### Changed
 
@@ -40,6 +46,19 @@ MIGRATIONS.md first.
   replacing it. Re-asserting the same knowledge adds nothing to the facts but records a new Source.
   `wiki_remember` still links a hint to its secondary subjects with a `related` link.
 - Ingest no longer chains the entities of a page into one another.
+- **Safer facts writes (review round 1).** Content can no longer forge a `## Source:` heading (every
+  `#` run collapses, `(id:` is defused) on any write. Ingest's create and remember's create and
+  fallback writes go through the same canonical text and guard as an update. The guard refuses
+  `[also:]`/`[superseded:]` tags or page citations on the writer's own new lines that the input
+  lacked, and an empty writer section. A relation spelling is aliased only to the candidate the
+  primary-subject plan kept for it (a hint's duplicates and title-stripped twins resolve; an unused
+  `primary_subject` marker no longer moves a link onto the hinted entity). The Source label scrubber is
+  case-insensitive on the scheme, drops userinfo and query of any scheme and elides every path segment
+  of 20 or more characters. `wiki_remember` reads each target fresh once per batch and creates its
+  Source lazily, right before the first write that needs it.
+- **`repair-chain-relations`.** The printed plan escapes control characters in names. A `wiki_link`
+  with one from-id and one to-id protects its pair even without a label. `--confirm-untagged` lists the
+  space once. A mixed space refuses as `kind` before the confirm list is checked.
 
 ### Follow-ups
 

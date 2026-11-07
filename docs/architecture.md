@@ -49,11 +49,17 @@ same backbone:
    decoding (temp 0 + fixed seed) so re-runs converge (known-limitations §6).
 2. **Resolve** — each subject's title is matched against existing objects
    (§5 below) to decide *update existing* vs *create new*.
-3. **Consolidate** — on an update, an LLM merges the new facts into the existing
-   `wiki_facts`/`wiki_definition` (§4 below). On a create, the object is created
-   with properties only.
+3. **Consolidate** — each target is read fresh once per batch (a search hit may carry no
+   properties) and cached, then updated after each write. On an update, an LLM merges the
+   new facts into the existing `wiki_facts`/`wiki_definition` (§4 below). On a create, the
+   object is created with properties only. The batch's Source is created right before the
+   first write that needs it, so a run that degrades earlier creates none.
 4. **Relations** — named `{from, to, label}` links are written **bidirectionally**
    between resolved subjects: a typed `wiki_link` object (free label, Source) per relation, plus the `wiki_relations`/`wiki_related` 1-hop index.
+   If the second side of the index fails, the first is restored and the run reports
+   `relation_rollback` with `status: partial`. In `wiki_ingest` a model spelling is
+   resolved to an object through the primary-subject plan's own rename report, never
+   through a marker the plan did not use.
 5. **WikiLog** — one audit receipt per run, carrying the action and notes
    (supersede/conflict details).
 6. **Reindex** — the new/updated objects are embedded into Qdrant
@@ -73,6 +79,14 @@ each incoming fact as `merge | add | supersede | keep | conflict`:
   `[CONFLICT: reason]`, and `wiki_status` flips to **`needs-review`**. Nothing is
   silently overwritten. `wiki_ingest` additionally writes `wiki_contradictions`
   links between the conflicting objects (cross-object detection, #287).
+
+Facts are stored as one `## Source: <label> (id:<Source id>)` section per source
+(`wiki/facts_sections.py`). Every write is canonical text, and every write goes
+through one guard (`no_lines_dropped`): it keeps every earlier line and tag, allows
+only the writer's own section, new lines that are the input's (no tag, no page
+citation the input lacked), and the writer's flags, and refuses an empty writer
+section. Page and note text is neutralised first: every run of `#` collapses to one and
+`(id:` is defused, so content can never forge a `## Source:` heading.
 
 `wiki_lint` then surfaces unresolved contradictions and staleness; a human
 resolves them. **Important nuance:** whether a correction lands as *supersede*
