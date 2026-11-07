@@ -47,10 +47,20 @@ from .ingest import (
     _write_wikilog,
     resolve_entity,
 )
-from .links import LinkSpec, normalize_label, write_links
+from .facts_sections import (
+    append_source_section,
+    canonical_facts,
+    fact_key,
+    fact_source_label,
+    no_lines_dropped,
+    parse_sections,
+    split_fact_units,
+)
+from .links import LinkSpec, normalize_label, union_ids, write_links
 from .ingest import _maybe_reindex as _ingest_maybe_reindex
 from .util import (
     _existing_text,
+    _relation_ids,
     normalize_title,
     _title_stripper,
     same_subject,
@@ -92,6 +102,7 @@ def _empty_remember_result() -> dict:
         "source_object_id": None,
         "objects": [],
         "relations_created": 0,
+        "relations_sourced": 0,
         "conflicts_flagged": 0,
         "wiki_log_id": None,
         "warnings": [],
@@ -150,6 +161,13 @@ def _resolve_wiki_source_type_tag(
 # ---------------------------------------------------------------------------
 
 
+def _remember_source_name(source_note: str | None) -> str:
+    """The name of the Source a remember call creates (also the base of its fact label)."""
+    if source_note:
+        return scrub_text_urls(source_note)[:200]
+    return f"agent {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+
+
 def _create_remember_source(
     client: WikiClient,
     space_id: str,
@@ -163,11 +181,7 @@ def _create_remember_source(
     chars before being written to wiki_excerpt. ``wiki_source_type`` is written
     only when ``source_type_tag_id`` is resolvable.
     """
-    name = (
-        scrub_text_urls(source_note)[:200]
-        if source_note
-        else f"agent {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
-    )
+    name = _remember_source_name(source_note)
     if source_note:
         excerpt = sanitize_property_value(scrub_text_urls(source_note))[:500]
     else:
@@ -592,6 +606,31 @@ def _queued_remember_result(n: int, base_warnings: list[str]) -> dict:
     return result
 
 
+def _rewrite_is_faithful(
+    stored_text: str,
+    candidate_text: str,
+    label: str,
+    source_id: str | None,
+    new_facts: str,
+) -> bool:
+    """True if a consolidation rewrite has this call's heading and passes the guard.
+
+    The guard (``no_lines_dropped``) allows only the writer's own section, units from
+    ``new_facts``, and tags and flags carrying the writer's label.
+    """
+    wrote_heading = any(
+        sec.source_id == source_id if source_id else sec.label == label
+        for sec in parse_sections(candidate_text, known_ids=None)
+    )
+    return wrote_heading and no_lines_dropped(
+        stored_text,
+        candidate_text,
+        label=label,
+        source_id=source_id,
+        allowed_new_keys=frozenset(fact_key(u) for u in split_fact_units(new_facts)),
+    )
+
+
 def _apply_batch(client, space_id, items, meta, result) -> None:
     """Apply ONE work-log batch (resolve/consolidate/create + relations + WikiLog).
 
@@ -642,6 +681,22 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         result["source_object_id"] = sid
         return sid
 
+    source_label = fact_source_label(_remember_source_name(source))
+    read_holder: list[AnytypeReadClient] = []
+
+    def _fresh_target(target: dict) -> dict:
+        """The target with its stored properties.
+
+        A search hit normally carries them; one without is read fresh (the batch holds
+        the space lock, so a hit with properties cannot be stale).
+        """
+        if isinstance(target.get("properties"), list):
+            return target
+        target_id = target["id"]
+        if not read_holder:
+            read_holder.append(AnytypeReadClient())
+        return read_holder[0].get_object(space_id, target_id)
+
     strip = _title_stripper(strip_titles)
     for subj in items:
         clean_name = sanitize_name(subj["name"])
@@ -689,13 +744,31 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 target = resolution["target"]
                 target_id = target.get("id")
                 obj_entry["object_id"] = target_id
-                existing_text = _existing_text(target, prop_key)
+                # Source first (its id heads this call's facts section), then read
+                # the target fresh: a search hit may carry no properties.
+                src_id = _ensure_source()
+                try:
+                    stored = _fresh_target(target)
+                except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+                    result["warnings"].append(f"facts_read_failed: {clean_name!r}: {exc}")
+                    obj_entry["action"] = "error"
+                    obj_entry["error"] = "facts_read_failed"
+                    result["status"] = "partial"
+                    result["objects"].append(obj_entry)
+                    continue
+                existing_text = _existing_text(stored, prop_key)
+                stored_sources = _relation_ids(stored, "wiki_sources")
+                known_ids = frozenset([*stored_sources, *([src_id] if src_id else [])])
+                stored_canonical = canonical_facts(existing_text, known_ids)
+                merge = append_source_section(existing_text, source_label, src_id, subj_facts)
 
                 cons = consolidate(
-                    existing_text=existing_text,
+                    existing_text=stored_canonical,
                     new_facts=subj_facts,
                     kind=subj_kind,
                     space_id=space_id,
+                    source_label=source_label,
+                    source_id=src_id,
                 )
 
                 if "consolidation_degraded" in str(cons.get("error", "")):
@@ -705,7 +778,6 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     result["objects"].append(obj_entry)
                     continue
 
-                consolidated_text = cons.get("consolidated_text", existing_text)
                 changed = bool(cons.get("changed"))
                 conflicts = cons.get("conflicts") or []
                 fact_actions = [
@@ -713,12 +785,29 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     if isinstance(fa, dict) and fa.get("action") in _VALID_FACT_ACTIONS
                 ]
 
+                # The model's rewrite is written only if it keeps everything stored and
+                # adds only this source's section, tags and flags (spec section 7).
+                merged_text = canonical_facts(merge.text, known_ids)
+                final_text = merged_text
+                candidate = cons.get("consolidated_text")
+                if changed and isinstance(candidate, str):
+                    candidate_text = canonical_facts(candidate, known_ids)
+                    if not merge.changed and _normalize_for_compare(
+                        candidate_text
+                    ) == _normalize_for_compare(stored_canonical):
+                        result["warnings"].append("consolidated_despite_changed_flag")
+                    elif _rewrite_is_faithful(
+                        stored_canonical, candidate_text, source_label, src_id, subj_facts
+                    ):
+                        final_text = candidate_text
+                    else:
+                        result["warnings"].append("consolidation_rewrite_rejected")
+
                 n_conflicts = len(conflicts)
                 obj_entry["conflicts_flagged"] = n_conflicts
                 if n_conflicts:
                     result["conflicts_flagged"] += n_conflicts
                     _flag_conflict_status(client, space_id, target_id, result)
-                    result["warnings"].append("sources_overwrite_on_conflict")
                     pair_detail = "; ".join(
                         f"{c.get('existing_fact', '')} vs {c.get('new_fact', '')}: "
                         f"{c.get('reason', '')}"
@@ -731,33 +820,31 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     if fa.get("action") == "supersede" and fa.get("supersedes"):
                         wikilog_notes.append(f"supersede: {fa.get('supersedes')}")
 
-                norm_equal = (
-                    _normalize_for_compare(consolidated_text)
-                    == _normalize_for_compare(existing_text)
+                text_changed = _normalize_for_compare(final_text) != _normalize_for_compare(
+                    stored_canonical
                 )
-                if not changed or norm_equal:
-                    obj_entry["action"] = "consolidated"
-                    if changed and norm_equal:
-                        result["warnings"].append("consolidated_despite_changed_flag")
-                else:
-                    src_id = _ensure_source()
-                    patch_props = [
-                        {"key": prop_key, "text": sanitize_property_value(consolidated_text)},
-                    ]
+                new_sources = union_ids(stored_sources, [src_id] if src_id else [])
+                sources_changed = new_sources != stored_sources
+                patch_props: list[dict] = []
+                if text_changed:
+                    patch_props.append(
+                        {"key": prop_key, "text": sanitize_property_value(final_text)}
+                    )
                     if not n_conflicts:
                         patch_props.append(
                             {"key": "wiki_last_reviewed",
                              "date": datetime.now(timezone.utc).isoformat()}
                         )
-                    if src_id:
-                        patch_props.append({"key": "wiki_sources", "objects": [src_id]})
                     if domain_tag_ids:
                         # SET (replace) — no merge with the existing value (OD-C).
                         patch_props.append(
                             {"key": "wiki_domain_tags", "multi_select": domain_tag_ids}
                         )
+                if sources_changed:
+                    patch_props.append({"key": "wiki_sources", "objects": new_sources})
+                if patch_props:
                     client.update_object(space_id, target_id, {"properties": patch_props})
-                    obj_entry["action"] = "updated"
+                obj_entry["action"] = "updated" if text_changed else "consolidated"
 
                 obj_entry["deeplink"] = _object_deeplink(space_id, target_id)
                 name_to_id[normalize_title(clean_name)] = target_id
@@ -765,7 +852,10 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
             else:
                 src_id = _ensure_source()
-                create_props = [{"key": prop_key, "text": subj_facts}]
+                section_text = append_source_section(
+                    "", source_label, src_id, subj_facts
+                ).text
+                create_props = [{"key": prop_key, "text": section_text or subj_facts}]
                 if src_id:
                     create_props.append({"key": "wiki_sources", "objects": [src_id]})
                 if domain_tag_ids:
@@ -829,6 +919,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
         finally:
             index_reader.close()
         rel_total = link_result.created
+        result["relations_sourced"] += link_result.sourced
         if link_result.notes:
             result["warnings"].extend(link_result.notes)
         if link_result.failed:
@@ -838,6 +929,9 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
             if oid and oid in endpoint_objs:
                 obj["relations_created"] = endpoint_objs.count(oid)
         result["relations_created"] += rel_total
+
+    for read_client in read_holder:
+        read_client.close()
 
     # WikiLog for this batch (action_name="remember").
     action_tag_id, degraded = _resolve_wiki_action_tag(

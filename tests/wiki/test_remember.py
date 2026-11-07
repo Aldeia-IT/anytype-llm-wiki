@@ -94,14 +94,18 @@ def _empty_search_response():
     return {"data": [], "pagination": {"has_more": False}}
 
 
-def _single_entity_response(obj_id="entity-001", name="TestEntity"):
+# A stored facts section written by an earlier remember under the label "prior note".
+PRIOR_SECTION = "## Source: prior note (id:src-prior)\nTestEntity supports Python."
+
+
+def _single_entity_response(obj_id="entity-001", name="TestEntity", facts="TestEntity supports Python."):
     return {
         "data": [
             {
                 "id": obj_id,
                 "name": name,
                 "type": {"key": "wiki_entity"},
-                "properties": [{"key": "wiki_facts", "text": "TestEntity supports Python."}],
+                "properties": [{"key": "wiki_facts", "text": facts}],
             }
         ],
         "pagination": {"has_more": False},
@@ -230,7 +234,7 @@ class TestIdempotencyGate:
                 return_value=httpx.Response(200, json=_schema_current_response())
             )
             router.post("/v1/spaces/space-remember-test-001/search").mock(
-                return_value=httpx.Response(200, json=_single_entity_response())
+                return_value=httpx.Response(200, json=_single_entity_response(facts=PRIOR_SECTION))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(201, json=_wikilog_create_response())
@@ -253,6 +257,7 @@ class TestIdempotencyGate:
             result = wiki_remember(
                 space_id=FAKE_SPACE_ID,
                 knowledge="TestEntity supports Python.",
+                source="prior note",
             )
 
         assert result.get("status") in ("ok", "partial"), f"Unexpected status: {result}"
@@ -269,7 +274,7 @@ class TestIdempotencyGate:
     def test_idempotency_gate_normalized_equal_skips_patch(self, monkeypatch, tmp_path):
         """AC-R6/D3 — changed=True but normalized texts equal → action=consolidated; warn consolidated_despite_changed_flag."""
         _patch_decision_ok(monkeypatch, tmp_path)
-        existing_text = "TestEntity supports Python."
+        existing_text = PRIOR_SECTION
         # changed=True but same text when normalized
         consolidate_result = _canned_consolidate_result(
             consolidated_text=existing_text + "  ",  # trailing space — normalizes equal
@@ -286,13 +291,14 @@ class TestIdempotencyGate:
                 return_value=httpx.Response(200, json=_schema_current_response())
             )
             router.post("/v1/spaces/space-remember-test-001/search").mock(
-                return_value=httpx.Response(200, json=_single_entity_response(
-                    name="TestEntity"
-                ))
+                return_value=httpx.Response(200, json=_single_entity_response(name="TestEntity", facts=PRIOR_SECTION))
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(201, json=_wikilog_create_response())
             )
+            router.patch(
+                f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001"
+            ).mock(return_value=httpx.Response(200, json={"object": {"id": "entity-001"}}))
 
             monkeypatch.setattr(
                 "anytype_llm_wiki.wiki.remember.consolidate", mock_consolidate, raising=False
@@ -308,6 +314,7 @@ class TestIdempotencyGate:
             result = wiki_remember(
                 space_id=FAKE_SPACE_ID,
                 knowledge="TestEntity supports Python.",
+                source="prior note",
             )
 
         objects = result.get("objects", [])
@@ -413,7 +420,10 @@ class TestIdempotencyGate:
                         "id": state["created_object"]["id"],
                         "name": state["created_object"]["name"],
                         "type": {"key": "wiki_entity"},
-                        "properties": [{"key": "wiki_facts", "text": fact_text}],
+                        "properties": [
+                            {"key": "wiki_facts", "text": f"## Source: prior note (id:misc-001)\n{fact_text}"},
+                            {"key": "wiki_sources", "objects": ["misc-001"]},
+                        ],
                     }],
                     "pagination": {"has_more": False},
                 })
@@ -460,8 +470,8 @@ class TestIdempotencyGate:
 
             from anytype_llm_wiki.wiki.remember import wiki_remember
 
-            result1 = wiki_remember(space_id=FAKE_SPACE_ID, knowledge=fact_text)
-            result2 = wiki_remember(space_id=FAKE_SPACE_ID, knowledge=fact_text)
+            result1 = wiki_remember(space_id=FAKE_SPACE_ID, knowledge=fact_text, source="prior note")
+            result2 = wiki_remember(space_id=FAKE_SPACE_ID, knowledge=fact_text, source="prior note")
 
         # Call 1 must create
         objects1 = result1.get("objects", [])
@@ -844,7 +854,7 @@ class TestConflictFlagging:
                 return_value=httpx.Response(200, json=_schema_current_response())
             )
             router.post("/v1/spaces/space-remember-test-001/search").mock(
-                return_value=httpx.Response(200, json=_single_entity_response())
+                return_value=httpx.Response(200, json=_single_entity_response(facts="TestEntity uses approach A."))
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
                 side_effect=capture_patch
@@ -876,7 +886,7 @@ class TestConflictFlagging:
         assert "approach A" in combined, (
             f"Existing fact 'approach A' must be in consolidated_text; got: {combined!r}"
         )
-        assert "CONFLICT" in combined or "approach B" in combined, (
+        assert "CONFLICT" in combined or "supports Python" in combined, (
             f"New fact / conflict marker must appear in consolidated_text; got: {combined!r}"
         )
 
@@ -885,7 +895,10 @@ class TestConflictFlagging:
         action=consolidated; but conflicts_flagged=N and WikiLog note still produced.
         """
         _patch_decision_ok(monkeypatch, tmp_path)
-        existing_text = "TestEntity uses approach A. [CONFLICT: approach B]"
+        existing_text = (
+            "## Source: prior note (id:src-prior)\nTestEntity uses approach A.\n"
+            "TestEntity uses approach B.\n> [CONFLICT with prior note: re-asserted]"
+        )
         # Consolidate returns same text (no change) + conflict still present
         consolidate_result = {
             "consolidated_text": existing_text,
@@ -900,7 +913,9 @@ class TestConflictFlagging:
             ],
         }
         mock_consolidate = MagicMock(return_value=consolidate_result)
-        mock_extract = MagicMock(return_value=_canned_extract_result())
+        mock_extract = MagicMock(return_value=_canned_extract_result([
+            {"name": "TestEntity", "kind": "entity", "facts": "TestEntity uses approach B."}
+        ]))
         mock_lock = MagicMock()
         mock_lock.return_value.__enter__ = MagicMock(return_value=None)
         mock_lock.return_value.__exit__ = MagicMock(return_value=False)
@@ -928,7 +943,7 @@ class TestConflictFlagging:
             )
             router.post("/v1/spaces/space-remember-test-001/search").mock(
                 return_value=httpx.Response(200, json=_single_entity_response(
-                    name="TestEntity",
+                    name="TestEntity", facts=existing_text,
                 ))
             )
             router.patch(f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-001").mock(
@@ -947,7 +962,7 @@ class TestConflictFlagging:
             )
 
             from anytype_llm_wiki.wiki.remember import wiki_remember
-            result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="TestEntity uses approach B.")
+            result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="TestEntity uses approach B.", source="prior note")
 
         # Text PATCH must be skipped (changed=False → skip)
         text_patches = [
@@ -1112,11 +1127,11 @@ class TestConflictFlagging:
             if prop.get("key") in ("wiki_facts", "wiki_definition")
         ]
         assert fact_values, f"Expected wiki_facts PATCH; payloads: {patch_payloads}"
+        # The raw model rewrite is not a faithful sectioned text, so it is never written;
+        # whatever is written carries no control or format character.
         for val in fact_values:
-            assert val == sanitized, (
-                f"wiki_facts must equal sanitize_property_value(consolidated_text) byte-for-byte; "
-                f"expected {sanitized!r}, got {val!r}"
-            )
+            assert val == sanitize_property_value(val) and raw_text != val
+            assert "\u200c" not in val
 
     def test_unknown_fact_action_dropped(self, monkeypatch, tmp_path):
         """AC-R27/B1 — fact_actions entry with unknown action is ignored; no spurious status."""
@@ -2137,12 +2152,12 @@ class TestCorePipeline:
             result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="TestEntity supports Python.")
 
         source_creates = [p for p in create_calls if p.get("type_key") == "wiki_source"]
-        assert not source_creates, (
-            f"No source must be created when zero objects written (total degrade); creates: {source_creates}"
-        )
-        assert result.get("source_object_id") is None, (
-            f"source_object_id must be None on total degrade; got {result.get('source_object_id')}"
-        )
+        # Aldeia-IT/aldeia-box#1486: the Source is created before consolidation (its id
+        # heads the facts section), so a degraded run leaves at most one unreferenced
+        # Source; nothing is written to the entity.
+        assert len(source_creates) <= 1, source_creates
+        assert not [c for c in create_calls if c.get("type_key") == "wiki_entity"]
+        assert result["objects"][0]["action"] == "consolidation_degraded"
 
     def test_one_subject_write_fails_others_succeed(self, monkeypatch, tmp_path):
         """SF11 — one per-object write raises; that object action=error; others succeed; status=partial."""
@@ -2393,6 +2408,9 @@ class TestCorePipeline:
             )
             router.post("/v1/spaces/space-remember-test-001/objects").mock(
                 return_value=httpx.Response(201, json=_wikilog_create_response())
+            )
+            router.patch(url__regex=r".*/objects/entity-\d+$").mock(
+                return_value=httpx.Response(200, json={"object": {"id": "x"}})
             )
 
             from anytype_llm_wiki.wiki.remember import wiki_remember
@@ -3210,8 +3228,8 @@ class TestConflictSourcesOverwrite:
             result = wiki_remember(space_id=FAKE_SPACE_ID, knowledge="TestEntity uses approach B.")
 
         warnings = result.get("warnings", [])
-        assert any("sources_overwrite_on_conflict" in str(w) for w in warnings), (
-            f"Conflict path must emit sources_overwrite_on_conflict warning; warnings={warnings}"
+        assert not any("sources_overwrite_on_conflict" in str(w) for w in warnings), (
+            f"wiki_sources is a union now (#1486): no overwrite warning; warnings={warnings}"
         )
 
 
@@ -3792,6 +3810,13 @@ def _identifier_warnings(result):
     ]
 
 
+def _section_body(text):
+    """The facts of a created object: one ``## Source:`` section, heading removed."""
+    heading, _, body = (text or "").partition("\n")
+    assert heading.startswith("## Source: "), text
+    return body
+
+
 def _prop_text(payload, key):
     for prop in payload.get("properties", []):
         if prop.get("key") == key:
@@ -3818,7 +3843,7 @@ class TestSubjectHintNaming:
         )
         assert [p["name"] for p in creates] == [_HINT_ACM]
         assert creates[0]["type_key"] == "wiki_entity"
-        assert _prop_text(creates[0], "wiki_facts") == knowledge
+        assert _section_body(_prop_text(creates[0], "wiki_facts")) == knowledge
         assert _identifier_warnings(result) == []
         assert rels == []
 
@@ -3975,7 +4000,7 @@ class TestSubjectHintNaming:
         )
         assert creates[0]["name"] == "Capoeira Regional"
         assert creates[0]["type_key"] == "wiki_concept"
-        assert _prop_text(creates[0], "wiki_definition") == knowledge
+        assert _section_body(_prop_text(creates[0], "wiki_definition")) == knowledge
         assert creates[1]["name"] == "Mestre Bimba"
         assert creates[1]["type_key"] == "wiki_entity"
 
@@ -4014,7 +4039,7 @@ class TestSubjectHintNaming:
             knowledge="Mestre Bimba created Capoeira Regional.",
         )
         assert [p["name"] for p in creates] == ["Mestre Bimba", "Capoeira Regional"]
-        assert _prop_text(creates[0], "wiki_facts") == "Some fact."
+        assert _section_body(_prop_text(creates[0], "wiki_facts")) == "Some fact."
         assert rels == []
         assert _identifier_warnings(result) == []
 
@@ -4072,7 +4097,7 @@ class TestRefuseIdentifierNamesSpaces:
         assert [p["name"] for p in creates] == [
             "Anytype LLM Wiki", "founding_date_conflict", "wiki_query",
         ]
-        assert _prop_text(creates[0], "wiki_facts") == knowledge
+        assert _section_body(_prop_text(creates[0], "wiki_facts")) == knowledge
         assert rels == [
             ("Anytype LLM Wiki", "founding_date_conflict", "related"),
             ("Anytype LLM Wiki", "wiki_query", "related"),
