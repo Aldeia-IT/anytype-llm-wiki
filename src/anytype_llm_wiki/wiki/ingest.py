@@ -85,6 +85,11 @@ SOURCE_SUMMARY_MAX_CHARS = 4000
 logger = logging.getLogger(__name__)
 
 
+def _endpoint_key(name: str) -> str:
+    """Key under which a relation endpoint resolves: the sanitized name, title-normalised."""
+    return normalize_title(sanitize_name(name) or name)
+
+
 # Module-level seam so tests can monkeypatch reindex_anytype at
 # anytype_llm_wiki.wiki.ingest.reindex_anytype (TestReindexFailureWarning).
 def reindex_anytype(space_id: str):
@@ -1373,19 +1378,19 @@ def _run_ingest(
             marked = None
             if subject_hint and isinstance(extracted, dict) and extracted_cands:
                 marked = extracted.get("primary_subject")
-            if isinstance(marked, str) and marked.strip() and subject_hint:
-                name_aliases[normalize_title(marked)] = normalize_title(subject_hint)
-            original_names = [c["name"] for c in candidates]
+            # The model's relations name entities as it extracted them; the plan may
+            # rename the primary, strip a title or collapse candidates. It reports
+            # exactly the spellings it renamed or merged, and the marker only when it
+            # used it (Aldeia-IT/aldeia-box#1486 IR1-B1): an alias is never made up.
+            spellings: dict[str, str] = {}
             candidates, plan_warnings = plan_primary_subject(
-                candidates, subject_hint, marked, strip_titles=strip_titles
+                candidates, subject_hint, marked, strip_titles=strip_titles,
+                spellings=spellings,
             )
-            # The model's relations name entities as it extracted them; the plan
-            # may rename the primary or strip a title, so keep the old spellings.
-            if len(original_names) == len(candidates):
-                for old_name, cand in zip(original_names, candidates):
-                    old_key, new_key = normalize_title(old_name), normalize_title(cand["name"])
-                    if old_key != new_key:
-                        name_aliases[old_key] = new_key
+            for old_name, new_name in spellings.items():
+                old_key, new_key = _endpoint_key(old_name), _endpoint_key(new_name)
+                if old_key != new_key:
+                    name_aliases[old_key] = new_key
             result["warnings"].extend(plan_warnings)
 
         # 9. create Source object.
@@ -1492,6 +1497,9 @@ def _run_ingest(
                     ):
                         status = "partial"
                         result["warnings"].append(f"facts_guard_rejected: {clean_name!r}")
+                        # The object exists: its links still resolve (like facts_read_failed).
+                        name_to_id[normalize_title(clean_name)] = target_id
+                        kind_by_id[target_id] = kind
                         continue
                     patch_props: list[dict] = []
                     if merge.changed and candidate_text != stored:

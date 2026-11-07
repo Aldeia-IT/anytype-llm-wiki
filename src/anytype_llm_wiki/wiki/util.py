@@ -113,6 +113,7 @@ def plan_primary_subject(
     marked: str | None,
     *,
     strip_titles: bool = False,
+    spellings: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Name the hinted primary subject among extracted candidates (Aldeia-IT/aldeia-box#1430 D1).
 
@@ -146,25 +147,45 @@ def plan_primary_subject(
         marked: the model's ``primary_subject`` field, any type (ignored unless a
             non-empty string).
         strip_titles: the space strips leading title words.
+        spellings: optional out-parameter, filled with ``{input spelling: final name}``
+            for every input name the plan renamed, collapsed into another candidate or
+            dropped as a duplicate of the primary, plus the model's ``marked`` spelling
+            only when step 2 used it (Aldeia-IT/aldeia-box#1486 IR1-B1). A marker the plan
+            did not use is never listed.
 
     Returns:
         ``(candidates, warnings)``: new candidate dicts in their original order.
     """
     strip = _title_stripper(strip_titles)
     planned = [dict(c, name=strip(c["name"])) for c in candidates]
+    # Input spellings each planned candidate stands for (its own, plus those collapsed into it).
+    origins: list[list[str]] = [[c["name"]] for c in candidates]
     if strip_titles:
         # Names that become equal once stripped collapse; the first one wins.
         deduped: list[dict] = []
-        seen: set[str] = set()
-        for cand in planned:
+        deduped_origins: list[list[str]] = []
+        seen: dict[str, int] = {}
+        for cand, origin in zip(planned, origins):
             key = normalize_title(cand["name"])
             if key in seen:
+                deduped_origins[seen[key]].extend(origin)
                 continue
-            seen.add(key)
+            seen[key] = len(deduped)
             deduped.append(cand)
-        planned = deduped
+            deduped_origins.append(list(origin))
+        planned, origins = deduped, deduped_origins
+
+    def _record(kept: list[dict], kept_origins: list[list[str]], used_marker: str | None = None) -> None:
+        if spellings is None:
+            return
+        for cand, origin in zip(kept, kept_origins):
+            for spelling in [*origin, *([used_marker] if used_marker and cand.get("primary") else [])]:
+                if normalize_title(spelling) != normalize_title(cand["name"]):
+                    spellings[spelling] = cand["name"]
+
     hint = hint.strip() if isinstance(hint, str) else ""
     if not hint:
+        _record(planned, origins)
         return planned, []
 
     hint = strip(hint)
@@ -181,18 +202,26 @@ def plan_primary_subject(
         )
 
     matches = [i for i, c in enumerate(planned) if is_hint(c["name"])]
+    used_marker: str | None = None
     if not matches and isinstance(marked, str) and marked.strip():
         key = normalize_title(strip(marked.strip()))
         matches = [
             i for i, c in enumerate(planned) if normalize_title(c["name"]) == key
         ][:1]
+        used_marker = marked if matches else None
     if not matches:
+        _record(planned, origins)
         return planned, [
             f'subject_hint_unmatched: no extracted entity is the primary subject "{hint}"'
         ]
     first, extras = matches[0], set(matches[1:])
     planned[first].update(name=hint, primary=True)
-    return [c for i, c in enumerate(planned) if i not in extras], []
+    for extra in extras:
+        origins[first].extend(origins[extra])
+    keep = [i for i in range(len(planned)) if i not in extras]
+    kept = [planned[i] for i in keep]
+    _record(kept, [origins[i] for i in keep], used_marker)
+    return kept, []
 
 
 # ---------------------------------------------------------------------------
