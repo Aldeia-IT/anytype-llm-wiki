@@ -11,6 +11,7 @@
 """
 
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -247,14 +248,37 @@ _CONTROL_CHAR_RE = re.compile(
 )
 
 
+_FENCE_CLOSER_RE = re.compile(r"</\s*([A-Za-z_][A-Za-z0-9_]*)\s*>")
+_FENCE_FALLBACK_TAGS = frozenset({"question", "context", "checks"})
+
+
+@functools.lru_cache(maxsize=1)
+def _fence_closer_re() -> re.Pattern[str]:
+    """Matches ``</`` before a fence tag name any prompt template closes (derived, not listed).
+
+    The names come from the closing tags found in ``prompts/*.md`` plus the inline
+    fallback templates, so a new fence is covered when its template is added.
+    """
+    names = set(_FENCE_FALLBACK_TAGS)
+    prompts = Path(__file__).parent / "prompts"
+    for path in prompts.glob("*.md"):
+        try:
+            names.update(m.group(1).lower() for m in _FENCE_CLOSER_RE.finditer(path.read_text("utf-8")))
+        except OSError:
+            continue
+    alternation = "|".join(sorted(map(re.escape, names), key=len, reverse=True))
+    return re.compile(rf"</(?=\s*(?:{alternation})\s*>)", re.IGNORECASE)
+
+
 def fence_safe(text: str) -> str:
-    """``text`` with every closing-tag opener ``</`` written ``<\\/``.
+    """``text`` with the ``</`` of every prompt fence's closing tag written ``<\\/``.
 
     Prompts fence caller text between tags (``<new_knowledge>...</new_knowledge>``) and
-    call the fenced part DATA. A value holding a closing tag would end the fence early
-    and let the rest read as instructions; with no ``</`` left it cannot.
+    call the fenced part DATA. A value holding a real closing tag would end the fence
+    early and let the rest read as instructions. Only the fence tag names the prompt
+    templates use are touched; ``</div>`` and code text pass through unchanged.
     """
-    return text.replace("</", "<\\/") if isinstance(text, str) else str(text)
+    return _fence_closer_re().sub("<\\\\/", text) if isinstance(text, str) else str(text)
 
 
 def fill_template(template: str, values: dict[str, str]) -> str:

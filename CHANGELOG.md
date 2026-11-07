@@ -45,8 +45,8 @@ MIGRATIONS.md first.
   section judged against the object's own earlier sections) and `duplicates_tagged` (units tagged
   `[also: <label>]`). `wiki_remember` warns `consolidation_rewrite_rejected` when the model's rewrite
   fails the guard (the deterministic merge is written instead) and `source_cleanup_failed` (with
-  `status: partial`) when deleting an unused Source fails. The `sources_overwrite_on_conflict` result
-  key of earlier `wiki_remember` versions is gone: sources never overwrite.
+  `status: partial`) when deleting an unused Source fails. The `sources_overwrite_on_conflict` warning
+  of earlier `wiki_remember` versions is gone: sources never overwrite.
 - **Source cleanup.** `wiki_remember` creates its Source right before the first write that needs it and
   deletes it again, best effort, when no object or link of that batch refers to it (judged per batch,
   also inside a multi-batch drain). A write that reached the server while the client saw an error can
