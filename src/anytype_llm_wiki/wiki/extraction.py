@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 
 from . import config
+from . import profile
 from .util import scrub_credentials, strip_control_chars
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ _DETERMINISTIC_OPTS = {"temperature": 0, "seed": 0, "top_p": 1}
 
 # Conservative chars-per-token estimate for sizing the extraction source (AC4).
 # Measured ~3.3 on a real capoeira page; ``len // 4`` undercounts.
-_CHARS_PER_TOKEN = 3
+CHARS_PER_TOKEN = 3
 
 
 def _load_prompt() -> str:
@@ -126,6 +127,13 @@ def _model_options() -> dict:
     }
 
 
+# Ollama's final-chunk counters, durations in nanoseconds (WIKI_PROFILE only).
+_OLLAMA_STAT_KEYS = (
+    "total_duration", "load_duration", "prompt_eval_count",
+    "prompt_eval_duration", "eval_count", "eval_duration",
+)
+
+
 def _read_stream(resp: httpx.Response) -> tuple[str | None, str | None, str | None]:
     """Assemble a streamed Ollama NDJSON body until ``done: true``.
 
@@ -150,11 +158,26 @@ def _read_stream(resp: httpx.Response) -> tuple[str | None, str | None, str | No
             return None, None, f"stream_error: {message[:200]}"
         parts.append(_chunk_text(chunk))
         if chunk.get("done"):
+            profile.event(
+                "ollama_stats",
+                **{k: chunk.get(k) for k in _OLLAMA_STAT_KEYS},
+            )
             return "".join(parts), chunk.get("done_reason"), None
     return None, None, "stream_error: stream ended before done"
 
 
 def _call_ollama_prompt_detailed(
+    base: str, prompt: str
+) -> tuple[dict | None, httpx.Response | None, str | None]:
+    """Time one model call (``WIKI_PROFILE``); see ``_call_ollama_prompt_untimed``."""
+    with profile.span("ollama_call", prompt_chars=len(prompt)) as meta:
+        parsed, resp, reason = _call_ollama_prompt_untimed(base, prompt)
+        meta["parsed"] = parsed is not None
+        meta["failure"] = reason
+        return parsed, resp, reason
+
+
+def _call_ollama_prompt_untimed(
     base: str, prompt: str
 ) -> tuple[dict | None, httpx.Response | None, str | None]:
     """Stream a pre-built ``prompt`` to {base}/api/generate, then /api/chat.
@@ -256,7 +279,7 @@ def _fill_prompt(template: str, source: str, subject_block: str) -> str:
 def _budget_chars(template: str, subject_block: str) -> int:
     """Source chars that fit ``extract_max_input_tokens()`` beside the filled template."""
     filled = _fill_prompt(template, "", subject_block)
-    return max(config.extract_max_input_tokens() * _CHARS_PER_TOKEN - len(filled), 0)
+    return max(config.extract_max_input_tokens() * CHARS_PER_TOKEN - len(filled), 0)
 
 
 def source_budget_chars(subject_hint: str | None = None) -> int:
@@ -549,11 +572,21 @@ def sanitize_property_value(text: str) -> str:
     return strip_control_chars(text)
 
 
-def filter_extraction_output(raw: dict) -> dict:
-    """Strip any LLM-provided ``is_central`` flag (AC#12).
+# Per-item keys the extraction schema no longer asks for (Aldeia-IT/aldeia-box#1485
+# D1): nothing reads them, and each one cost decode time. A model that still emits
+# them has them removed here, so no reader can come to depend on them. The
+# top-level ``summary`` stays (D16): ingest stores it on the wiki_source.
+_DROPPED_ITEM_KEYS = frozenset({"is_central", "domain_tags", "open_questions"})
 
-    Centrality is decided by the ingest pipeline, not by attacker-controlled
-    source text, so any is_central in the raw output is removed.
+
+def filter_extraction_output(raw: dict) -> dict:
+    """Strip the keys the extraction schema does not ask for.
+
+    ``is_central`` (AC#12): centrality is decided by the ingest pipeline, not by
+    attacker-controlled source text, so any is_central in the raw output is
+    removed. ``domain_tags`` and ``open_questions`` (per item) left the schema in
+    Aldeia-IT/aldeia-box#1485 and are removed the same way. ``relations``,
+    ``summary`` and ``primary_subject`` pass through.
     """
     if not isinstance(raw, dict):
         return {"entities": [], "concepts": []}
@@ -564,7 +597,7 @@ def filter_extraction_output(raw: dict) -> dict:
             cleaned = []
             for item in items:
                 if isinstance(item, dict):
-                    item = {k: v for k, v in item.items() if k != "is_central"}
+                    item = {k: v for k, v in item.items() if k not in _DROPPED_ITEM_KEYS}
                 cleaned.append(item)
             out[key] = cleaned
     out.setdefault("entities", [])

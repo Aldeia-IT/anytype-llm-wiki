@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-06
+
+Faster `wiki_ingest` (Aldeia-IT/aldeia-box#1485). The model's decode time and the number of calls
+queued on a shared Ollama were most of an ingest's time; these changes cut both.
+
+### Added
+
+- **`WIKI_PROFILE` (Aldeia-IT/aldeia-box#1485).** Env-gated timing of each ingest stage (fetch,
+  extract, resolve, writes, contradiction checks, relations, reindex) and Ollama's own counters
+  (prompt and output tokens, prefill and decode time) per model call. `1` writes JSON lines to
+  stderr; a path appends them to that file. Off by default, and free when off.
+- **Source summary (Aldeia-IT/aldeia-box#1485).** `wiki_ingest` stores the extraction's `summary`
+  of the page on its `wiki_source` as the new `wiki_summary` text property, when it creates the
+  Source and when a re-ingest reuses it; a run without a summary leaves a stored one in place. A
+  PDF's summary joins each page window's summary in page order, each line tagged with its pages.
+  The reindex embeds `wiki_summary` under the heading "Summary", so `semantic_search` finds a
+  source by its summary. `wiki_remember` stores no summary. Schema 0.4.3: run `wiki_bootstrap` on
+  every space before using any wiki tool (see MIGRATIONS.md).
+
+### Changed
+
+- **Smaller extraction output (Aldeia-IT/aldeia-box#1485).** The extraction prompt no longer asks
+  for `domain_tags`, `open_questions` or `is_central`. Nothing read them, and with `summary` they
+  were about 45% of the generated text (these three alone about a third). `extract()` strips them if
+  a model still returns them. `entities`, `concepts`, `relations` and `summary` are asked for as
+  before. The prompt is shared, so the change applies to every use of `extract()`: URL and file
+  ingest, PDF ingest (each page window) and `wiki_remember`. The shorter prompt also shifts
+  which items the model picks and how it words them. On a 25-text sample (15 capoeira pages,
+  5 long Wikipedia pages, 5 `wiki_remember` narrations) it named more people, groups, places and
+  events on capoeira pages (232 -> 321) and Wikipedia pages (61 -> 71), and one fewer on the
+  narrations (30 -> 29). Some named items drop out and others come in, mostly books and press
+  items on long capoeira pages. Long pages that ran out of output tokens and yielded no items fell
+  from 4 to 1 of the 25.
+- **One contradiction-check call per ingest (Aldeia-IT/aldeia-box#1485).** The contradiction
+  checks of all objects an ingest updates go to the model in one call that returns a verdict per
+  object, instead of one call per object. Every check still runs against the same peers. A missing
+  or garbled verdict falls back to that object's single call, with the same warnings as before.
+- **One embed request per reindex (Aldeia-IT/aldeia-box#1485).** The reindex embeds the chunks of
+  all changed objects of a space together, up to 256 texts per request, instead of one request
+  per object. What is indexed is unchanged. An embedder answer with the wrong number of vectors
+  now fails the reindex instead of indexing fewer chunks.
+
 ## [0.9.0] - 2026-11-06
 
 The version moves to 0.9.0 so an install of this build can be told apart from 0.8.0, which
@@ -719,7 +761,9 @@ This release builds on the existing semantic-search foundation:
   re-embedded. Trigger a reindex with the `reindex_anytype` tool (the first
   `semantic_search` also prompts a reindex when the collection is empty).
 
-[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.7.4...v0.8.0
 [0.6.1]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Aldeia-IT/anytype-llm-wiki/compare/v0.5.0...v0.6.0

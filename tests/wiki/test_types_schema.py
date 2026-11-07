@@ -98,6 +98,15 @@ class TestSourceProperties:
     def test_source_has_wiki_excerpt(self):
         assert "wiki_excerpt" in self._source_props()
 
+    def test_source_has_wiki_summary_text(self):
+        """Aldeia-IT/aldeia-box#1485 D16: ingest stores the extraction's summary here."""
+        from anytype_llm_wiki.wiki.types_schema import WIKI_TYPES
+        source = next(t for t in WIKI_TYPES if t["type_key"] == "wiki_source")
+        summary = [p for p in source["properties"] if p["property_key"] == "wiki_summary"]
+        assert summary == [
+            {"property_key": "wiki_summary", "name": "Wiki Summary", "format": "text"}
+        ]
+
     def test_source_has_wiki_ingested_at(self):
         assert "wiki_ingested_at" in self._source_props()
 

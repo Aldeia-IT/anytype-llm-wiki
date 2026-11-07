@@ -1665,7 +1665,8 @@ def test_stored_v2_or_lower_still_does_full_reembed(monkeypatch, tmp_path, store
     )
     stats = _indexer.reindex()
     assert stats["objects_indexed"] == 2
-    assert len(embeds) == 2
+    # Both objects' chunks are embedded, in one request (Aldeia-IT/aldeia-box#1485 D4).
+    assert embeds == [["Some text.", "body"]]
     assert fake.upserted_points
     source_payloads = [p.payload for p in fake.upserted_points if p.payload["object_id"] == "src-1"]
     assert source_payloads
@@ -1890,3 +1891,86 @@ def test_dense_search_with_ids_filter_equals_semantic_search_core(monkeypatch):
     assert set(_dt_cond(f_ssc).match.any) == set(_dt_cond(f_dense).match.any) == {"ai"}, (
         "QA-3: domain_tags MatchAny values must match"
     )
+
+
+# --- one embed request for many changed objects (Aldeia-IT/aldeia-box#1485 D4) ---
+
+
+def _numbered_embed(monkeypatch, _indexer, calls):
+    """An embed() whose vector carries the text's position in its own request."""
+    def _embed(texts):
+        calls.append(list(texts))
+        return [[float(i)] + [0.0] * (config.EMBED_DIMS - 1) for i in range(len(texts))]
+
+    monkeypatch.setattr(_indexer, "embed", _embed)
+
+
+def _multi_chunk_entity(oid, sections):
+    body = "\n".join(f"# {h}\n{oid} {h} text" for h in sections)
+    return {
+        "id": oid, "space_id": "sp-1", "name": oid, "type": {"key": "wiki_entity"},
+        "markdown": body,
+        "properties": [{"key": "last_modified_date", "date": _LAST_MOD}],
+    }
+
+
+def test_reindex_embeds_all_changed_objects_in_one_request(monkeypatch, tmp_path):
+    """Every changed object's chunks share one embed request; each object still gets
+    exactly its own chunks and vectors, its old vectors deleted and its state saved."""
+    objects = {
+        "ent-a": _multi_chunk_entity("ent-a", ["A1", "A2"]),
+        "ent-b": _multi_chunk_entity("ent-b", ["B1"]),
+        "ent-c": _multi_chunk_entity("ent-c", ["C1", "C2", "C3"]),
+    }
+    _indexer, fake, _embeds, state_file = _backfill_env(
+        monkeypatch, tmp_path, stored=4, objects=objects, changed=set(objects),
+    )
+    calls: list = []
+    _numbered_embed(monkeypatch, _indexer, calls)
+
+    stats = _indexer.reindex()
+
+    assert len(calls) == 1
+    assert stats["objects_indexed"] == 3 and stats["chunks"] == 6
+    assert [_object_id_of(d) for d in fake.deleted] == ["ent-a", "ent-b", "ent-c"]
+    by_object: dict = {}
+    for point in fake.upserted_points:
+        by_object.setdefault(point.payload["object_id"], []).append(
+            (point.payload["text"], point.vector[0])
+        )
+    # The vector at request position i belongs to the text sent at position i.
+    for oid, pairs in by_object.items():
+        for text, position in pairs:
+            assert calls[0][int(position)] == text, (oid, text)
+    assert {oid: len(p) for oid, p in by_object.items()} == {"ent-a": 2, "ent-b": 1, "ent-c": 3}
+    assert set(json.loads(state_file.read_text())["sp-1"].values()) == {_LAST_MOD}
+
+
+def test_reindex_splits_embed_requests_at_the_text_cap(monkeypatch, tmp_path):
+    """Past EMBED_BATCH_TEXTS the pending objects are flushed: objects are never split."""
+    objects = {f"ent-{n}": _multi_chunk_entity(f"ent-{n}", ["X", "Y"]) for n in range(5)}
+    _indexer, fake, _embeds, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=4, objects=objects, changed=set(objects),
+    )
+    monkeypatch.setattr(_indexer, "EMBED_BATCH_TEXTS", 4)
+    calls: list = []
+    _numbered_embed(monkeypatch, _indexer, calls)
+
+    stats = _indexer.reindex()
+
+    assert [len(c) for c in calls] == [4, 4, 2]
+    assert stats["objects_indexed"] == 5 and len(fake.upserted_points) == 10
+
+
+def test_reindex_vector_count_mismatch_raises_before_any_delete(monkeypatch, tmp_path):
+    """A short embed answer cannot be split per object: nothing is deleted or upserted."""
+    objects = {"ent-a": _multi_chunk_entity("ent-a", ["A1"]),
+               "ent-b": _multi_chunk_entity("ent-b", ["B1"])}
+    _indexer, fake, _embeds, _ = _backfill_env(
+        monkeypatch, tmp_path, stored=4, objects=objects, changed=set(objects),
+    )
+    monkeypatch.setattr(_indexer, "embed", lambda texts: [[0.1] * config.EMBED_DIMS])
+
+    with pytest.raises(ValueError, match="1 vectors for 2 texts"):
+        _indexer.reindex()
+    assert fake.deleted == [] and fake.upserted_points == []

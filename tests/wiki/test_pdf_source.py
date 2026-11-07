@@ -410,6 +410,49 @@ class TestWindows:
         assert facts["Besouro Manganga"] == "Lived there. [p. 6]"
         assert facts["Unnamed Teacher"] == "Taught. [pp. 4–6]"
 
+    def test_window_summary_newlines_stay_on_one_line(self):
+        """A window summary with line breaks still yields one tagged line per window."""
+        from anytype_llm_wiki.wiki.pdf import extract_pages
+
+        def fake_extract(markdown, space_id, **kw):
+            return {"entities": [], "concepts": [], "summary": "First.\n\nSecond\tpart."}
+
+        out = extract_pages(
+            [(1, BIMBA)], space_id="s", extract_fn=fake_extract, budget_chars=10_000
+        )
+        assert out["summary"] == "First. Second part. [p. 1]"
+
+    def test_window_summaries_join_in_page_order_with_their_pages(self):
+        """Aldeia-IT/aldeia-box#1485 D16: the source summary is every window's own
+        summary, in page order, each tagged with its window's pages. A degraded
+        window, or one with a blank or missing summary, adds no line."""
+        from anytype_llm_wiki.wiki.pdf import extract_pages
+
+        def fake_extract(markdown, space_id, **kw):
+            if "Bimba" in markdown:
+                return {"entities": [], "concepts": [], "summary": " Bimba's academy. "}
+            if "Pastinha" in markdown:
+                return {"entities": [], "concepts": [], "summary": "   "}
+            return {"entities": [], "concepts": [], "summary": "Santo Amaro."}
+
+        out = extract_pages(
+            [(1, BIMBA), (2, PASTINHA), (3, SANTO_AMARO)], space_id="s",
+            extract_fn=fake_extract, budget_chars=len(BIMBA) + 5,
+        )
+        assert out["summary"] == "Bimba's academy. [p. 1]\nSanto Amaro. [p. 3]"
+
+        def degraded_middle(markdown, space_id, **kw):
+            if "Pastinha" in markdown:
+                return {"entities": [], "concepts": [], "summary": "lost",
+                        "error": "extraction_degraded: timeout"}
+            return {"entities": [], "concepts": []}
+
+        out = extract_pages(
+            [(1, BIMBA), (2, PASTINHA)], space_id="s",
+            extract_fn=degraded_middle, budget_chars=len(BIMBA) + 5,
+        )
+        assert "summary" not in out
+
     def test_partial_degradation_is_named(self):
         from anytype_llm_wiki.wiki.pdf import extract_pages
 
@@ -545,6 +588,34 @@ class TestIngestPdf:
         (source,) = fake.created_of("wiki_source")
         excerpt = next(p["text"] for p in source["properties"] if p["key"] == "wiki_excerpt")
         assert excerpt.startswith("[p. 1]")
+
+    @respx.mock
+    def test_pdf_ingest_stores_the_joined_window_summaries_on_the_source(self, monkeypatch):
+        import anytype_llm_wiki.wiki.ingest as _ingest
+
+        monkeypatch.setenv("WIKI_PDF_MAX_PAGES", "3")
+        fake = _PdfWiki(make_pdf(_pages(3)))
+        fake.install()
+        calls = []
+
+        def fake_extract(markdown, space_id, **kw):
+            calls.append(markdown)
+            return {"entities": [{"name": f"Person {len(calls)}", "description": "x"}],
+                    "concepts": [], "summary": f"Window {len(calls)} summary."}
+
+        monkeypatch.setattr(_ingest, "extract", fake_extract)
+        from anytype_llm_wiki.wiki import pdf as _pdf
+
+        monkeypatch.setattr(_pdf, "source_budget_chars", lambda hint=None: 260)
+        result = _ingest.wiki_ingest(source=PDF_URL, space_id="space-pdf-001")
+
+        assert result["status"] == "ok", result
+        assert len(calls) == 3
+        (source,) = fake.created_of("wiki_source")
+        summary = [p["text"] for p in source["properties"] if p["key"] == "wiki_summary"]
+        assert summary == [
+            "Window 1 summary. [p. 1]\nWindow 2 summary. [p. 2]\nWindow 3 summary. [p. 3]"
+        ]
 
     @respx.mock
     def test_image_only_pdf_ingest_writes_nothing(self, monkeypatch):

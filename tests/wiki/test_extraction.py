@@ -1271,3 +1271,39 @@ class TestRefuseIdentifierNamesSpacesConfig:
         assert config.refuse_identifier_names_spaces() == frozenset({"space-a"})
         monkeypatch.setenv("WIKI_REFUSE_IDENTIFIER_NAMES_SPACES", "space-b")
         assert config.refuse_identifier_names_spaces() == frozenset({"space-b"})
+
+
+class TestDroppedExtractionFields:
+    """Aldeia-IT/aldeia-box#1485 D1/D16: the schema no longer asks for domain_tags,
+    open_questions or is_central; relations and summary stay."""
+
+    _DROPPED = ("domain_tags", "open_questions", "is_central")
+
+    def test_prompt_schema_drops_three_fields_and_keeps_relations_and_summary(self):
+        from anytype_llm_wiki.wiki import extraction
+
+        prompt = extraction._load_prompt()
+        for field in self._DROPPED:
+            assert field not in prompt, field
+        assert '"relations"' in prompt
+        assert '"summary":    "str"' in prompt
+        assert '"description"' in prompt and '"definition"' in prompt
+
+    def test_filter_strips_three_fields_and_keeps_summary(self):
+        from anytype_llm_wiki.wiki import extraction
+
+        raw = {
+            "entities": [{"name": "Bimba", "description": "d", "is_central": True,
+                          "domain_tags": ["x"]}],
+            "concepts": [{"name": "Roda", "definition": "c", "open_questions": ["q"],
+                          "domain_tags": ["y"], "is_central": False}],
+            "relations": [{"from": "Bimba", "to": "Roda", "label": "plays"}],
+            "summary": "s",
+            "primary_subject": "Bimba",
+        }
+        out = extraction.filter_extraction_output(raw)
+        assert out["entities"] == [{"name": "Bimba", "description": "d"}]
+        assert out["concepts"] == [{"name": "Roda", "definition": "c"}]
+        assert out["relations"] == raw["relations"]
+        assert out["primary_subject"] == "Bimba"
+        assert out["summary"] == "s"

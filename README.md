@@ -230,6 +230,7 @@ Benchmarked on a Mac Mini (Apple Silicon):
 | `WIKI_FETCH_MAX_BYTES` / `WIKI_FETCH_MAX_PDF_BYTES` | `10485760` / `26214400` | Size caps of a fetched page (cut at the cap) and of a PDF source (refused over the cap, as a cut PDF cannot be read) |
 | `WIKI_INGEST_LOCK_WAIT_S` | `1800` | Seconds `wiki_ingest` waits for a space's lock held by another writer before it returns `ingest_in_progress`; `0` tries once |
 | `WIKI_AUTO_REINDEX` | `true` | Auto-reindex after each write (set `false` to batch via a scheduled reindex) |
+| `WIKI_PROFILE` | unset | Per-stage timing of `wiki_ingest` and its model calls: `1` writes one JSON line per stage to stderr, a path appends them to that file; unset or `0` is off and costs nothing |
 | `WIKI_LOCK_DIR` / `WIKI_WORKLOG_DIR` | `~/.local/share/anytype-llm-wiki/{locks,worklog}` | Host-local lock + durable subject work-log. A same-host agent fleet writing one shared vault **must share both** (see [known limitations §10](docs/known-limitations.md)); the work-log holds narrated content transiently — treat as sensitive ([data flow](docs/security-and-data-flow.md)) |
 
 Additional `WIKI_SYNTH_*` and `WIKI_LINT_*` tuning knobs exist with sensible defaults — you won't normally need them.

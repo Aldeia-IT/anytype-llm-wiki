@@ -88,6 +88,24 @@ acknowledgement file is written under
 
 ## Upgrading to the next release (Unreleased)
 
+### Schema 0.4.3: `wiki_summary` on `wiki_source` — re-bootstrap is REQUIRED
+
+v0.9.1 bumps `WIKI_SCHEMA_VERSION` to `0.4.3`. The schema adds the text property
+`wiki_summary` to the `wiki_source` type: `wiki_ingest` writes the extraction's
+summary of the page there (Aldeia-IT/aldeia-box#1485).
+
+`wiki_ingest`, `wiki_remember`, `wiki_query` and `wiki_lint` refuse a space whose schema is older
+than the code's (`wiki_schema_outdated`), so re-run the idempotent bootstrap on
+every existing space right after upgrading:
+
+```bash
+uv run anytype-llm-wiki wiki-bootstrap --space-id <your-space-id>
+```
+
+Its reconcile links `wiki_summary` onto the existing `wiki_source` type (listed under
+`types_reconciled`). No backfill: sources ingested before the upgrade get a summary the
+next time their page is ingested. The reindex embeds the new property with no extra step.
+
 ### Schema 0.4.2: concept-contradiction surfacing — re-bootstrap is REQUIRED
 
 v0.4.2 bumps `WIKI_SCHEMA_VERSION` to `0.4.2`. The schema adds `wiki_last_reviewed`
