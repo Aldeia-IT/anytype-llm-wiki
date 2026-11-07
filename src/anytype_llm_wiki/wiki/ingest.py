@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import TypedDict
 
 import httpx
 
@@ -41,11 +42,15 @@ from .extraction import (
     sanitize_property_value,
 )
 from .facts_sections import (
+    add_also_tags,
+    add_conflict_markers,
     append_source_section,
     canonical_facts,
     fact_key,
     fact_source_label,
+    filter_duplicates,
     no_lines_dropped,
+    self_candidates,
     split_fact_units,
 )
 from .fetch import fetch_source
@@ -109,6 +114,8 @@ def _empty_result() -> dict:
         "relations_created": 0,
         "relations_sourced": 0,
         "contradictions_detected": 0,
+        "self_conflicts_flagged": 0,
+        "duplicates_tagged": 0,
         "wiki_log_id": None,
         "warnings": [],
         "status": "ok",
@@ -705,21 +712,37 @@ def _pack_contradiction_batches(checks: list[dict]) -> list[list[dict]]:
     return batches
 
 
-def _batch_verdicts(checks: list[dict], ollama_base: str) -> dict[str, list[dict]]:
+class CheckVerdict(TypedDict):
+    """One check's outcome: peer/self contradictions and judged duplicates."""
+
+    contradictions: list[dict]
+    duplicates: list[tuple[int, str]]
+
+
+def _self_ids(check: dict) -> frozenset[str]:
+    """The ``<obj>#s<n>`` ids of a check's own earlier-section candidates."""
+    prefix = f"{check['obj_id']}#s"
+    return frozenset(
+        c["object_id"] for c in check["candidates"] if c["object_id"].startswith(prefix)
+    )
+
+
+def _batch_verdicts(checks: list[dict], ollama_base: str) -> dict[str, CheckVerdict]:
     """One model call judging several checks; returns the well-formed verdicts.
 
-    The result maps ``check_id`` to that check's filtered contradictions. A check
-    whose verdict is missing, duplicated or garbled (entry not a dict,
-    ``contradictions`` not a list) is left out, and so is every check when the
-    whole answer does not parse; the caller gives those the single-check path.
-    Transport errors propagate.
+    The result maps ``check_id`` to that check's filtered contradictions and its
+    duplicates (``filter_duplicates`` against the check's own ``#s`` candidates;
+    missing or non-list ``duplicates`` give ``[]``). A check whose verdict is
+    missing, duplicated or garbled (entry not a dict, ``contradictions`` not a
+    list) is left out, and so is every check when the whole answer does not parse;
+    the caller gives those the single-check path. Transport errors propagate.
     """
     parsed, _resp = _call_ollama_prompt(ollama_base, _batch_prompt(checks))
     if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
         return {}
     by_id = {c["check_id"]: c for c in checks}
     seen: dict[str, int] = {}
-    entries: dict[str, list] = {}
+    entries: dict[str, dict] = {}
     for entry in parsed["results"]:
         if not isinstance(entry, dict):
             continue
@@ -728,13 +751,19 @@ def _batch_verdicts(checks: list[dict], ollama_base: str) -> dict[str, list[dict
             continue
         seen[check_id] = seen.get(check_id, 0) + 1
         if isinstance(entry.get("contradictions"), list):
-            entries[check_id] = entry["contradictions"]
-    verdicts: dict[str, list[dict]] = {}
-    for check_id, items in entries.items():
+            entries[check_id] = entry
+    verdicts: dict[str, CheckVerdict] = {}
+    for check_id, entry in entries.items():
         if seen[check_id] != 1:
             continue  # two answers for one check: trust neither
-        candidate_ids = {c["object_id"] for c in by_id[check_id]["candidates"]}
-        verdicts[check_id] = _filter_contradictions(items, candidate_ids)
+        check = by_id[check_id]
+        candidate_ids = {c["object_id"] for c in check["candidates"]}
+        verdicts[check_id] = {
+            "contradictions": _filter_contradictions(entry["contradictions"], candidate_ids),
+            "duplicates": filter_duplicates(
+                entry.get("duplicates"), _self_ids(check), tuple(check.get("new_units", ()))
+            ),
+        }
     return verdicts
 
 
@@ -743,34 +772,36 @@ def _judge_contradiction_checks(
     space_id: str,
     client: WikiClient,
     read_client: AnytypeReadClient,
-) -> dict[str, list[dict] | Exception]:
+) -> dict[str, CheckVerdict | Exception]:
     """Judge every contradiction check of one ingest (Aldeia-IT/aldeia-box#1485 D3).
 
-    Each check is ``{check_id, obj_id, target, kind, new_facts, candidates}``
-    with its candidates already read (possibly none). All checks go to the model in ONE batched
-    call that returns a verdict per ``check_id`` (more calls only when they do
-    not fit one prompt, see ``_pack_contradiction_batches``). Every check is still
-    judged, against the same claim and candidates as before.
+    Each check is ``{check_id, obj_id, target, kind, new_facts, candidates, ...}``
+    with its candidates already read (possibly none); the candidates include the
+    object's own earlier sections (``<obj>#s<n>``, Aldeia-IT/aldeia-box#1486). All
+    checks go to the model in ONE batched call that returns a verdict per
+    ``check_id`` (more calls only when they do not fit one prompt, see
+    ``_pack_contradiction_batches``).
 
     Fallback: a check whose batched verdict is missing or garbled, and every check
     of a batch whose call fails (transport error, unparseable answer), is judged
     again on its own by ``detect_contradictions`` — the single-call path of
-    v0.9.0 with the same prompt. That path's own outcome then stands: its
-    contradictions, ``[]`` on a malformed answer, or its exception, which the
-    caller turns into the per-object ``contradiction_detection_degraded`` warning
-    exactly as before. A batch of one check uses that path directly.
+    v0.9.0 with the same prompt, which judges no duplicates. That path's own
+    outcome then stands: its contradictions, ``[]`` on a malformed answer, or its
+    exception, which the caller turns into the per-object
+    ``contradiction_detection_degraded`` warning. A batch of one check uses that
+    path directly.
 
-    :returns: ``check_id`` -> contradictions list, or the exception the
-        single-check path raised for that check.
+    :returns: ``check_id`` -> ``CheckVerdict``, or the exception the single-check
+        path raised for that check.
     """
     ollama_base = (os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()).rstrip("/")
-    outcomes: dict[str, list[dict] | Exception] = {}
+    outcomes: dict[str, CheckVerdict | Exception] = {}
     # A check without candidates needs no model call; it takes the single-check
     # path, which returns [] for it at once.
     batches = _pack_contradiction_batches([c for c in checks if c["candidates"]])
     batches += [[c] for c in checks if not c["candidates"]]
     for batch in batches:
-        verdicts: dict[str, list[dict]] = {}
+        verdicts: dict[str, CheckVerdict] = {}
         if len(batch) > 1:
             try:
                 with profile.span("contradiction_batch", checks=len(batch)) as meta:
@@ -785,12 +816,13 @@ def _judge_contradiction_checks(
                 continue
             try:
                 with profile.span("contradiction", name=check.get("name", "")) as meta:
-                    outcomes[check_id] = detect_contradictions(
+                    flagged = detect_contradictions(
                         check["new_facts"], check["obj_id"], check["target"],
                         space_id, client, read_client,
                         kind=check["kind"], candidates=check["candidates"],
                     )
-                    meta["peers_flagged"] = len(outcomes[check_id])
+                    outcomes[check_id] = {"contradictions": flagged, "duplicates": []}
+                    meta["peers_flagged"] = len(flagged)
             except Exception as exc:  # noqa: BLE001 — caller degrades this check
                 outcomes[check_id] = exc
     return outcomes
@@ -828,6 +860,82 @@ def _with_contradictions(target: dict, extra_ids: list[str]) -> dict:
     return {**target, "properties": props}
 
 
+def _flag_conflict_status(
+    client: WikiClient,
+    space_id: str,
+    object_id: str,
+    result: dict,
+    tag_cache: dict | None = None,
+) -> None:
+    """Set wiki_status=needs-review (degrade+warn if the tag is absent).
+
+    ``tag_cache`` (one dict per run) keeps the tag id, so it is resolved once.
+    """
+    cache = tag_cache if tag_cache is not None else {}
+    if "needs-review" not in cache:
+        cache["needs-review"] = _resolve_select_tag(client, space_id, "wiki_status", "needs-review")
+    tag_id, degraded = cache["needs-review"]
+    if degraded or tag_id is None:
+        result["warnings"].append("wiki_status_tag_not_found")
+        return
+    try:
+        client.update_object(
+            space_id, object_id,
+            {"properties": [{"key": "wiki_status", "select": tag_id}]},
+        )
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        result["warnings"].append("wiki_status_tag_not_found")
+
+
+def _write_self_verdicts(
+    client: WikiClient,
+    space_id: str,
+    check: dict,
+    conflicts: list[tuple[str, str]],
+    duplicates: list[tuple[int, str]],
+    result: dict,
+    tag_cache: dict,
+) -> str | None:
+    """Mark an object's self-conflicts and tag its judged duplicates, in one PATCH.
+
+    Works on the cached text: ``add_conflict_markers`` then ``add_also_tags`` (the
+    new unit stays), the canonical write rule, the guard with no new keys allowed.
+    A self-conflict sets ``needs-review`` even when the marker PATCH fails.
+
+    :returns: ``"partial"`` when a PATCH failed, else None.
+    """
+    obj_id, target, text_key = check["obj_id"], check["target"], check["text_key"]
+    label, source_id = check["label"], check["source_id"]
+    known_ids = frozenset([*_relation_ids(target, "wiki_sources"), *([source_id] if source_id else [])])
+    base = canonical_facts(_existing_text(target, text_key), known_ids)
+    marked = add_conflict_markers(base, label, source_id, conflicts) if conflicts else base
+    tagged = add_also_tags(marked, label, duplicates) if duplicates else marked
+    candidate = canonical_facts(tagged, known_ids)
+    status: str | None = None
+    if candidate != base:
+        if not no_lines_dropped(
+            base, candidate, label=label, source_id=source_id, allowed_new_keys=frozenset()
+        ):
+            result["warnings"].append(f"facts_guard_rejected: {check.get('name', obj_id)!r}")
+            status = "partial"
+        else:
+            try:
+                client.update_object(
+                    space_id, obj_id, {"properties": [{"key": text_key, "text": candidate}]}
+                )
+                _set_object_prop(target, {"key": text_key, "text": candidate})
+                result["duplicates_tagged"] += len(duplicates)
+            except (httpx.HTTPError, KeyError, ValueError, TypeError):
+                result["warnings"].append(
+                    "conflict_marker_write_failed" if conflicts else "duplicate_tag_write_failed"
+                )
+                status = "partial"
+    if conflicts:
+        result["self_conflicts_flagged"] += len(conflicts)
+        _flag_conflict_status(client, space_id, obj_id, result, tag_cache)
+    return status
+
+
 def _run_contradiction_checks(
     checks: list[dict],
     space_id: str,
@@ -835,12 +943,13 @@ def _run_contradiction_checks(
     read_client: AnytypeReadClient,
     result: dict,
 ) -> tuple[str | None, list[str]]:
-    """Judge the run's contradiction checks and write each object's links.
+    """Judge the run's contradiction checks and write each object's effects.
 
-    Per object the effect is the one of the old per-object path: a degraded
-    warning when its check failed, else bidirectional links to the flagged peers
-    and ``contradictions_detected`` counting the new links. Writes run in object
-    order.
+    Per object: a degraded warning when its check failed; else bidirectional links
+    to the flagged peers (``contradictions_detected`` counts the new links), and
+    for the object's own earlier sections a ``> [CONFLICT ...]`` marker plus
+    ``needs-review`` per self-conflict and an ``[also: ...]`` tag per judged
+    duplicate. Writes run in object order.
 
     :returns: ``("partial" or None, rollback notes)``.
     """
@@ -850,19 +959,36 @@ def _run_contradiction_checks(
     status: str | None = None
     notes: list[str] = []
     written: dict[str, list[str]] = {}
+    tag_cache: dict = {}
     for check in checks:
-        outcome = outcomes.get(check["check_id"], [])
+        outcome = outcomes.get(check["check_id"], {"contradictions": [], "duplicates": []})
         if isinstance(outcome, Exception):
             result["warnings"].append(_degraded_warning(check["kind"]))
             continue
-        if not outcome:
-            continue
         obj_id = check["obj_id"]
+        self_prefix = f"{obj_id}#s"
+        flagged = outcome["contradictions"]
+        peers = [p for p in flagged if not p["object_id"].startswith(self_prefix)]
+        earlier = check.get("earlier", ())
+        conflicts: list[tuple[str, str]] = []
+        for p in flagged:
+            if not p["object_id"].startswith(self_prefix):
+                continue
+            tail = p["object_id"][len(self_prefix):]
+            if tail.isdigit() and int(tail) < len(earlier):
+                conflicts.append((earlier[int(tail)].label, p.get("reason", "")))
+        if conflicts or outcome["duplicates"]:
+            if _write_self_verdicts(
+                client, space_id, check, conflicts, outcome["duplicates"], result, tag_cache
+            ):
+                status = "partial"
+        if not peers:
+            continue
         try:
             target = _with_contradictions(check["target"], written.get(obj_id, []))
             links_written, c_rollback = _write_contradiction_links(
                 client, read_client, space_id, obj_id, target,
-                [p["object_id"] for p in outcome], written,
+                [p["object_id"] for p in peers], written,
             )
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
             # As in the object loop this used to run in: the object fails, the
@@ -1396,7 +1522,7 @@ def _run_ingest(
                     # ingest. Aldeia-IT/aldeia-box#1485 D3: the peers are read
                     # here, right after this update as before; the model judges
                     # all checks of the run in one call after the loop.
-                    if kind in ("entity", "concept"):
+                    if kind in ("entity", "concept") and merge.new_units:
                         try:
                             with profile.span("contradiction_peers", name=clean_name):
                                 peer_candidates = _contradiction_candidates(
@@ -1405,15 +1531,27 @@ def _run_ingest(
                         except Exception:  # noqa: BLE001 — detection MUST NOT block ingest
                             result["warnings"].append(_degraded_warning(kind))
                         else:
-                            contradiction_checks.append({
-                                "check_id": f"check_{len(contradiction_checks) + 1}",
-                                "obj_id": obj_id,
-                                "name": clean_name,
-                                "target": cached,
-                                "kind": kind,
-                                "new_facts": facts,
-                                "candidates": peer_candidates,
-                            })
+                            # The object's own earlier sections are candidates too
+                            # (Aldeia-IT/aldeia-box#1486): a page can contradict or
+                            # restate what an earlier source said about it.
+                            candidates_all = peer_candidates + self_candidates(
+                                obj_id, clean_name, merge.earlier
+                            )
+                            if candidates_all:
+                                contradiction_checks.append({
+                                    "check_id": f"check_{len(contradiction_checks) + 1}",
+                                    "obj_id": obj_id,
+                                    "name": clean_name,
+                                    "target": cached,
+                                    "kind": kind,
+                                    "new_facts": " ".join(merge.new_units),
+                                    "new_units": merge.new_units,
+                                    "candidates": candidates_all,
+                                    "text_key": text_key,
+                                    "label": section_label,
+                                    "source_id": source_id,
+                                    "earlier": merge.earlier,
+                                })
                 else:
                     # Create with EMPTY body (properties only — AC-P7/AC-L1): one
                     # section for this source, owned by its Source id.
