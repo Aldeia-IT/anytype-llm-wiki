@@ -48,6 +48,7 @@ SUBCOMMANDS = (
     "wiki-lint",
     "wiki-drain",
     "prune-citations",
+    "repair-chain-relations",
     "doctor",
 )
 
@@ -312,6 +313,10 @@ def _cmd_prune_citations(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in ("ok", "partial") else 1
 
 
+def _cmd_repair_chain_relations(args: argparse.Namespace) -> int:
+    raise NotImplementedError("not implemented")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anytype-llm-wiki",
@@ -443,6 +448,19 @@ def build_parser() -> argparse.ArgumentParser:
     prune_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
     prune_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     prune_p.set_defaults(func=_cmd_prune_citations)
+
+    repair_p = sub.add_parser(
+        "repair-chain-relations",
+        help="Clear chain relations stored before typed links (dry run by default).",
+    )
+    repair_p.add_argument("--space-id", required=True, help="Target Anytype space ID.")
+    repair_p.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    repair_p.add_argument("--confirm-untagged", help="JSON list of confirmed untagged ids.")
+    repair_p.add_argument("--dry-run", action="store_true", help="Plan only (default).")
+    repair_p.add_argument("--clear-ingest-only", action="store_true", help="Write mode.")
+    repair_p.add_argument("--expect-digest", help="Plan digest the write must match.")
+    repair_p.add_argument("--backup", help="Backup file to create before the first PATCH.")
+    repair_p.set_defaults(func=_cmd_repair_chain_relations)
 
     doctor_p = sub.add_parser("doctor", help="Run preflight checks.")
     doctor_p.add_argument(
