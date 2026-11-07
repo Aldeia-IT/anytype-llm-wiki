@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .links import parse_link
+from .links import LINK_TYPE_KEY
 from .util import (
     _rel_key,
     _relation_ids,
@@ -108,7 +108,8 @@ def classify_space(
         type_key = object_type_key(obj)
         if type_key == _LOG_TYPE:
             action = _select_name(obj, _ACTION_KEY)
-            name = obj.get("name") or ""
+            name = obj.get("name")
+            name = name if isinstance(name, str) else ""
             if action:
                 actions[action] = actions.get(action, 0) + 1
             if action == _LOG_NAME_REMEMBER or name.lower().split()[:1] == [_LOG_NAME_REMEMBER]:
@@ -145,6 +146,23 @@ def _digest(kind: str, confirmed: frozenset[str], items: list[dict]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _link_pair(obj: dict) -> frozenset[str] | None:
+    """The pair a ``wiki_link`` joins: any link with one from-id and one to-id protects it.
+
+    Unlike ``parse_link`` this does not need a label, so a malformed link (empty label)
+    still keeps its pair's index ids.
+    """
+    if not isinstance(obj, dict) or object_type_key(obj) != LINK_TYPE_KEY:
+        return None
+    if not isinstance(obj.get("properties"), list):
+        return None
+    from_ids = _relation_ids(obj, "wiki_link_from")
+    to_ids = _relation_ids(obj, "wiki_link_to")
+    if len(from_ids) != 1 or len(to_ids) != 1:
+        return None
+    return frozenset((from_ids[0], to_ids[0]))
+
+
 def _build_items(objects: list[dict]) -> list[dict]:
     """Per entity/concept: the relation ids to clear (chain ids with no link) and keep."""
     nodes = {
@@ -154,9 +172,9 @@ def _build_items(objects: list[dict]) -> list[dict]:
     }
     linked: set[frozenset[str]] = set()
     for obj in objects:
-        rec = parse_link(obj)
-        if rec is not None:
-            linked.add(frozenset((rec.from_id, rec.to_id)))
+        pair = _link_pair(obj)
+        if pair is not None:
+            linked.add(pair)
     items: list[dict] = []
     for oid, obj in nodes.items():
         key = _rel_key(_KIND_BY_TYPE[object_type_key(obj)])
@@ -202,14 +220,19 @@ def _plan_from_objects(
 
 
 def plan_chain_repair(
-    space_id: str, *, confirmed_untagged: frozenset[str] = frozenset()
+    space_id: str,
+    *,
+    confirmed_untagged: frozenset[str] = frozenset(),
+    require_exact_confirm: bool = False,
 ) -> dict:
     """Read-only plan: classification, per-object relation ids to clear, digest.
 
     An id is cleared only if it is an entity/concept of the space and no ``wiki_link``
     joins the pair in either direction; every other id (queries, dangling ids, linked
     pairs) is kept. The digest covers the kind, the confirmed ids and the clear pairs.
-    Only ``list_objects`` is called.
+    Only ``list_objects`` is called. With ``require_exact_confirm`` a confirm list that
+    is not exactly the untagged ids of the space comes back ``status: error`` with an
+    ``error`` starting ``confirm_list:`` (the dry run's check, as the write mode's).
     """
     confirmed = frozenset(confirmed_untagged)
     client = WikiClient()
@@ -228,7 +251,13 @@ def plan_chain_repair(
                 "error": scrub_credentials(f"anytype_unavailable: {exc}"),
                 "warnings": [],
             }
-        return _plan_from_objects(space_id, objects, confirmed)
+        plan = _plan_from_objects(space_id, objects, confirmed)
+        if require_exact_confirm and confirmed != {
+            u["id"] for u in classify_space(objects)["untagged"]
+        }:
+            plan["status"] = "error"
+            plan["error"] = "confirm_list: the confirm list must equal the untagged ids of the space"
+        return plan
     finally:
         client.close()
 
@@ -245,6 +274,12 @@ def _write_backup(path: str, payload: dict) -> None:
         json.dump(payload, handle, indent=2)
         handle.flush()
         os.fsync(handle.fileno())
+    # The new directory entry must survive a crash too, before any PATCH.
+    dir_fd = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def apply_chain_repair(
@@ -317,6 +352,14 @@ def _apply_locked(
     result["kind"] = live["kind"]
     result["digest"] = live["digest"]
     all_untagged = {u["id"] for u in classify_space(objects)["untagged"]}
+    # A mixed space names the real blocker first, whatever the confirm list says.
+    if live["kind"] == "mixed":
+        raise RepairRefusedError(
+            "kind",
+            f"space is {live['kind']}, not ingest-only",
+            live_digest=live["digest"],
+            plan=live,
+        )
     if confirmed != all_untagged:
         raise RepairRefusedError(
             "confirm_list",
@@ -382,7 +425,7 @@ def _apply_locked(
                 item["object_id"],
                 {"properties": [{"key": item["key"], "objects": list(item["keep"])}]},
             )
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+        except (httpx.HTTPError, OSError, KeyError, ValueError, TypeError) as exc:
             result["status"] = "partial"
             result["warnings"].append(
                 scrub_credentials(f"repair_failed {item['object_id']}: {exc}")

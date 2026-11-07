@@ -333,21 +333,37 @@ def _load_confirm_list(path: str) -> frozenset[str] | None:
     return frozenset(data)
 
 
+def _printable(value: object) -> str:
+    """``value`` as text with every non-printable character (ESC, CR, bidi, ...) escaped.
+
+    Object names come from the space; an escape sequence or a carriage return in one
+    must not hide or spoof a line of the plan an operator is about to approve.
+    """
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii")
+        for ch in str(value)
+    )
+
+
 def _print_repair_plan(plan: dict) -> None:
     """Human output of a plan: kind, evidence, untagged, every id to clear, the digest."""
-    print(f"[repair-chain-relations] space {plan['space_id']}: kind={plan['kind']}")
+    print(f"[repair-chain-relations] space {_printable(plan['space_id'])}: kind={_printable(plan['kind'])}")
     print(f"  evidence:  {json.dumps(plan['evidence'], sort_keys=True)}")
     for entry in plan["untagged"]:
-        print(f"  untagged:  {entry['id']}  {entry['type']}  {entry['name']}")
+        print(
+            f"  untagged:  {_printable(entry['id'])}  {_printable(entry['type'])}  "
+            f"{_printable(entry['name'])}"
+        )
     for item in plan["plan"]:
         for cleared in item["clear"]:
             print(
-                f"  clear:     {item['object_id']} ({item['name']}) "
-                f"{item['key']} -> {cleared['id']} ({cleared['name']})"
+                f"  clear:     {_printable(item['object_id'])} ({_printable(item['name'])}) "
+                f"{_printable(item['key'])} -> {_printable(cleared['id'])} "
+                f"({_printable(cleared['name'])})"
             )
-    print(f"  digest:    {plan['digest']}")
+    print(f"  digest:    {_printable(plan['digest'])}")
     if plan.get("error"):
-        print(f"  error:     {plan['error']}")
+        print(f"  error:     {_printable(plan['error'])}")
 
 
 def _cmd_repair_chain_relations(args: argparse.Namespace) -> int:
@@ -372,16 +388,18 @@ def _cmd_repair_chain_relations(args: argparse.Namespace) -> int:
         confirmed = loaded
 
     if not write_mode:
-        if args.confirm_untagged is not None:
-            # The list must be exactly the untagged ids: compare with an unconfirmed plan.
-            bare = repair.plan_chain_repair(args.space_id)
-            if bare["status"] == "ok" and {u["id"] for u in bare["untagged"]} != confirmed:
-                print(
-                    "error: the confirm list must equal the untagged ids of the space",
-                    file=sys.stderr,
-                )
-                return 2
-        plan = repair.plan_chain_repair(args.space_id, confirmed_untagged=confirmed)
+        # One listing of the space: the confirm list must be exactly the untagged ids.
+        plan = repair.plan_chain_repair(
+            args.space_id,
+            confirmed_untagged=confirmed,
+            require_exact_confirm=args.confirm_untagged is not None,
+        )
+        if str(plan.get("error") or "").startswith("confirm_list:"):
+            print(
+                "error: the confirm list must equal the untagged ids of the space",
+                file=sys.stderr,
+            )
+            return 2
         if args.json:
             print(json.dumps(plan, indent=2, default=str))
         else:
@@ -421,13 +439,13 @@ def _cmd_repair_chain_relations(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, default=str))
     else:
         print(f"[repair-chain-relations] space {args.space_id}: status={result['status']}")
-        print(f"  backup:           {result['backup_path']}")
+        print(f"  backup:           {_printable(result['backup_path'])}")
         print(f"  objects modified: {result['objects_modified']}")
         print(f"  ids cleared:      {result['ids_cleared']}")
         if result.get("error"):
-            print(f"  error:            {result['error']}")
+            print(f"  error:            {_printable(result['error'])}")
         for warning in result["warnings"]:
-            print(f"  warn:             {warning}")
+            print(f"  warn:             {_printable(warning)}")
     return 0 if result["status"] == "ok" else 1
 
 
