@@ -1,10 +1,11 @@
 """wiki/lint.py — wiki_lint v0.5.0 structural health check.
 
 A read-only, report-only diagnostic over a bootstrapped wiki space. It enumerates
-the wiki ONCE, runs a battery of twelve structural checks (asymmetric relations,
+the wiki ONCE, runs a battery of thirteen structural checks (asymmetric relations,
 orphans, pipeline orphans, unresolved contradictions, staleness, oversized
 descriptions, empty types, unreviewed/stale needs-review, typed-link integrity
-(``link_dangling``, ``link_index_missing``), and — opt-in — potential duplicates), assembles a severity-ranked LintReport, and files a single ``wiki_log``
+(``link_dangling``, ``link_index_missing``), a source reference that no longer resolves
+(``source_dangling``), and — opt-in — potential duplicates), assembles a severity-ranked LintReport, and files a single ``wiki_log``
 receipt. ``wiki_lint`` mutates nothing but its own WikiLog receipt.
 
 Single-enumeration constraint (CTO-BLOCKING-1 / spec note G9): ``list_objects`` is
@@ -251,7 +252,7 @@ def wiki_lint(
     Sequential pipeline: enumerate
     once → QA#25 schema gate (3 branches) → filter content objects + counts →
     resolve the needs-review tag → fetch each object (per-run cache, D1 backlinks)
-    → run the twelve-check battery → opt-in duplicate sweep → severity post-filter →
+    → run the thirteen-check battery → opt-in duplicate sweep → severity post-filter →
     summary → WikiLog receipt.
 
     The duplicate sweep is OPT-IN (``include_duplicates=True``) and can exceed the
@@ -589,6 +590,25 @@ def wiki_lint(
                         f"in {end_key}",
                     ))
                     break
+
+        # (k) source_dangling (High) — an entity or concept whose wiki_sources lists an id
+        # that resolves to no object (a deleted Source). Same resolution as link_dangling:
+        # the single enumeration. One way to get here is a write that reached the server
+        # while the client saw an error, after which remember deleted the Source.
+        for o in all_objects:
+            if not isinstance(o, dict) or rel_key_for_type(_type_of(o)) is None:
+                continue
+            missing = [
+                sid
+                for sid in _parse_relation_elements((_prop(o, "wiki_sources") or {}).get("objects"))
+                if sid not in objects_by_id
+            ]
+            if missing:
+                findings.append(_finding(
+                    "high", "source_dangling", o, space_id,
+                    f"object {o['id']} ({_object_title(o)}) lists missing source(s): "
+                    f"{', '.join(missing)}",
+                ))
 
         # (i) empty_type (Informational) — one per content type with zero objects
         present_types = {_type_of(o) for o in wiki_objects}

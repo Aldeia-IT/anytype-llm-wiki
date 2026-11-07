@@ -405,11 +405,51 @@ class TestLintLinkChecks:
         fake.seed("wiki_link", "unindexed", _link_props(A, "ent-d", "y", [SRC1]), "lnk-unindexed")
         assert _ids(_lint()["link_index_missing"]) == ["lnk-unindexed"]
 
-    def test_lint_documents_twelve_checks(self):
+    def test_lint_documents_thirteen_checks(self):
         from anytype_llm_wiki.wiki import lint
 
-        assert "twelve" in (lint.__doc__ or "") and "twelve" in (lint.wiki_lint.__doc__ or "")
-        assert "ten-check" not in (lint.wiki_lint.__doc__ or "")
+        assert "thirteen" in (lint.__doc__ or "") and "thirteen" in (lint.wiki_lint.__doc__ or "")
+        assert "twelve" not in (lint.wiki_lint.__doc__ or "")
+        assert "source_dangling" in (lint.__doc__ or "")
+
+
+class TestLintSourceDangling:
+    """An entity or concept whose wiki_sources names an id that resolves to no object."""
+
+    @staticmethod
+    def _found():
+        return _lint(("source_dangling", "link_dangling"))
+
+    @respx.mock
+    def test_deleted_source_on_an_entity_is_high(self):
+        fake = _lint_world()
+        fake.objects[A]["properties"].append({"key": "wiki_sources", "objects": [SRC1, "gone"]})
+        found = self._found()
+        assert _ids(found["source_dangling"]) == [A]
+        assert found["source_dangling"][0]["severity"] == "high"
+        assert "gone" in found["source_dangling"][0]["detail"]
+
+    @respx.mock
+    def test_concept_is_checked_too(self):
+        fake = _lint_world()
+        fake.seed("wiki_concept", "Concept C", [{"key": "wiki_sources", "objects": ["gone"]}], C)
+        assert _ids(self._found()["source_dangling"]) == [C]
+
+    @respx.mock
+    def test_resolving_sources_and_no_sources_raise_nothing(self):
+        fake = _lint_world()
+        fake.objects[A]["properties"].append({"key": "wiki_sources", "objects": [SRC1]})
+        assert self._found()["source_dangling"] == []
+
+    @respx.mock
+    def test_both_forms_of_the_residual_race_are_surfaced(self):
+        """A write that reached the server while the client saw an error, then Source cleanup:
+        the Source is gone but an object (source_dangling) or a link (link_dangling) names it."""
+        fake = _lint_world(link_sources=("gone",))
+        fake.objects[B]["properties"].append({"key": "wiki_sources", "objects": ["gone"]})
+        found = self._found()
+        assert _ids(found["source_dangling"]) == [B]
+        assert _ids(found["link_dangling"]) == ["lnk-1"]
 
 
 # -- T22: version and docs (AC14) ------------------------------------------
