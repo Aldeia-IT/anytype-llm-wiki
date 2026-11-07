@@ -58,7 +58,9 @@ class FakeWiki:
 
     ``page_body``/``page_status`` drive the canned page host. ``serve_objects`` makes the
     ``/objects`` list return the stored objects (default: the schema collection, which the
-    ingest tests rely on). ``read_only`` answers every create and PATCH with 403 and records
+    ingest tests rely on). ``search_with_properties`` makes a search hit carry the stored properties (the production
+    search does); the default keeps the property-less hits the ingest tests were written
+    against. ``read_only`` answers every create and PATCH with 403 and records
     it in ``blocked`` instead of storing it.
     """
 
@@ -69,6 +71,7 @@ class FakeWiki:
         *,
         read_only: bool = False,
         serve_objects: bool = False,
+        search_with_properties: bool = False,
     ):
         self.store: dict = {}
         self.objects: dict[str, dict] = {}
@@ -81,6 +84,7 @@ class FakeWiki:
         self.page_status = page_status
         self.read_only = read_only
         self.serve_objects = serve_objects
+        self.search_with_properties = search_with_properties
         self.n = 0
         self._failures: list[dict] = []
 
@@ -207,7 +211,16 @@ class FakeWiki:
         if "/search" in url:
             q = normalize_title(payload.get("query", ""))
             data = [
-                {"id": o["id"], "name": o["name"], "type": {"key": tk}, "properties": []}
+                {
+                    "id": o["id"],
+                    "name": o["name"],
+                    "type": {"key": tk},
+                    "properties": (
+                        self.objects.get(o["id"], {}).get("properties", [])
+                        if self.search_with_properties
+                        else []
+                    ),
+                }
                 for (n, tk), o in self.store.items()
                 if n == q
             ]
