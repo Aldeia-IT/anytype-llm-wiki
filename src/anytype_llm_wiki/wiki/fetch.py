@@ -376,12 +376,24 @@ def _is_chrome_line(line: str) -> bool:
     return link_chars >= _RECOVER_MAX_LINK_SHARE * len(visible)
 
 
+# A recovered line is a notice only when it is short. The longest notice on the
+# measured pages, the Creative Commons footer "Content is available under Creative
+# Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) unless otherwise
+# noted.", is 15 words; a copyright line ("© 2016 Velhosmestres.com. All rights
+# reserved.") is about 6. The notice must also be the whole line, so a body sentence
+# that mentions a licence is recovered whatever its length (Aldeia-IT/aldeia-box#1508).
+_FURNITURE_LINE_MAX_WORDS = 15
+
+
 def _is_furniture_line(line: str) -> bool:
-    """True for a markdown line that is page furniture: a licence / copyright notice
-    or a line that only states a date, such as a byline or an edit stamp
-    (Aldeia-IT/aldeia-box#1508). A bare year line is not: it can be body text (D11a)."""
+    """True for a markdown line that is page furniture: a line that is, as a whole, a
+    licence / copyright notice of at most fifteen words (``is_licence_notice``), or
+    a line that only states a date, such as a byline or an edit stamp
+    (Aldeia-IT/aldeia-box#1508). A body line that mentions a licence mid-sentence
+    is recovered. A bare year line is not furniture: it can be body text (D11a)."""
     visible = markdown_visible_text(line)
-    return is_licence_notice(visible) or is_date_only(visible)
+    is_notice = len(line.split()) <= _FURNITURE_LINE_MAX_WORDS and is_licence_notice(visible)
+    return is_notice or is_date_only(visible)
 
 
 def _recover_missing_lines(primary: str, baseline: str) -> str:

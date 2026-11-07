@@ -1358,6 +1358,8 @@ class TestIsPageFurnitureName:
             "Velhos Mestres © 2016",
             "Copyright 2016 Velhos Mestres",
             "Copyright © Velhos Mestres",
+            "Copyright 2016 Velhosmestres",
+            "© 2016 Velhosmestres.com. All rights reserved.",
             # A bare domain (a site name).
             "Velhosmestres.com",
             "Capoeirahistory.com",
@@ -1392,6 +1394,14 @@ class TestIsPageFurnitureName:
             "Creative Commons",
             "Copyright Act",
             "Copyright law",
+            # A longer name that only contains a notice is a title, not a notice
+            # (Aldeia-IT/aldeia-box#1508 fix round 2: the notice must be the whole name).
+            "History of CC BY-SA 4.0 adoption",
+            "Licença CC BY 4.0 no Brasil",
+            "Music copyright in Brazil",
+            "The songbook, all rights reserved",
+            "Notes on all rights reserved in Brazilian law",
+            "Copyright 2016 dispute between Grupo X and Grupo Y over the songbook",
             # Version numbers are not numeric dates (review F2).
             "1.2.3",
             "2.0.1",

@@ -601,10 +601,11 @@ def is_page_furniture_name(name: str) -> bool:
        ``c. 1950``, ``1960s``, ``1968-1970``;
     2. a date (``furniture.is_date_only``): ``26 August 1997``, ``outubro, 2016``,
        ``2016-10-01``; a lone month (``May``) is not;
-    3. a licence or copyright notice by its shape (``furniture.is_licence_notice``):
+    3. a licence or copyright notice, as a whole (``furniture.is_licence_notice``):
        the Creative Commons footer, ``CC BY-SA 4.0``, ``All rights reserved``,
-       ``© 2026 ...``; a licence or organisation named on its own (``MIT License``,
-       ``Creative Commons``, ``Copyright Act``) is not;
+       ``© 2026 Grupo X``; a licence or organisation named on its own (``MIT
+       License``, ``Creative Commons``, ``Copyright Act``) is not, nor is a longer
+       name that only contains a notice (``History of CC BY-SA 4.0 adoption``);
     4. a bare domain, a site name: ``Velhosmestres.com``, ``capoeira.com.br``;
        ``Node.js``, ``Socket.io`` and ``ASP.NET`` are not.
 

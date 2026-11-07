@@ -43,48 +43,82 @@ _NUMERIC_DATE_RE = re.compile(
 # The longest date form kept in view: "the 1st of January of 2010" (6 words).
 _DATE_MAX_TOKENS = 7
 
-# A notice is short: a licence footer runs to about 15-25 words. A longer line is
-# body text even when it names a licence (Aldeia-IT/aldeia-box#1508 review F1).
+# The shape below must cover the whole text, so a title or a body sentence that only
+# contains a notice is never one (Aldeia-IT/aldeia-box#1508). The word cap is a
+# backstop: the shapes are short by construction.
 _NOTICE_MAX_WORDS = 30
-# A Creative Commons licence written as its code or spelled out with its version:
-# "CC BY-SA 4.0", "Creative Commons Attribution-ShareAlike 4.0". The bare
-# organisation name ("Creative Commons") is not a notice.
-_CC_LICENCE = (
-    r"\bcc[\s-]?by(?:-(?:sa|nc|nd))*(?:\s+\d\.\d)?\b"
-    r"|\bcc0\b"
-    r"|creative\s+commons\s+(?:attribution|atribui[çc][ãa]o|reconocimiento|zero)"
+_SIGN = r"(?:©|\(c\))"
+_YEAR = r"\d{4}(?:\s*[-–]\s*\d{4})?"
+# Who holds the copyright: up to six words after the sign or year ("Grupo X",
+# "Velhosmestres.com.").
+_HOLDER = r"[^\s©]+(?:\s+[^\s©]+){0,5}"
+_RESERVED = (
+    r"(?:all\s+rights\s+reserved|todos\s+os\s+direitos\s+reservados"
+    r"|todos\s+los\s+derechos\s+reservados)"
+)
+# A copyright line: "© 2026 Grupo X", "Copyright © X", "Copyright 2016 X",
+# "Copyright", "X © 2016", each optionally closed by "All rights reserved".
+# "Copyright" + a word that is not a year ("Copyright law") is not one.
+_COPYRIGHT = (
+    rf"(?:(?:copyright\s*)?{_SIGN}\s*(?:{_YEAR})?(?:[\s,.]*{_HOLDER})?"
+    rf"|copyright(?:\s+{_YEAR}(?:[\s,.]+{_HOLDER})?)?"
+    rf"|{_HOLDER}\s*{_SIGN}\s*{_YEAR})"
+    rf"(?:[\s.,|–-]+{_RESERVED})?"
+)
+# A Creative Commons licence written as its code (a space may stand for the hyphen,
+# as in markdown-stripped text) or spelled out with its version, with an optional
+# tail and code in brackets: "CC BY-SA 4.0", "Creative Commons
+# Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)". The bare organisation
+# name ("Creative Commons") is not a licence.
+_CC_CODE = r"(?:cc[\s-]?by(?:[\s-](?:sa|nc|nd))*(?:\s+\d\.\d)?|cc0)"
+_CC_TAIL = (
+    r"(?:\s+(?:international|internacional|unported|generic|brasil|brazil"
+    r"|public\s+license|license|licence|licença|licencia|deed))*"
+)
+_CC_SPELLED = (
+    r"creative\s+commons\s+(?:attribution|atribui[çc][ãa]o|reconocimiento|zero)"
     r"[\w\s,-]{0,60}?\d\.\d"
 )
-_NOTICE_SHAPE_RE = re.compile(
-    # Opens with the copyright sign, alone or after "Copyright": "© Grupo X", "©".
-    r"^\s*(?:copyright\s*)?(?:©|\(c\))"
-    # Opens with "Copyright", alone or with a year: "Copyright", "Copyright 2016 X".
-    r"|^\s*copyright\s*(?:$|\d{4}\b)"
-    # The sign with a year anywhere: "Grupo X © 2016".
-    r"|(?:©|\(c\))\s*\d{4}\b"
-    r"|all\s+rights\s+reserved|todos\s+os\s+direitos\s+reservados"
-    r"|todos\s+los\s+derechos\s+reservados"
-    # "licensed under" a named licence: "licensed under the MIT License".
-    r"|\blicensed\s+under\s+(?:the\s+|an?\s+)?(?:"
-    + _CC_LICENCE
-    + r"|[\w .-]{0,60}?\b(?:license|licence|licença|licencia)\b)"
-    r"|" + _CC_LICENCE,
-    re.IGNORECASE,
+_CC_LICENCE = rf"(?:{_CC_SPELLED}|{_CC_CODE}){_CC_TAIL}(?:\s*\(\s*{_CC_CODE}{_CC_TAIL}\s*\))?"
+_NAMED_LICENCE = rf"(?:{_CC_LICENCE}|[\w .-]{{0,60}}?\b(?:license|licence|licença|licencia))"
+# What a licence statement is about: "This work", "Content on this site".
+_LICENSED_SUBJECT = (
+    r"(?:except\s+where\s+otherwise\s+noted,?\s+)?(?:all\s+)?(?:the\s+)?"
+    r"(?:(?:content|contents|text|material)(?:\s+(?:on|of)\s+this\s+(?:site|website|page|wiki))?"
+    r"|this\s+(?:work|page|site|website|article|text|content))"
+)
+# A licence statement: "Licensed under CC BY-SA 4.0", "This work is licensed under a
+# Creative Commons Attribution 4.0 International License", "Content is available
+# under ... unless otherwise noted".
+_LICENSED = (
+    rf"(?:{_LICENSED_SUBJECT}\s+)?(?:(?:is|are)\s+)?"
+    r"(?:available|licensed|published|distributed|released)\s+under\s+"
+    r"(?:the\s+terms\s+of\s+)?(?:the\s+|an?\s+)?"
+    rf"{_NAMED_LICENCE}(?:[\s,]+(?:unless|except)\s+otherwise\s+(?:noted|stated|indicated))?"
+)
+_NOTICE_RE = re.compile(
+    rf"{_COPYRIGHT}|{_RESERVED}|{_LICENSED}|{_CC_LICENCE}", re.IGNORECASE
 )
 
 
 def is_licence_notice(text: str) -> bool:
-    """Tell whether ``text`` is a licence or copyright notice, by its shape.
+    """Tell whether ``text`` is, as a whole, a licence or copyright notice.
 
-    A notice is at most thirty words and either opens with ``©`` / ``(c)`` (alone
-    or after "Copyright"), is "Copyright" alone or followed by a year, carries
-    ``©`` before a year, says "all rights reserved" (English, Portuguese or
-    Spanish), names a Creative Commons licence by its code or spelled out with
-    its version (``CC BY-SA 4.0``, ``Creative Commons Attribution-ShareAlike
-    4.0``), or says "licensed under" a named licence. Not notices: a licence or
-    organisation named on its own (``MIT License``, ``Creative Commons``,
-    ``Copyright Act``), and a body sentence that mentions ``©``, copyright or
-    Creative Commons in passing (Aldeia-IT/aldeia-box#1508).
+    The notice must cover the whole text (edge whitespace and punctuation
+    aside), which is at most thirty words. Notices: a copyright line that opens
+    with ``©`` / ``(c)`` or "Copyright" (alone or with a year) or ends with ``©``
+    and a year, with only a year and a holder of up to six words besides
+    (``© 2026 Grupo X``, ``Copyright 2016 Velhosmestres``), optionally closed by
+    "All rights reserved"; "All rights reserved" alone (English, Portuguese or
+    Spanish); a Creative Commons licence by its code or spelled out with its
+    version (``CC BY-SA 4.0``, ``Creative Commons Attribution-ShareAlike 4.0
+    International (CC BY-SA 4.0)``); a licence statement ("Licensed under CC
+    BY-SA 4.0", "Content is available under ... unless otherwise noted").
+
+    Not notices: a licence or organisation named on its own (``MIT License``,
+    ``Creative Commons``, ``Copyright Act``), and any text that only contains a
+    notice: a title ("History of CC BY-SA 4.0 adoption") or a body sentence that
+    mentions a licence or ``©`` mid-sentence (Aldeia-IT/aldeia-box#1508).
 
     Args:
         text: a line of page text or an extracted name.
@@ -92,9 +126,12 @@ def is_licence_notice(text: str) -> bool:
     Returns:
         ``True`` for a notice; ``False`` otherwise, including non-str input.
     """
-    if not isinstance(text, str) or len(text.split()) > _NOTICE_MAX_WORDS:
+    if not isinstance(text, str):
         return False
-    return bool(_NOTICE_SHAPE_RE.search(text))
+    stripped = text.strip().strip(".,;:|").strip()
+    if not stripped or len(stripped.split()) > _NOTICE_MAX_WORDS:
+        return False
+    return bool(_NOTICE_RE.fullmatch(stripped))
 
 
 def is_date_only(text: str) -> bool:

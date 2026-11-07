@@ -444,6 +444,12 @@ class TestRecoverSkipsPageFurniture:
             "Copyright 2016 Velhos Mestres",
             "© 2026 Grupo Liberdade. All rights reserved.",
             "Todos os direitos reservados.",
+            "© 2016 Velhosmestres.com. All rights reserved.",
+            "Licensed under CC BY-SA 4.0",
+            (
+                "This work is licensed under a Creative Commons Attribution-ShareAlike "
+                "4.0 International License."
+            ),
             "outubro, 2016",
             "1 de Janeiro, 2010",
             "26 August 1997",
@@ -478,6 +484,15 @@ class TestRecoverSkipsPageFurniture:
                 "holds letters, photographs and recordings of the rodas that he led in "
                 "Salvador and in Rio de Janeiro between 1940 and 1970."
             ),
+            # A short body line that mentions a notice mid-sentence: the notice must
+            # be the whole line (Aldeia-IT/aldeia-box#1508 fix round 2).
+            (
+                "The 1978 recording of the ladainha, licensed under the Creative Commons "
+                "Attribution 4.0 licence by the family, is kept in the archive."
+            ),
+            "The songbook, all rights reserved, stayed with the family.",
+            "His CC BY-SA 4.0 photos of the roda are in the archive.",
+            "© 2016 photo by Pierre Verger of Mestre Pastinha teaching at his academy in Salvador",
             # Version numbers and Portuguese words are not dates (review F2, F3).
             "1.2.3",
             "Out 1",
