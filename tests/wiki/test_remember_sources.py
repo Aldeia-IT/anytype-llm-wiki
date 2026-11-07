@@ -8,6 +8,7 @@ Anytype is the ``FakeWiki`` respx fake; ``extract`` and ``consolidate`` are monk
 the way ``test_remember.py`` does; no live space and no model call.
 """
 
+import httpx
 import pytest
 import respx
 
@@ -557,3 +558,48 @@ class TestFreshReadAndPartialLinks:
         )
         _assert_deterministic_merge(fake, _remember())
         assert "[p. 99]" not in "\n".join(_facts_lines(fake))
+
+
+class TestSourceCleanup:
+    """D20b: a Source nothing refers to is deleted; a degrade creates none (D19)."""
+
+    def _failing_create(self, monkeypatch):
+        fake = _space()
+        _patch_calls(monkeypatch, [SUBJECT])
+        fake.fail("POST", type_key="wiki_entity")
+        deleted: list[str] = []
+        return fake, deleted
+
+    @respx.mock
+    def test_total_degrade_still_creates_no_source(self, monkeypatch):
+        fake = _space()
+        _seed_bimba(fake)
+        _patch_calls(
+            monkeypatch, [SUBJECT],
+            lambda kw: {"consolidated_text": "", "changed": False, "fact_actions": [],
+                        "conflicts": [], "error": "consolidation_degraded: parse"},
+        )
+        result = _remember()
+        assert fake.created_of("wiki_source") == []
+        assert result["source_object_id"] is None
+
+    @respx.mock
+    def test_source_is_deleted_after_a_failed_first_write(self, monkeypatch):
+        fake, deleted = self._failing_create(monkeypatch)
+        respx.delete(url__regex=r".*/objects/[^/]+$").mock(
+            side_effect=lambda request: (deleted.append(request.url.path.rsplit("/", 1)[-1])
+                                         or httpx.Response(200, json={"object": {}}))
+        )
+        result = _remember()
+        sources = [o for o in fake.created if o.get("type_key") == "wiki_source"]
+        assert len(sources) == 1 and len(deleted) == 1, (sources, deleted)
+        assert result["source_object_id"] is None
+        assert result["objects"][0]["action"] == "error"
+
+    @respx.mock
+    def test_failing_delete_warns_and_is_partial(self, monkeypatch):
+        fake, _ = self._failing_create(monkeypatch)
+        respx.delete(url__regex=r".*/objects/[^/]+$").mock(return_value=httpx.Response(500))
+        result = _remember()
+        assert "source_cleanup_failed" in result["warnings"], result["warnings"]
+        assert result["status"] == "partial"

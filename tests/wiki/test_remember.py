@@ -463,6 +463,11 @@ class TestIdempotencyGate:
             router.patch(
                 f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-stateful-001"
             ).mock(side_effect=capture_patch)
+            # Both calls get the same mocked Source id, so call 2 writes nothing and its
+            # unreferenced Source is cleaned up (D20b); a real call 2 has a new Source id.
+            router.delete(url__regex=r".*/objects/misc-001$").mock(
+                return_value=httpx.Response(200, json={"object": {}})
+            )
             router.get(
                 f"/v1/spaces/{FAKE_SPACE_ID}/objects/entity-stateful-001"
             ).mock(side_effect=lambda request, **kw: httpx.Response(

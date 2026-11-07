@@ -687,6 +687,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
     wikilog_notes: list[str] = []
 
     source_state: dict = {"id": None, "created": False}
+    wrote = {"object": False}
 
     def _ensure_source() -> str | None:
         if source_state["created"]:
@@ -893,6 +894,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     patch_props.append({"key": "wiki_sources", "objects": new_sources})
                 if patch_props:
                     _write_object(target_id, patch_props)
+                    wrote["object"] = True
                 obj_entry["action"] = "updated" if text_changed else "consolidated"
 
                 obj_entry["deeplink"] = _object_deeplink(space_id, target_id)
@@ -928,6 +930,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                 created = client.create_object(
                     space_id, type_key=type_key, name=clean_name, properties=create_props,
                 )
+                wrote["object"] = True
                 obj_id = created.get("id")
                 obj_entry["object_id"] = obj_id
                 obj_entry["action"] = "created"
@@ -974,6 +977,16 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
             if oid and oid in endpoint_objs:
                 obj["relations_created"] = endpoint_objs.count(oid)
         result["relations_created"] += rel_total
+
+    # D20b: a Source no entity, concept or link refers to is cleaned up (best effort).
+    linked = result.get("relations_created", 0) or result.get("relations_sourced", 0)
+    if source_state["id"] and not wrote["object"] and not linked:
+        try:
+            client.delete_object(space_id, source_state["id"])
+            result["source_object_id"] = None
+        except (httpx.HTTPError, KeyError, ValueError, TypeError):
+            result["warnings"].append("source_cleanup_failed")
+            result["status"] = "partial"
 
     for read_client in read_holder:
         read_client.close()
