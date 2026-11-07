@@ -247,6 +247,28 @@ _CONTROL_CHAR_RE = re.compile(
 )
 
 
+def fence_safe(text: str) -> str:
+    """``text`` with every closing-tag opener ``</`` written ``<\\/``.
+
+    Prompts fence caller text between tags (``<new_knowledge>...</new_knowledge>``) and
+    call the fenced part DATA. A value holding a closing tag would end the fence early
+    and let the rest read as instructions; with no ``</`` left it cannot.
+    """
+    return text.replace("</", "<\\/") if isinstance(text, str) else str(text)
+
+
+def fill_template(template: str, values: dict[str, str]) -> str:
+    """Fill ``{placeholder}`` keys of ``template`` in one pass with fence-safe values.
+
+    ``values`` maps the whole placeholder (``"{source_label}"``) to its text. One
+    pass means text that looks like another placeholder is never substituted again.
+    """
+    if not values:
+        return template
+    pattern = re.compile("|".join(re.escape(k) for k in values))
+    return pattern.sub(lambda m: fence_safe(values[m.group(0)] or ""), template)
+
+
 def strip_control_chars(text: str) -> str:
     """Remove invisible/control/bidi/tag codepoints from ``text``.
 

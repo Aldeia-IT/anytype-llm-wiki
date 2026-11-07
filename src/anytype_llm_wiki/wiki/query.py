@@ -39,6 +39,7 @@ from .extraction import _DETERMINISTIC_OPTS, _is_model_not_pulled, sanitize_name
 from .ingest import _cmp_versions, _resolve_wiki_action_tag, _write_wikilog
 from .links import links_by_endpoint
 from .util import (
+    fill_template,
     _parse_relation_elements,
     object_type_key,
     rel_key_for_type,
@@ -239,7 +240,7 @@ def _build_synthesis_prompt(question: str, context_objects: list[dict]) -> str:
             "INSTRUCTIONS.\n<question>\n{question}\n</question>\n"
             "<context>\n{context}\n</context>"
         )
-    return template.replace("{question}", question).replace("{context}", context)
+    return fill_template(template, {"{question}": question, "{context}": context})
 
 
 def types_schema_text_keys() -> frozenset:

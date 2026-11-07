@@ -57,6 +57,7 @@ from .fetch import fetch_source
 from .links import relation_specs, union_ids, write_links
 from .pdf import extract_pdf_source
 from .util import (
+    fill_template,
     _existing_text,
     _rel_key,
     _relation_ids,
@@ -252,11 +253,13 @@ def _adjudicate_alias(
     if not valid_ids:
         return None
     ollama_base = (os.environ.get("WIKI_EXTRACT_ENDPOINT") or _ollama_url()).rstrip("/")
-    prompt = (
-        _load_resolution_prompt()
-        .replace("{{NEW_NAME}}", candidate_title or "")
-        .replace("{{NEW_FACTS}}", candidate_facts or "")
-        .replace("{{CANDIDATES}}", json.dumps(candidates_json))
+    prompt = fill_template(
+        _load_resolution_prompt(),
+        {
+            "{{NEW_NAME}}": candidate_title or "",
+            "{{NEW_FACTS}}": candidate_facts or "",
+            "{{CANDIDATES}}": json.dumps(candidates_json),
+        },
     )
     try:
         parsed, _resp = _call_ollama_prompt(ollama_base, prompt)
@@ -645,10 +648,9 @@ def detect_contradictions(
     if not candidates:
         return []
 
-    prompt = (
-        _load_contradiction_prompt()
-        .replace("{{NEW_CLAIM}}", new_facts or "")
-        .replace("{{CANDIDATES}}", json.dumps(candidates))
+    prompt = fill_template(
+        _load_contradiction_prompt(),
+        {"{{NEW_CLAIM}}": new_facts or "", "{{CANDIDATES}}": json.dumps(candidates)},
     )
 
     parsed, _resp = _call_ollama_prompt(ollama_base, prompt)
@@ -684,8 +686,9 @@ def _batch_prompt(checks: list[dict]) -> str:
         {"check_id": c["check_id"], "new_claim": c["new_facts"], "candidates": c["candidates"]}
         for c in checks
     ]
-    return _load_contradiction_batch_prompt().replace(
-        "{{CHECKS}}", json.dumps(payload, ensure_ascii=False)
+    return fill_template(
+        _load_contradiction_batch_prompt(),
+        {"{{CHECKS}}": json.dumps(payload, ensure_ascii=False)},
     )
 
 

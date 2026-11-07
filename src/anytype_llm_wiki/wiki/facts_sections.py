@@ -47,7 +47,7 @@ _DEFUSE_RE = re.compile(r"\[(?=(?:also:|superseded:|conflict))", re.IGNORECASE)
 _LEADING_MARKUP_RE = re.compile(r"^[\s#>\-]+")
 _PATH_SEGMENT_MIN = 20
 # Any "scheme://" URL in prose, whatever the scheme or its case (postgres://u:pw@host/x).
-_ANY_URL_RE = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.-]*://[^\s)\]>"']+""")
+_ANY_URL_RE = re.compile(r"""(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s)\]>"']+""")
 _SELF_ID_RE = re.compile(r"#s(\d+)$")
 _ELLIPSIS = "…"
 

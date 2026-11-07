@@ -21,7 +21,7 @@ import httpx
 
 from . import config
 from . import profile
-from .util import scrub_credentials, strip_control_chars
+from .util import fence_safe, fill_template, scrub_credentials, strip_control_chars
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ def _fill_prompt(template: str, source: str, subject_block: str) -> str:
     """Fill ``{source}`` and ``{subject}`` in one pass, so text inside the page or
     the hint that looks like a placeholder is never substituted."""
     values = {"{source}": source, "{subject}": subject_block}
-    return _PLACEHOLDER_RE.sub(lambda m: values[m.group(0)], template)
+    return _PLACEHOLDER_RE.sub(lambda m: fence_safe(values[m.group(0)]), template)
 
 
 def _budget_chars(template: str, subject_block: str) -> int:
@@ -430,13 +430,15 @@ def consolidate(
     base = base.rstrip("/")
 
     property_name = "wiki_definition" if kind == "concept" else "wiki_facts"
-    prompt = (
-        _load_consolidate_prompt()
-        .replace("{kind}", str(kind))
-        .replace("{property_name}", property_name)
-        .replace("{source_label}", str(source_label or ""))
-        .replace("{existing_facts}", existing_text or "")
-        .replace("{new_knowledge}", new_facts or "")
+    prompt = fill_template(
+        _load_consolidate_prompt(),
+        {
+            "{kind}": str(kind),
+            "{property_name}": property_name,
+            "{source_label}": str(source_label or ""),
+            "{existing_facts}": existing_text or "",
+            "{new_knowledge}": new_facts or "",
+        },
     )
 
     try:

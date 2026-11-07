@@ -823,3 +823,8 @@ class TestFactSourceLabelSecrets:
     def test_segment_with_dots_and_percent_signs_is_elided(self):
         assert fs.fact_source_label("https://ex.org/a/ab.cd~ef=gh%2Fij+kl.mnop") == "https://ex.org/a/…"
         assert fs.fact_source_label("https://ex.org/a/short.pdf") == "https://ex.org/a/short.pdf"
+
+    def test_url_glued_to_an_underscore_word_is_scrubbed(self):
+        out = fs.fact_source_label("x_postgres://u:pw@db.internal/x?p=1 and y_HTTPS://a:b@ex.org/z")
+        assert "u:pw" not in out and "a:b" not in out and "p=1" not in out
+        assert "db.internal/x" in out and "ex.org/z" in out
