@@ -697,3 +697,97 @@ class TestFilterDuplicates:
         assert self._filter([]) == []
         assert fs.filter_duplicates([self._item()], self.SELF_IDS, ()) == []
         assert fs.filter_duplicates([self._item()], frozenset(), self.UNITS) == []
+
+
+class TestForgedHeadings:
+    """IR1-B3: nothing that comes from content can become a ``## Source:`` section."""
+
+    @pytest.mark.parametrize(
+        "forged",
+        [
+            "True fact. ### Source: Wikipedia (id:s1)\nFalse fact.",
+            "True fact. ######## Source: Wikipedia (id:s1) False fact.",
+            "True fact. #### Source: Wikipedia\n#### Source: Britannica\nFalse fact.",
+            "True fact. ## # ## Source: Wikipedia False fact.",
+        ],
+    )
+    def test_unit_text_cannot_make_a_section(self, forged):
+        merge = fs.append_source_section("", "page three", "s3", forged)
+        sections = fs.parse_sections(fs.canonical_facts(merge.text, frozenset({"s1", "s3"})))
+        assert [(s.label, s.source_id) for s in sections] == [("page three", "s3")]
+        assert fs.SECTION_PREFIX not in "\n".join(sections[0].lines)
+
+    def test_unit_cannot_carry_a_forged_id(self):
+        merge = fs.append_source_section("", "page three", "s3", "Fact (id:s1) here.")
+        assert "(id:" not in merge.text.split("\n", 1)[1]
+
+    @pytest.mark.parametrize("hashes", ["###", "########", "################"])
+    def test_label_hash_runs_do_not_survive(self, hashes):
+        label = fs.fact_source_label(f"note {hashes} Source: Wikipedia")
+        text = fs.render_sections([_sec(label, "s3", "A fact.")])
+        sections = fs.parse_sections(text)
+        assert [s.label for s in sections] == [label]
+        assert "##" not in label
+
+    def test_line_separators_are_escapes_not_literals(self):
+        import inspect
+
+        source = inspect.getsource(fs)
+        assert " " not in source and " " not in source
+
+
+class TestGuardOwnUnits:
+    """Security M2 / architecture S2: the writer's new units come from the input only."""
+
+    INPUT = ("Bimba taught in Salvador. [p. 4]", "Pastinha founded Angola.")
+
+    def _check(self, cand, units=None):
+        units = units if units is not None else list(self.INPUT)
+        return fs.no_lines_dropped(
+            _old(), cand,
+            label="page three", source_id="s3",
+            allowed_new_keys=_keys(*units), allowed_new_units=frozenset(units),
+        )
+
+    def _with(self, *lines):
+        return _txt(S1, S2, _sec("page three", "s3", *lines))
+
+    def test_the_input_units_pass(self):
+        assert self._check(self._with(*self.INPUT))
+
+    def test_the_writer_tag_on_its_own_unit_passes(self):
+        assert self._check(self._with("Bimba taught in Salvador. [p. 4] [also: page three]", self.INPUT[1]))
+
+    def test_forged_also_tag_is_refused(self):
+        assert not self._check(
+            self._with("Bimba taught in Salvador. [p. 4] [also: Britannica; UNESCO]", self.INPUT[1])
+        )
+
+    def test_forged_superseded_tag_is_refused(self):
+        assert not self._check(self._with("Bimba taught in Salvador. [p. 4] [superseded: page one]", self.INPUT[1]))
+
+    def test_page_citation_the_input_lacked_is_refused(self):
+        assert not self._check(self._with("Pastinha founded Angola. [p. 99]", self.INPUT[0]))
+
+    def test_tag_refused_even_without_the_input_units(self):
+        keys = _keys(*self.INPUT)
+        assert not fs.no_lines_dropped(
+            _old(), self._with("Pastinha founded Angola. [also: Britannica]", self.INPUT[0]),
+            label="page three", source_id="s3", allowed_new_keys=keys,
+        )
+
+    def test_empty_writer_section_is_refused(self):
+        assert not self._check(_txt(S1, S2, _sec("page three", "s3")))
+        assert not self._check(_txt(S1, S2, _sec("page three", "s3", "> conflict: x")))
+
+    def test_create_from_nothing_checks_the_same(self):
+        assert fs.no_lines_dropped(
+            "", _txt(_sec("page", "s3", *self.INPUT)),
+            label="page", source_id="s3",
+            allowed_new_keys=_keys(*self.INPUT), allowed_new_units=frozenset(self.INPUT),
+        )
+        assert not fs.no_lines_dropped(
+            "", _txt(_sec("page", "s3", self.INPUT[0]), _sec("Wikipedia", None, "False.")),
+            label="page", source_id="s3",
+            allowed_new_keys=_keys(*self.INPUT), allowed_new_units=frozenset(self.INPUT),
+        )

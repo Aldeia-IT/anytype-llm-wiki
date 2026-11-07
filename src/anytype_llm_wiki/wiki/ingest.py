@@ -1483,10 +1483,12 @@ def _run_ingest(
                     base = canonical_facts(stored, known_ids)
                     merge = append_source_section(base, section_label, source_id, facts)
                     candidate_text = canonical_facts(merge.text, known_ids)
+                    input_units = split_fact_units(facts)
                     if merge.changed and not no_lines_dropped(
                         base, candidate_text,
                         label=section_label, source_id=source_id,
-                        allowed_new_keys=frozenset(fact_key(u) for u in split_fact_units(facts)),
+                        allowed_new_keys=frozenset(fact_key(u) for u in input_units),
+                        allowed_new_units=frozenset(input_units),
                     ):
                         status = "partial"
                         result["warnings"].append(f"facts_guard_rejected: {clean_name!r}")
@@ -1560,6 +1562,18 @@ def _run_ingest(
                         append_source_section("", section_label, source_id, facts).text,
                         known_ids,
                     )
+                    # Canonical + guard, as on update: nothing from the page can
+                    # become a section of its own (Aldeia-IT/aldeia-box#1486 IR1-B3).
+                    input_units = split_fact_units(facts)
+                    if created_text and not no_lines_dropped(
+                        "", created_text,
+                        label=section_label, source_id=source_id,
+                        allowed_new_keys=frozenset(fact_key(u) for u in input_units),
+                        allowed_new_units=frozenset(input_units),
+                    ):
+                        status = "partial"
+                        result["warnings"].append(f"facts_guard_rejected: {clean_name!r}")
+                        continue
                     props = [{"key": text_key, "text": created_text}]
                     if source_id:
                         props.append({"key": "wiki_sources", "objects": [source_id]})

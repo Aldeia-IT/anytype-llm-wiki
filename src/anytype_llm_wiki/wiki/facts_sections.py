@@ -30,8 +30,9 @@ LABEL_MAX_CHARS = 200
 REASON_MAX_CHARS = 200
 
 _HEADING_RE = re.compile(r"^## Source: (?P<label>.*?)(?: \(id:(?P<id>[^()\s]+)\))?$")
-_LINE_BREAKS_RE = re.compile("\r\n|[\r\x85  ]")
+_LINE_BREAKS_RE = re.compile("\r\n|[\r\x85\u2028\u2029]")
 _WS_RE = re.compile(r"\s+")
+_HASH_RUN_RE = re.compile(r"#{2,}")
 _SENTENCE_BREAK_RE = re.compile('(?<=[.!?])\\s+(?=[A-ZÀ-Ý0-9"“(\\[])')
 _SENTENCE_START_RE = re.compile('[A-ZÀ-Ý0-9"\u201c(\\[]')
 # A tag or a page locator written right after a unit belongs to that unit.
@@ -84,7 +85,7 @@ def _clean_single_line(text: str, max_chars: int) -> str:
     """A heading label or marker reason: one line, no brackets, no ``;``, no forged ``(id:``."""
     text = _WS_RE.sub(" ", _normalize_text(text)).strip()
     text = text.replace("[", "(").replace("]", ")").replace(";", ",")
-    text = text.replace("(id:", "(id :").replace("##", "#")
+    text = _HASH_RUN_RE.sub("#", text.replace("(id:", "(id :"))
     return text[:max_chars].strip()
 
 
@@ -126,7 +127,9 @@ def _sanitize_new_text(text: str) -> str:
     lines: list[str] = []
     for line in _normalize_text(text).split("\n"):
         line = _LEADING_MARKUP_RE.sub("", _DEFUSE_RE.sub("(", line))
-        lines.append(line.replace(SECTION_PREFIX, "# Source: ").strip())
+        # Every run of '#' collapses to one, so no input (### Source:, ########) can leave
+        # a "## Source: " behind; "(id:" is defused as in labels.
+        lines.append(_HASH_RUN_RE.sub("#", line).replace("(id:", "(id :").strip())
     return "\n".join(lines)
 
 
@@ -565,13 +568,30 @@ def no_lines_dropped(
     label: str,
     source_id: str | None,
     allowed_new_keys: frozenset[str],
+    allowed_new_units: frozenset[str] | None = None,
 ) -> bool:
     """True only if the candidate keeps everything of ``old_text`` and adds only the writer's.
 
     Additions allowed: the writer's own section, units whose key is in
-    ``allowed_new_keys``, and tags or flags carrying the writer's label. Both texts
-    are read with every id kept, so call it on ``canonical_facts`` output.
+    ``allowed_new_keys``, and tags or flags carrying the writer's label. A new unit
+    may carry no ``[also:]``/``[superseded:]`` tag except the writer's own label.
+    With ``allowed_new_units`` (the input units, ``split_fact_units(new facts)``) a new
+    unit must also equal one of them once the writer's tag is taken off, so a page
+    citation the input did not carry is refused. The writer's new section must hold
+    at least one unit. Both texts are read with every id kept, so call it on
+    ``canonical_facts`` output.
     """
+    label_ = _clean_label(label)
+    exact = None if allowed_new_units is None else {_WS_RE.sub(" ", u).strip() for u in allowed_new_units}
+
+    def _new_unit_ok(unit: str) -> bool:
+        if fact_key(unit) not in allowed_new_keys:
+            return False
+        bare = _without_label(unit, label_)
+        if _TAGS_RE.search(bare):
+            return False
+        return exact is None or _WS_RE.sub(" ", bare).strip() in exact
+
     label = _clean_label(label)
     old = parse_sections(old_text, known_ids=None)
     cand = parse_sections(candidate_text, known_ids=None)
@@ -597,7 +617,7 @@ def no_lines_dropped(
             if _without_label(kept_old, label) != _without_label(kept_new, label):
                 return False
         appended = new_units[len(old_units) :]
-        if appended and not (writer and all(fact_key(u) in allowed_new_keys for u in appended)):
+        if appended and not (writer and all(_new_unit_ok(u) for u in appended)):
             return False
         remaining = list(new_flags)
         for flag in old_flags:
@@ -608,6 +628,6 @@ def no_lines_dropped(
             return False
     if extra:
         units, _flags = _split_lines(extra[0])
-        if not all(fact_key(u) in allowed_new_keys for u in units):
+        if not units or not all(_new_unit_ok(u) for u in units):
             return False
     return True
