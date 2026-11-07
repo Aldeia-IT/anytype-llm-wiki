@@ -4,6 +4,7 @@ These tests FAIL until src/anytype_llm_wiki/wiki/remember.py is implemented.
 Covers: AC-R1 through AC-R31, AC-R-S1, AC-R-S2, addendum items 1-2.
 """
 
+from anytype_llm_wiki.wiki.links import LinkWriteResult
 import json
 import os
 import sys
@@ -2782,7 +2783,7 @@ class TestCorePipeline:
         )
 
     def test_relations_wired_from_caller_param(self, monkeypatch, tmp_path):
-        """AC-R1 — relations param → _write_bidirectional_relations called; per-object relations_created populated."""
+        """AC-R1 — relations param → write_links called; per-object relations_created populated."""
         _patch_decision_ok(monkeypatch, tmp_path)
         mock_extract = MagicMock(return_value=_canned_extract_result())
         mock_lock = MagicMock()
@@ -2791,9 +2792,9 @@ class TestCorePipeline:
         monkeypatch.setattr("anytype_llm_wiki.wiki.remember.extract", mock_extract, raising=False)
         monkeypatch.setattr("anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False)
 
-        mock_write_rels = MagicMock(return_value=(1, []))  # (count, rollback_notes)
+        mock_write_rels = MagicMock(return_value=LinkWriteResult(created=1))
         monkeypatch.setattr(
-            "anytype_llm_wiki.wiki.remember._write_bidirectional_relations",
+            "anytype_llm_wiki.wiki.remember.write_links",
             mock_write_rels, raising=False
         )
 
@@ -2818,7 +2819,7 @@ class TestCorePipeline:
                 relations=[{"from": "TestEntity", "to": "OtherEntity", "label": "uses"}],
             )
 
-        assert mock_write_rels.called, "_write_bidirectional_relations must be called when relations passed"
+        assert mock_write_rels.called, "write_links must be called when relations passed"
         objects = result.get("objects", [])
         assert objects, "Expected per-object result"
         total_relations = result.get("relations_created", -1)
@@ -2834,10 +2835,12 @@ class TestCorePipeline:
         monkeypatch.setattr("anytype_llm_wiki.wiki.remember.extract", mock_extract, raising=False)
         monkeypatch.setattr("anytype_llm_wiki.wiki.remember.space_ingest_lock", mock_lock, raising=False)
 
-        # Mock _write_bidirectional_relations to simulate 0 relations (endpoint unresolved)
-        mock_write_rels = MagicMock(return_value=(0, ["relation_endpoint_unresolved: WrongTypeObj"]))
+        # Mock write_links to simulate 0 relations (endpoint unresolved)
+        mock_write_rels = MagicMock(
+            return_value=LinkWriteResult(notes=["relation_endpoint_unresolved: WrongTypeObj"])
+        )
         monkeypatch.setattr(
-            "anytype_llm_wiki.wiki.remember._write_bidirectional_relations",
+            "anytype_llm_wiki.wiki.remember.write_links",
             mock_write_rels, raising=False
         )
 
@@ -3742,12 +3745,12 @@ def _run_remember_capturing(monkeypatch, tmp_path, subjects, **kwargs):
 
     rel_calls: list = []
 
-    def fake_write_rels(client, space_id, rels, kind_by_id):
-        rel_calls.extend(rels)
-        return len(rels), []
+    def fake_write_rels(client, read_client, space_id, specs, **kw):
+        rel_calls.extend((sp.from_id, sp.to_id, sp.label) for sp in specs)
+        return LinkWriteResult(created=len(specs))
 
     monkeypatch.setattr(
-        "anytype_llm_wiki.wiki.remember._write_bidirectional_relations",
+        "anytype_llm_wiki.wiki.remember.write_links",
         fake_write_rels, raising=False,
     )
 
@@ -4001,7 +4004,8 @@ class TestSubjectHintNaming:
         )
         assert [p["name"] for p in creates] == [_HINT_ACM, "Mestre Bimba", "Salvador"]
         # The caller's relation comes first, then only the missing auto link.
-        assert [r[2] for r in rels] == [caller_rel["label"], "related"]
+        # (labels are normalised by the link writer: "founded_by" -> "founded by")
+        assert [r[2] for r in rels] == [caller_rel["label"].replace("_", " "), "related"]
         assert rels[1] == (_HINT_ACM, "Salvador", "related")
 
     def test_ac10_no_hint_proper_names_unchanged(self, monkeypatch, tmp_path):

@@ -40,7 +40,16 @@ from .extraction import (
     sanitize_name,
     sanitize_property_value,
 )
+from .facts_sections import (
+    append_source_section,
+    canonical_facts,
+    fact_key,
+    fact_source_label,
+    no_lines_dropped,
+    split_fact_units,
+)
 from .fetch import fetch_source
+from .links import relation_specs, union_ids, write_links
 from .pdf import extract_pdf_source
 from .util import (
     _existing_text,
@@ -98,6 +107,7 @@ def _empty_result() -> dict:
         "objects_updated": [],
         "objects_skipped": [],
         "relations_created": 0,
+        "relations_sourced": 0,
         "contradictions_detected": 0,
         "wiki_log_id": None,
         "warnings": [],
@@ -480,62 +490,29 @@ def _patch_relation(
     )
 
 
-def _write_bidirectional_relations(
-    client: WikiClient,
-    space_id: str,
-    relations: list[tuple[str, str, str]],
-    kind_by_id: dict[str, str],
-) -> tuple[int, list[str]]:
-    """Write each relation bidirectionally via property links; roll back on failure.
+def _set_object_prop(obj: dict, entry: dict) -> None:
+    """Set one property entry on a cached object (the run cache follows each PATCH)."""
+    props = obj.get("properties")
+    if not isinstance(props, list):
+        props = []
+    obj["properties"] = [
+        p for p in props if not (isinstance(p, dict) and p.get("key") == entry["key"])
+    ] + [entry]
 
-    For an A→B relation, PATCH A's relation property (``wiki_relations`` for an
-    entity, ``wiki_related`` for a concept) to append B's id, then PATCH B's
-    relation property to append A's id. If the SECOND (B) side fails, roll back
-    by PATCHing A's relation property back to its prior value.
 
-    ``linked`` accumulates the per-object union of relation ids written this run
-    so each PATCH carries the full objects list (Anytype objects-format set).
-
-    Returns (relations_created, rollback_notes).
-    """
-    created = 0
-    rollback_notes: list[str] = []
-    linked: dict[str, list[str]] = {}
-    for from_id, to_id, _label in relations:
-        from_key = _rel_key(kind_by_id.get(from_id, "entity"))
-        to_key = _rel_key(kind_by_id.get(to_id, "entity"))
-
-        prior_from = list(linked.get(from_id, []))
-        new_from = prior_from + ([to_id] if to_id not in prior_from else [])
-        try:
-            # Side A first.
-            _patch_relation(client, space_id, from_id, from_key, new_from)
-            linked[from_id] = new_from
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-            rollback_notes.append(
-                f"relation_rollback: relation {from_id}->{to_id} failed on A-side: {exc}"
-            )
-            continue
-
-        prior_to = list(linked.get(to_id, []))
-        new_to = prior_to + ([from_id] if from_id not in prior_to else [])
-        try:
-            # Side B second.
-            _patch_relation(client, space_id, to_id, to_key, new_to)
-            linked[to_id] = new_to
-            created += 2
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-            # B-side failed — roll back A by reverting to its prior value.
-            try:
-                _patch_relation(client, space_id, from_id, from_key, prior_from)
-                linked[from_id] = prior_from
-            except (httpx.HTTPError, KeyError, ValueError, TypeError):
-                pass
-            rollback_notes.append(
-                f"relation_rollback: reverted {from_id}.{from_key} (-> {to_id}) "
-                f"after reciprocal B-side failed: {exc}"
-            )
-    return created, rollback_notes
+def _select_ids(obj: dict, prop_key: str) -> list[str]:
+    """Tag ids of a multi-select property on an object dict (bare ids or ``{"id": ...}``)."""
+    props = obj.get("properties")
+    if not isinstance(props, list):
+        return []
+    for p in props:
+        if isinstance(p, dict) and p.get("key") == prop_key:
+            return [
+                e if isinstance(e, str) else e.get("id")
+                for e in p.get("multi_select") or []
+                if isinstance(e, str) or (isinstance(e, dict) and e.get("id"))
+            ]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -1190,6 +1167,7 @@ def _run_ingest(
 
         # 8. enrich via best-effort extract().
         extraction_error: str | None = None
+        name_aliases: dict[str, str] = {}
         extracted_cands: list[dict] = []
         extract_started = time.monotonic()
         extracted: dict | None = None
@@ -1269,9 +1247,19 @@ def _run_ingest(
             marked = None
             if subject_hint and isinstance(extracted, dict) and extracted_cands:
                 marked = extracted.get("primary_subject")
+            if isinstance(marked, str) and marked.strip() and subject_hint:
+                name_aliases[normalize_title(marked)] = normalize_title(subject_hint)
+            original_names = [c["name"] for c in candidates]
             candidates, plan_warnings = plan_primary_subject(
                 candidates, subject_hint, marked, strip_titles=strip_titles
             )
+            # The model's relations name entities as it extracted them; the plan
+            # may rename the primary or strip a title, so keep the old spellings.
+            if len(original_names) == len(candidates):
+                for old_name, cand in zip(original_names, candidates):
+                    old_key, new_key = normalize_title(old_name), normalize_title(cand["name"])
+                    if old_key != new_key:
+                        name_aliases[old_key] = new_key
             result["warnings"].extend(plan_warnings)
 
         # 9. create Source object.
@@ -1309,6 +1297,11 @@ def _run_ingest(
         # WIKI_REFUSE_IDENTIFIER_NAMES_SPACES (opt-in, #1426). Heading and
         # URL-named fallback candidates are gated too; the Source never is.
         refuse_identifiers = space_id in config.refuse_identifier_names_spaces()
+        # Per-run cache (Aldeia-IT/aldeia-box#1486): the fresh object read, kept
+        # current by each PATCH, and the untyped index ids ``write_links`` extends.
+        object_cache: dict[str, dict] = {}
+        index_cache: dict[str, list[str]] = {}
+        section_label = fact_source_label(source)
         for cand in candidates:
             clean_name = sanitize_name(cand["name"])
             if clean_name is None:
@@ -1328,16 +1321,11 @@ def _run_ingest(
             if kind == "concept":
                 type_key = "wiki_concept"
                 type_label = "concept"
-                props = [{"key": "wiki_definition", "text": facts}]
+                text_key = "wiki_definition"
             else:
                 type_key = "wiki_entity"
                 type_label = "entity"
-                props = [{"key": "wiki_facts", "text": facts}]
-            # #336 D2: stamp wiki_domain_tags on this candidate (both create and
-            # update branches consume ``props`` below). Appended per-iteration
-            # because props is rebuilt each loop.
-            if domain_tag_prop is not None:
-                props.append(domain_tag_prop)
+                text_key = "wiki_facts"
             try:
                 with profile.span("resolve", name=clean_name):
                     resolution = resolve_entity(
@@ -1346,12 +1334,57 @@ def _run_ingest(
                     )
                 if resolution["action"] == "update":
                     target = resolution["target"]
-                    # Properties-only PATCH — NEVER a body/markdown key (AC-L1).
-                    with profile.span("write_update", name=clean_name):
-                        updated = client.update_object(
-                            space_id, target["id"], {"properties": props}
-                        )
-                    obj_id = updated.get("id", target.get("id"))
+                    target_id = target["id"]
+                    # One fresh read per object per run (a search hit may carry no
+                    # properties); later candidates on the same object reuse it.
+                    if target_id not in object_cache:
+                        try:
+                            fresh = read_client.get_object(space_id, target_id)
+                        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+                            status = "partial"
+                            result["warnings"].append(
+                                f"facts_read_failed: {clean_name!r}: {exc}"
+                            )
+                            name_to_id[normalize_title(clean_name)] = target_id
+                            kind_by_id[target_id] = kind
+                            continue
+                        object_cache[target_id] = fresh
+                        index_cache.setdefault(target_id, _relation_ids(fresh, _rel_key(kind)))
+                    cached = object_cache[target_id]
+                    stored = _existing_text(cached, text_key)
+                    stored_sources = _relation_ids(cached, "wiki_sources")
+                    known_ids = frozenset([*stored_sources, *([source_id] if source_id else [])])
+                    base = canonical_facts(stored, known_ids)
+                    merge = append_source_section(base, section_label, source_id, facts)
+                    candidate_text = canonical_facts(merge.text, known_ids)
+                    if merge.changed and not no_lines_dropped(
+                        base, candidate_text,
+                        label=section_label, source_id=source_id,
+                        allowed_new_keys=frozenset(fact_key(u) for u in split_fact_units(facts)),
+                    ):
+                        status = "partial"
+                        result["warnings"].append(f"facts_guard_rejected: {clean_name!r}")
+                        continue
+                    patch_props: list[dict] = []
+                    if merge.changed and candidate_text != stored:
+                        patch_props.append({"key": text_key, "text": candidate_text})
+                    new_sources = union_ids(stored_sources, [source_id] if source_id else [])
+                    if new_sources != stored_sources:
+                        patch_props.append({"key": "wiki_sources", "objects": new_sources})
+                    if domain_tag_prop is not None:
+                        # SET (replace) semantics, as before (#336 OD-C).
+                        if _select_ids(cached, "wiki_domain_tags") != domain_tag_prop["multi_select"]:
+                            patch_props.append(domain_tag_prop)
+                    obj_id = target_id
+                    if patch_props:
+                        # Properties-only PATCH — NEVER a body/markdown key (AC-L1).
+                        with profile.span("write_update", name=clean_name):
+                            updated = client.update_object(
+                                space_id, target_id, {"properties": patch_props}
+                            )
+                        obj_id = updated.get("id", target_id)
+                        for entry in patch_props:
+                            _set_object_prop(cached, entry)
                     result["objects_updated"].append(
                         {"title": clean_name, "type": type_label, "object_id": obj_id}
                     )
@@ -1367,7 +1400,7 @@ def _run_ingest(
                         try:
                             with profile.span("contradiction_peers", name=clean_name):
                                 peer_candidates = _contradiction_candidates(
-                                    obj_id, target, space_id, read_client, kind
+                                    obj_id, cached, space_id, read_client, kind
                                 )
                         except Exception:  # noqa: BLE001 — detection MUST NOT block ingest
                             result["warnings"].append(_degraded_warning(kind))
@@ -1376,13 +1409,24 @@ def _run_ingest(
                                 "check_id": f"check_{len(contradiction_checks) + 1}",
                                 "obj_id": obj_id,
                                 "name": clean_name,
-                                "target": target,
+                                "target": cached,
                                 "kind": kind,
                                 "new_facts": facts,
                                 "candidates": peer_candidates,
                             })
                 else:
-                    # Create with EMPTY body (properties only — AC-P7/AC-L1).
+                    # Create with EMPTY body (properties only — AC-P7/AC-L1): one
+                    # section for this source, owned by its Source id.
+                    known_ids = frozenset([source_id] if source_id else [])
+                    created_text = canonical_facts(
+                        append_source_section("", section_label, source_id, facts).text,
+                        known_ids,
+                    )
+                    props = [{"key": text_key, "text": created_text}]
+                    if source_id:
+                        props.append({"key": "wiki_sources", "objects": [source_id]})
+                    if domain_tag_prop is not None:
+                        props.append(domain_tag_prop)
                     with profile.span("write_create", name=clean_name):
                         created = client.create_object(
                             space_id, type_key=type_key, name=clean_name,
@@ -1394,6 +1438,8 @@ def _run_ingest(
                     )
                     name_to_id[normalize_title(clean_name)] = obj_id
                     kind_by_id[obj_id] = kind
+                    object_cache[obj_id] = {"id": obj_id, "properties": list(props)}
+                    index_cache[obj_id] = []
             except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
                 status = "partial"
                 result["warnings"].append(f"object_failed: {clean_name!r}: {exc}")
@@ -1408,16 +1454,23 @@ def _run_ingest(
             status = c_status
         contradiction_rollback_notes.extend(c_notes)
 
-        # 11. bidirectional relations (AC#13).
-        relations = _derive_relations(candidates, name_to_id)
-        with profile.span("relations", pairs=len(relations)):
-            rel_created, rollback_notes = _write_bidirectional_relations(
-                client, space_id, relations, kind_by_id
+        # 11. typed, sourced links from the page's stated relations (AC#13).
+        for alias, canonical in name_aliases.items():
+            if alias not in name_to_id and canonical in name_to_id:
+                name_to_id[alias] = name_to_id[canonical]
+        specs, relation_warnings = relation_specs(extracted, name_to_id)
+        result["warnings"].extend(relation_warnings)
+        with profile.span("relations", pairs=len(specs)):
+            link_result = write_links(
+                client, read_client, space_id, specs,
+                source_id=source_id, kind_by_id=kind_by_id, index_cache=index_cache,
             )
-        result["relations_created"] = rel_created
-        if rollback_notes:
+        rollback_notes = link_result.notes
+        result["relations_created"] = link_result.created
+        result["relations_sourced"] = link_result.sourced
+        if link_result.failed:
             status = "partial"
-            result["warnings"].extend(rollback_notes)
+        result["warnings"].extend(rollback_notes)
 
         # 12. WikiLog always (AC#3/T4/T5).
         action_tag_id, degraded = _resolve_wiki_action_tag(client, space_id)
@@ -1444,26 +1497,6 @@ def _run_ingest(
     finally:
         read_client.close()
     return result
-
-
-def _derive_relations(
-    candidates: list[dict], name_to_id: dict[str, str]
-) -> list[tuple[str, str, str]]:
-    """Derive A->B relations between consecutive successfully-created candidates.
-
-    Heading-derived: when a source yields >= 2 entities, link them so each new
-    object gets cross-links (spec §cross-link minimum). Only candidates that
-    resolved to a concrete object id participate.
-    """
-    ids = [
-        name_to_id[normalize_title(c["name"])]
-        for c in candidates
-        if normalize_title(c["name"]) in name_to_id
-    ]
-    relations: list[tuple[str, str, str]] = []
-    for i in range(len(ids) - 1):
-        relations.append((ids[i], ids[i + 1], "related"))
-    return relations
 
 
 def _source_summary(extracted: object) -> str | None:

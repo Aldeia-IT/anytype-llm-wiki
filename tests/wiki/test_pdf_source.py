@@ -581,11 +581,13 @@ class TestIngestPdf:
         assert result["status"] == "ok", result
         assert len(calls) == 3, "one extract() per page window (pages 1, 2, 3)"
         assert "pdf_pages_capped: read 3 of 4 pages (WIKI_PDF_MAX_PAGES)" in result["warnings"]
-        assert _facts_of(fake, "Mestre Bimba") == "Named in window 1. [p. 1]"
-        assert _facts_of(fake, "Mestre Pastinha") == (
+        (source,) = fake.created_of("wiki_source")
+        # Aldeia-IT/aldeia-box#1486: facts are one section per source; the page tags stay.
+        heading = f"## Source: {PDF_URL} (id:{result['source_object_id']})\n"
+        assert _facts_of(fake, "Mestre Bimba") == heading + "Named in window 1. [p. 1]"
+        assert _facts_of(fake, "Mestre Pastinha") == heading + (
             "Named in window 2. [p. 2]\nNamed in window 3. [p. 3]"
         )
-        (source,) = fake.created_of("wiki_source")
         excerpt = next(p["text"] for p in source["properties"] if p["key"] == "wiki_excerpt")
         assert excerpt.startswith("[p. 1]")
 

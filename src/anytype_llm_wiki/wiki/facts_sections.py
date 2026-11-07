@@ -137,28 +137,36 @@ def _sanitize_new_text(text: str) -> str:
 
 def _unit_spans(line: str) -> list[tuple[int, int]]:
     """``(start, end)`` of each unit of one line; tags and page locators stay with their unit."""
-    pieces: list[list[int]] = []
+    pieces: list[tuple[int, int]] = []
     start = 0
     for match in _SENTENCE_BREAK_RE.finditer(line):
-        pieces.append([start, match.start()])
+        # A full stop inside a bracket ("[p. 12]", "[also: a. B]") is not a sentence end.
+        if line.rfind("[", 0, match.start()) > line.rfind("]", 0, match.start()):
+            continue
+        pieces.append((start, match.start()))
         start = match.end()
-    pieces.append([start, len(line)])
+    pieces.append((start, len(line)))
     spans: list[list[int]] = []
-    for piece in pieces:
-        tokens = _TOKENS_RE.match(line, piece[0]) if spans else None
+    for first, last in pieces:
+        first = max(first, spans[-1][1] if spans else 0)
+        while first < last and line[first].isspace():
+            first += 1
+        if first >= last:
+            continue
+        tokens = _TOKENS_RE.match(line, first) if spans else None
         if tokens is None:
-            spans.append(piece)
+            spans.append([first, last])
             continue
         spans[-1][1] = tokens.end()
         rest = tokens.end()
-        while rest < piece[1] and line[rest].isspace():
+        while rest < last and line[rest].isspace():
             rest += 1
-        if rest >= piece[1]:
+        if rest >= last:
             continue
         if _SENTENCE_START_RE.match(line, rest):
-            spans.append([rest, piece[1]])
+            spans.append([rest, last])
         else:
-            spans[-1][1] = piece[1]
+            spans[-1][1] = last
     return [(a, b) for a, b in spans if line[a:b].strip()]
 
 

@@ -16,7 +16,7 @@ The genuinely new surface vs. ingest is the LLM-assisted consolidation step
 Module-level seam imports: the symbols below are imported at module scope and
 called by their bare names so tests can monkeypatch
 ``anytype_llm_wiki.wiki.remember.<name>`` (extract, consolidate, space_ingest_lock,
-check_remote_endpoint_consent, _write_bidirectional_relations, _maybe_reindex).
+check_remote_endpoint_consent, write_links, _maybe_reindex).
 """
 
 import os
@@ -37,16 +37,17 @@ from .extraction import (
     sanitize_name,
     sanitize_property_value,
 )
+from ..anytype_client import AnytypeReadClient
 from .ingest import (
     _cmp_versions,
     _domain_taxonomy,
     _resolve_multi_select_tags,
     _resolve_select_tag,
     _resolve_wiki_action_tag,
-    _write_bidirectional_relations,
     _write_wikilog,
     resolve_entity,
 )
+from .links import LinkSpec, normalize_label, write_links
 from .ingest import _maybe_reindex as _ingest_maybe_reindex
 from .util import (
     _existing_text,
@@ -790,14 +791,14 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
 
     # relations (SF5 type-safe; G1 per-object counts).
     if relations:
-        rel_tuples: list[tuple[str, str, str]] = []
+        rel_tuples: list[LinkSpec] = []
         endpoint_objs: list[str] = []
         for rel in relations:
             if not isinstance(rel, dict):
                 continue
             from_name = strip(rel.get("from", ""))
             to_name = strip(rel.get("to", ""))
-            label = rel.get("label", "related")
+            label = normalize_label(rel.get("label", "related"))
             from_id = name_to_id.get(normalize_title(from_name))
             to_id = name_to_id.get(normalize_title(to_name))
             if from_id is None:
@@ -811,7 +812,7 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                     strip_titles=strip_titles,
                 )
             if from_id and to_id:
-                rel_tuples.append((from_id, to_id, label))
+                rel_tuples.append(LinkSpec(from_id, to_id, label))
                 endpoint_objs.extend([from_id, to_id])
             else:
                 for endpoint_name in (to_name, from_name):
@@ -819,11 +820,18 @@ def _apply_batch(client, space_id, items, meta, result) -> None:
                         result["warnings"].append(
                             f"relation_endpoint_unresolved: {endpoint_name}"
                         )
-        rel_total, rollback_notes = _write_bidirectional_relations(
-            client, space_id, rel_tuples, kind_by_id
-        )
-        if rollback_notes:
-            result["warnings"].extend(rollback_notes)
+        index_reader = AnytypeReadClient()
+        try:
+            link_result = write_links(
+                client, index_reader, space_id, rel_tuples,
+                source_id=_ensure_source() if rel_tuples else None, kind_by_id=kind_by_id,
+            )
+        finally:
+            index_reader.close()
+        rel_total = link_result.created
+        if link_result.notes:
+            result["warnings"].extend(link_result.notes)
+        if link_result.failed:
             result["status"] = "partial"
         for obj in result["objects"]:
             oid = obj.get("object_id")
@@ -865,7 +873,7 @@ def _resolve_existing_endpoint(
     """Resolve a relation-endpoint name to an EXISTING object id (entity or
     concept) for cross-batch / resume relations whose endpoint was written by a
     prior run. Returns the id or None; caches a hit into name_to_id/kind_by_id so
-    the unresolved-warning check and _write_bidirectional_relations see it.
+    the unresolved-warning check and write_links see it.
 
     ``strip_titles`` (the space is in WIKI_STRIP_NAME_TITLES_SPACES,
     Aldeia-IT/aldeia-box#1430): the name loses its leading title word and the
