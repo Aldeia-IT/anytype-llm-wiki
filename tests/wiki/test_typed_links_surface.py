@@ -120,6 +120,8 @@ class TestLinkType:
             body = json.loads(request.content or b"{}")
             if path.endswith("/types"):
                 created_types.append(body.get("key", ""))
+                # A new type carries its properties inline (bootstrap's missing-type loop).
+                created_props.extend(prop.get("key", "") for prop in body.get("properties", []))
                 return httpx.Response(201, json={"type": {"id": "t", "key": body.get("key")}})
             if path.endswith("/properties"):
                 created_props.append(body.get("key", ""))

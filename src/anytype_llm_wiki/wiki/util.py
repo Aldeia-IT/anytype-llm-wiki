@@ -277,6 +277,18 @@ def _parse_relation_elements(elements) -> list[str]:
     return out
 
 
+# Relation property keys are real objects-format properties on the wiki types
+# (types_schema.WIKI_TYPES): Entity uses ``wiki_relations``; Concept uses
+# ``wiki_related``. They hold the untyped index of related objects; the typed,
+# sourced edge is a ``wiki_link`` object (``wiki/links.py``).
+_REL_KEY_BY_KIND = {"entity": "wiki_relations", "concept": "wiki_related"}
+
+
+def _rel_key(kind: str) -> str:
+    """The relation index property key for an object kind (entity/concept)."""
+    return _REL_KEY_BY_KIND.get(kind, "wiki_relations")
+
+
 def _relation_ids(obj: dict, prop_key: str) -> list[str]:
     """Read an objects-format relation property as a list of id strings (LD5).
 

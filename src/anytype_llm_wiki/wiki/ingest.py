@@ -44,6 +44,7 @@ from .fetch import fetch_source
 from .pdf import extract_pdf_source
 from .util import (
     _existing_text,
+    _rel_key,
     _relation_ids,
     normalize_title,
     plan_primary_subject,
@@ -463,21 +464,11 @@ def _write_wikilog(
 # ---------------------------------------------------------------------------
 
 
-# Relation property keys are real objects-format properties on the wiki types
-# (types_schema.WIKI_TYPES): Entity uses ``wiki_relations``; Concept uses
-# ``wiki_related``. There is NO ``wiki_relation`` object type — relations are
-# bidirectional property links set on BOTH objects (master spec §ingest step 6).
-_REL_KEY_BY_KIND = {"entity": "wiki_relations", "concept": "wiki_related"}
-
 # Comparable-text property key keyed by a peer's OWN type key (used by
 # ``_facts_key_for_peer``, which reads each peer's type off ``get_object``). Same
 # concept→wiki_definition / else→wiki_facts rule as ``remember.py:_type_for_kind``
 # but keyed by type-key (SF-5) — MUST stay in sync with remember.py:_type_for_kind.
 _TEXT_KEY_BY_TYPE_KEY = {"wiki_concept": "wiki_definition", "wiki_entity": "wiki_facts"}
-
-
-def _rel_key(kind: str) -> str:
-    return _REL_KEY_BY_KIND.get(kind, "wiki_relations")
 
 
 def _patch_relation(

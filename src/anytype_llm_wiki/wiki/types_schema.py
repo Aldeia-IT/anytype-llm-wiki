@@ -23,9 +23,10 @@ API-contract notes (verified against the Anytype local API, version
 
 # Semver x.y.z. v0.3.0 ships the wiki_ingest compile pipeline; v0.3.1 adds the
 # wiki_remember agent-memory write path plus wiki_status / wiki_source_type tag
-# seeding; v0.4.3 adds wiki_summary to wiki_source (Aldeia-IT/aldeia-box#1485).
+# seeding; v0.4.3 adds wiki_summary to wiki_source (Aldeia-IT/aldeia-box#1485);
+# v0.5.0 adds the wiki_link type (Aldeia-IT/aldeia-box#1486).
 # MUST be > "0.1.0".
-WIKI_SCHEMA_VERSION = "0.4.3"
+WIKI_SCHEMA_VERSION = "0.5.0"
 
 # The Anytype-managed property set. These system properties are auto-re-added by
 # Anytype when omitted from an update-type payload, so the bootstrap reconcile
@@ -160,21 +161,20 @@ WIKI_TYPES = [
             {"property_key": "wiki_schema_version", "name": "Wiki Schema Version", "format": "text"},
         ],
     },
+    {
+        "type_key": "wiki_link",
+        "name": "Link",
+        "plural_name": "Links",
+        "layout": "basic",
+        "properties": [
+            {"property_key": "wiki_link_from", "name": "Wiki Link From", "format": "objects"},
+            {"property_key": "wiki_link_to", "name": "Wiki Link To", "format": "objects"},
+            {"property_key": "wiki_link_label", "name": "Wiki Link Label", "format": "text"},
+            {"property_key": "wiki_link_sources", "name": "Wiki Link Sources", "format": "objects"},
+        ],
+    },
 ]
 
 
-# Aldeia-IT/aldeia-box#1486 STUB: the ``wiki_link`` type. The implementation moves this
-# entry into ``WIKI_TYPES`` and bumps ``WIKI_SCHEMA_VERSION`` to "0.5.0"; until then
-# bootstrap does not see it, so behaviour is unchanged.
-WIKI_LINK_TYPE = {
-    "type_key": "wiki_link",
-    "name": "Link",
-    "plural_name": "Links",
-    "layout": "basic",
-    "properties": [
-        {"property_key": "wiki_link_from", "name": "Wiki Link From", "format": "objects"},
-        {"property_key": "wiki_link_to", "name": "Wiki Link To", "format": "objects"},
-        {"property_key": "wiki_link_label", "name": "Wiki Link Label", "format": "text"},
-        {"property_key": "wiki_link_sources", "name": "Wiki Link Sources", "format": "objects"},
-    ],
-}
+# The Link type, for callers that need it by name (it is the last entry of ``WIKI_TYPES``).
+WIKI_LINK_TYPE = WIKI_TYPES[-1]
