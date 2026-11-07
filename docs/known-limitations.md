@@ -272,6 +272,9 @@ missing object. Nothing worse happens. `wiki_lint` surfaces both forms: `link_da
 licence or copyright notice or a bare domain: on fetched pages such names are page furniture
 (Aldeia-IT/aldeia-box#1508). The rule sees the name alone, so a real entity with such a name, a
 group or an event literally called "1968", or a company known by its domain, is dropped too, with
-the warning `name_policy_rejected: page_furniture: <name>`. The hinted primary subject is exempt:
+the warning `name_policy_rejected: page_furniture: <name>`. A Creative Commons licence named by its
+code or spelled out with its version (`CC BY-SA 4.0`, `Creative Commons Attribution 4.0`) counts
+as a notice, so such a licence is not kept as a concept either; the organisation `Creative Commons`
+is. The hinted primary subject is exempt:
 ingest the page with `subject_hint` set to that name, or record it with `wiki_remember`, which does
 not apply the rule.
