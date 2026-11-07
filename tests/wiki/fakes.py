@@ -60,7 +60,8 @@ class FakeWiki:
     ``/objects`` list return the stored objects (default: the schema collection, which the
     ingest tests rely on). ``search_with_properties`` makes a search hit carry the stored properties (the production
     search does); the default keeps the property-less hits the ingest tests were written
-    against. ``read_only`` answers every create and PATCH with 403 and records
+    against. ``search_aliases`` maps a normalised query to the normalised stored name it
+    should find (a search that is fuzzier than exact). ``read_only`` answers every create and PATCH with 403 and records
     it in ``blocked`` instead of storing it.
     """
 
@@ -72,6 +73,7 @@ class FakeWiki:
         read_only: bool = False,
         serve_objects: bool = False,
         search_with_properties: bool = False,
+        search_aliases: dict[str, str] | None = None,
     ):
         self.store: dict = {}
         self.objects: dict[str, dict] = {}
@@ -85,6 +87,7 @@ class FakeWiki:
         self.read_only = read_only
         self.serve_objects = serve_objects
         self.search_with_properties = search_with_properties
+        self.search_aliases = {k: v for k, v in (search_aliases or {}).items()}
         self.n = 0
         self._failures: list[dict] = []
 
@@ -210,6 +213,7 @@ class FakeWiki:
         self.requests.append(("POST", request.url.path))
         if "/search" in url:
             q = normalize_title(payload.get("query", ""))
+            q = self.search_aliases.get(q, q)
             data = [
                 {
                     "id": o["id"],

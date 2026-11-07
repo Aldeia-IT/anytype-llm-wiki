@@ -253,9 +253,10 @@ class TestQueryLinkNotes:
         assert len(neighbour["links"]) == 1, neighbour["links"]
         link = neighbour["links"][0]
         assert link["label"] == "student of"
-        assert A in link["from"] or "Mestre Bimba" in link["from"]
-        assert B in link["to"] or "Mestre Pastinha" in link["to"]
-        assert any("Page one" in str(s) or SRC1 in str(s) for s in link["sources"])
+        # D17: `links[]` entries carry ids only (object ids, Source ids).
+        assert link["from"] == A
+        assert link["to"] == B
+        assert link["sources"] == [SRC1]
 
     @respx.mock
     def test_prompt_prints_the_note_before_the_neighbours_text(self, monkeypatch):
