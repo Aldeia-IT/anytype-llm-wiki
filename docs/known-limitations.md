@@ -247,3 +247,12 @@ all genuine relations untouched (a clean space reports `edges_pruned: 0`). See
 
 **Status:** new file-back is clean; existing spaces need the one-time prune
 (detected by lint until run).
+
+## 13. Pre-0.5.0 chain relations and legacy facts
+
+Before schema 0.5.0 ingest chained a page's entities into one another's
+`wiki_relations`/`wiki_related`, with no label or source. Those ids are not links. Clear them with
+`repair-chain-relations` (ingest-only spaces; a `mixed` or `unknown` space is not repaired; see
+[MIGRATIONS](../MIGRATIONS.md)). Facts stored before the upgrade are one legacy, unattributed
+section until the Sources are re-ingested (Aldeia-IT/aldeia-box#1496). The tool keeps per-source sections and
+does not write a merged current summary (Aldeia-IT/aldeia-box#1493).

@@ -53,7 +53,7 @@ same backbone:
    `wiki_facts`/`wiki_definition` (§4 below). On a create, the object is created
    with properties only.
 4. **Relations** — named `{from, to, label}` links are written **bidirectionally**
-   between resolved subjects (`wiki_relations`/`wiki_related`).
+   between resolved subjects: a typed `wiki_link` object (free label, Source) per relation, plus the `wiki_relations`/`wiki_related` 1-hop index.
 5. **WikiLog** — one audit receipt per run, carrying the action and notes
    (supersede/conflict details).
 6. **Reindex** — the new/updated objects are embedded into Qdrant
@@ -66,8 +66,9 @@ writes: `wiki_remember` (incl. `/wiki-learn`), `wiki_ingest`, or a human editing
 in Anytype. The consolidation prompt (`wiki/prompts/consolidate.md`) classifies
 each incoming fact as `merge | add | supersede | keep | conflict`:
 
-- **supersede** → the old fact is replaced in the consolidated text (audited in
-  the WikiLog).
+- **supersede** → the old fact line is kept and tagged `[superseded: <new
+  source>]`; the new value sits in the writer's own `## Source:` section (the
+  superseded line is never deleted).
 - **conflict** → **both** facts are kept, the new one is inline-tagged
   `[CONFLICT: reason]`, and `wiki_status` flips to **`needs-review`**. Nothing is
   silently overwritten. `wiki_ingest` additionally writes `wiki_contradictions`
@@ -79,7 +80,7 @@ resolves them. **Important nuance:** whether a correction lands as *supersede*
 Phrasing nudges it — "X replaced Y / Y is no longer true" leans supersede; "X,
 but actually Y" leans conflict. So narrating a correction does not always reach
 clean truth on its own; you may then need to review the flagged object and edit
-out the stale clause. Re-asserting the *same* knowledge converges to a no-op.
+out the stale clause. Re-asserting the *same* knowledge adds nothing to the facts.
 
 ## 5. Entity resolution & duplicate handling
 

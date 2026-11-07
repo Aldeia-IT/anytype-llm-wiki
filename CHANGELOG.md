@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-06
+
+Typed, sourced links and facts per source (Aldeia-IT/aldeia-box#1486). Schema 0.5.0: run
+`wiki_bootstrap` on every space before using any wiki tool, and read the "Schema 0.5.0" section of
+MIGRATIONS.md first.
+
+### Added
+
+- **Typed links.** A new `wiki_link` object type (`wiki_link_from`, `wiki_link_to`, `wiki_link_label`,
+  `wiki_link_sources`) stores each relation between two entities or concepts with a free label taken
+  from the page (lowercased, trimmed) and the Source it came from. `wiki_ingest` and
+  `wiki_remember` results carry `relations_created` (links created) and `relations_sourced` (an
+  existing link that gained a Source). The untyped `wiki_relations`/`wiki_related` lists remain the
+  1-hop index.
+- **Facts per source.** `wiki_facts`/`wiki_definition` hold one `## Source: <label>` section per
+  source. A new source adds its section and never overwrites; duplicates are tagged `[also: <label>]`;
+  contradictions with earlier sections are flagged and both versions kept. A deterministic guard
+  rejects any rewrite that drops an earlier line. `wiki_sources` accumulates.
+- **Query link notes and synthesis rule.** `wiki_query` neighbour entries in `sources_consulted` gain
+  `links` (`label`, `from`, `to`, `sources`, all ids), and the synthesis prompt prints each link with
+  its Source titles before the neighbour's text. A synthesis rule explains the section headings and
+  the `[superseded]`, `[CONFLICT]` and `[also]` markers.
+- **Lint.** `link_dangling` (high) and `link_index_missing` (medium); `wiki_lint` now runs twelve checks.
+- **`repair-chain-relations` CLI.** Clears the meaningless chain relations earlier ingests wrote, only
+  in a space proven ingest-only, behind a read-only dry run, a plan digest and a backup file. See
+  MIGRATIONS.md.
+
+### Changed
+
+- **`wiki_remember` supersede keeps the old fact line**, tagged `[superseded: <new source>]`, instead of
+  replacing it. Re-asserting the same knowledge adds nothing to the facts but records a new Source.
+  `wiki_remember` still links a hint to its secondary subjects with a `related` link.
+- Ingest no longer chains the entities of a page into one another.
+
+### Follow-ups
+
+- Per-entity current summary: Aldeia-IT/aldeia-box#1493. Re-ingest of repaired spaces:
+  Aldeia-IT/aldeia-box#1496. Per-unit consolidate verdicts: Aldeia-IT/aldeia-box#1497.
+
 ## [0.9.1] - 2026-11-06
 
 Faster `wiki_ingest` (Aldeia-IT/aldeia-box#1485). The model's decode time and the number of calls
