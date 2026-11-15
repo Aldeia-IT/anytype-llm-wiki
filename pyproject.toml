@@ -40,7 +40,7 @@ dependencies = [
     # BSD-3-Clause, pure Python, no runtime dependencies on Python >= 3.11. Its
     # optional extras (crypto, image) are not installed: no OCR, AES-encrypted PDFs
     # are refused.
-    "pypdf>=6.21.4,<7.0.0",
+    "pypdf>=6.21.4,<8.0.0",
 ]
 
 [project.urls]
